@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Camio</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#0b0f14; --line:#262d36;
+    --fg:#d9dee5; --muted:#8b949e; --accent:#58a6ff; --accent2:#1f6feb;
+    --ok:#3fb950; --warn:#d29922; --bad:#f85149; --chip:#21262d;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+       background:var(--bg);color:var(--fg)}
+  code,pre,.mono{font-family:"SFMono-Regular",ui-monospace,Menlo,Consolas,monospace}
+  header{display:flex;align-items:center;gap:14px;padding:10px 16px;border-bottom:1px solid var(--line);
+         background:var(--panel);position:sticky;top:0;z-index:5}
+  header .brand{font-weight:700;letter-spacing:.5px;font-size:16px}
+  header .brand span{color:var(--accent)}
+  header .status{display:flex;gap:10px;align-items:center;flex-wrap:wrap;color:var(--muted);font-size:12px}
+  .badge{padding:2px 8px;border-radius:999px;background:var(--chip);border:1px solid var(--line);font-size:12px}
+  .badge.ok{color:var(--ok);border-color:#1c3b24}
+  .badge.bad{color:var(--bad);border-color:#48232160}
+  .wrap{display:flex;min-height:calc(100vh - 49px)}
+  nav{width:186px;flex:0 0 186px;border-right:1px solid var(--line);background:var(--panel2);padding:8px}
+  nav button{display:block;width:100%;text-align:left;background:none;border:0;color:var(--muted);
+             padding:7px 10px;border-radius:6px;cursor:pointer;font-size:13px}
+  nav button:hover{background:var(--chip);color:var(--fg)}
+  nav button.active{background:var(--accent2);color:#fff}
+  nav .group{color:#586069;font-size:10px;text-transform:uppercase;letter-spacing:.8px;padding:12px 10px 4px}
+  main{flex:1;padding:18px 20px;min-width:0}
+  section{display:none}
+  section.active{display:block}
+  h2{margin:0 0 4px;font-size:18px}
+  .hint{color:var(--muted);font-size:12px;margin:0 0 14px}
+  label{display:block;font-size:12px;color:var(--muted);margin:10px 0 3px}
+  input,select,textarea{width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--fg);
+         border-radius:6px;padding:8px 10px;font-size:13px}
+  textarea{min-height:70px;resize:vertical}
+  .row{display:flex;gap:10px;flex-wrap:wrap}
+  .row>div{flex:1;min-width:120px}
+  .inline{display:flex;gap:8px;align-items:center}
+  button.go{background:var(--accent2);color:#fff;border:0;border-radius:6px;padding:9px 16px;cursor:pointer;
+            font-size:13px;margin-top:12px}
+  button.go:hover{background:var(--accent)}
+  button.ghost{background:var(--chip);color:var(--fg);border:1px solid var(--line)}
+  .chk{display:inline-flex;gap:6px;align-items:center;margin-top:12px;color:var(--muted);font-size:13px}
+  .chk input{width:auto}
+  .out{margin-top:16px}
+  pre.out{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:12px;overflow:auto;
+          white-space:pre-wrap;word-break:break-word;max-height:60vh;font-size:12.5px}
+  table{width:100%;border-collapse:collapse;margin-top:14px;font-size:12.5px}
+  th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--muted);font-weight:600;position:sticky;top:0;background:var(--panel)}
+  td.mono{word-break:break-all}
+  .sev-critical{color:#ff7b72;font-weight:700}.sev-high{color:var(--bad)}.sev-medium{color:var(--warn)}
+  .sev-low{color:#6cb6ff}.sev-info{color:var(--muted)}
+  .pill{display:inline-block;padding:1px 7px;border-radius:999px;background:var(--chip);font-size:11px;margin:1px}
+  .err{color:var(--bad);margin-top:12px;white-space:pre-wrap}
+  .tablewrap{max-height:62vh;overflow:auto;border:1px solid var(--line);border-radius:8px}
+  .disclaimer{color:#586069;font-size:11px;margin-top:18px;border-top:1px solid var(--line);padding-top:10px}
+  a{color:var(--accent)}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">CAM<span>IO</span></div>
+  <div class="status" id="status">connecting…</div>
+</header>
+<div class="wrap">
+  <nav id="nav"></nav>
+  <main id="main"></main>
+</div>
+<script>
+const NAV = [
+  {group:"Overview"},
+  {id:"status", name:"Status"},
+  {group:"Capture"},
+  {id:"history", name:"History"},
+  {id:"query", name:"Query (CamioQL)"},
+  {id:"sitemap", name:"Site map"},
+  {group:"Test"},
+  {id:"replay", name:"Replay / Send"},
+  {id:"discover", name:"Discover inputs"},
+  {id:"fuzz", name:"Automate / Fuzz"},
+  {id:"scan", name:"Scanner"},
+  {id:"findings", name:"Findings"},
+  {group:"Tools"},
+  {id:"convert", name:"Convert"},
+  {id:"jwt", name:"JWT decode"},
+  {id:"sequencer", name:"Sequencer"},
+  {id:"scope", name:"Scope check"},
+  {id:"payloads", name:"Payloads"},
+  {id:"import", name:"Import"},
+];
+
+async function api(path, body){
+  const r = await fetch(path, {method:"POST", headers:{"Content-Type":"application/json"},
+                               body: JSON.stringify(body||{})});
+  const j = await r.json();
+  if(!r.ok || j.error) throw new Error(j.error || ("HTTP "+r.status));
+  return j;
+}
+function esc(s){return String(s==null?"":s).replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));}
+function sevClass(s){return "sev-"+String(s||"info").toLowerCase();}
+function out(id, html){document.getElementById(id).innerHTML = html;}
+function err(id, e){out(id, '<div class="err">'+esc(e.message||e)+'</div>');}
+function exTable(rows){
+  if(!rows.length) return '<p class="hint">No exchanges.</p>';
+  let h='<div class="tablewrap"><table><tr><th>ID</th><th>Method</th><th>Code</th><th>Src</th><th>URL</th></tr>';
+  for(const x of rows){
+    h+='<tr><td>'+esc(x.id)+'</td><td>'+esc(x.method)+'</td><td>'+esc(x.status??"-")+'</td>'
+      +'<td>'+esc(x.source)+'</td><td class="mono">'+esc(x.url)+'</td></tr>';
+  }
+  return h+'</table></div>';
+}
+function findingsTable(fs){
+  if(!fs.length) return '<p class="hint">No findings.</p>';
+  let h='<div class="tablewrap"><table><tr><th>Severity</th><th>Confidence</th><th>Evidence</th><th>Title</th></tr>';
+  for(const f of fs){
+    h+='<tr><td class="'+sevClass(f.severity)+'">'+esc(f.severity)+'</td><td>'+esc(f.confidence)+'</td>'
+      +'<td>'+(f.evidence?f.evidence.length:0)+'</td><td>'+esc(f.title)+'</td></tr>';
+  }
+  return h+'</table></div>';
+}
+
+// ---- Surfaces -------------------------------------------------------------
+const S = {};
+S.status = {html:`<h2>Status</h2><p class="hint">The active fingerprint profile and matched engine. Parity is measured, not asserted.</p><pre class="out" id="o_status">loading…</pre>`,
+  init(){ loadMeta(true); }};
+
+S.history = {html:`<h2>History</h2><p class="hint">Recent captured exchanges from the store.</p>
+  <div class="row"><div><label>Limit</label><input id="h_limit" type="number" value="100"></div></div>
+  <button class="go" onclick="S.history.run()">Load</button><div class="out" id="o_history"></div>`,
+  async run(){ try{const j=await api("/api/history",{limit:+v("h_limit")}); out("o_history",'<p class="hint">'+j.count+' exchange(s)</p>'+exTable(j.exchanges)); }catch(e){err("o_history",e);} }};
+
+S.query = {html:`<h2>Query — CamioQL</h2><p class="hint">HTTPQL-compatible. e.g. <code>resp.code.gte:500 AND req.host.cont:"example"</code></p>
+  <label>Query</label><input id="q_q" placeholder='resp.code.gte:400'>
+  <div class="row"><div><label>Limit</label><input id="q_limit" type="number" value="200"></div></div>
+  <button class="go" onclick="S.query.run()">Run</button><div class="out" id="o_query"></div>`,
+  async run(){ try{const j=await api("/api/query",{query:v("q_q"),limit:+v("q_limit")}); out("o_query",'<p class="hint">'+j.count+' match(es)</p>'+exTable(j.exchanges)); }catch(e){err("o_query",e);} }};
+
+S.sitemap = {html:`<h2>Site map</h2><p class="hint">Origin → path tree built from history.</p>
+  <label>Filter (CamioQL, optional)</label><input id="sm_q" placeholder="(all)">
+  <button class="go" onclick="S.sitemap.run()">Build</button><pre class="out" id="o_sitemap"></pre>`,
+  async run(){ try{const j=await api("/api/sitemap",{query:v("sm_q")}); out("o_sitemap",esc(j.tree||"(empty)")+"\n— "+j.origin_count+" origin(s), "+j.url_count+" URL(s)"); }catch(e){err("o_sitemap",e);} }};
+
+S.replay = {html:`<h2>Replay / Send</h2><p class="hint">Send through the fingerprint-matched engine. Policy-gated: in-scope + confirm to send.</p>
+  <div class="row"><div style="flex:0 0 110px"><label>Method</label><input id="r_m" value="GET"></div>
+  <div style="flex:4"><label>URL</label><input id="r_url" placeholder="https://example.org/"></div></div>
+  <label>Headers (one per line, Name: Value)</label><textarea id="r_h"></textarea>
+  <label>Body</label><textarea id="r_b"></textarea>
+  <label class="chk"><input type="checkbox" id="r_c"> confirm (actually send)</label>
+  <button class="go" onclick="S.replay.run()">Send</button><div class="out" id="o_replay"></div>`,
+  async run(){ try{const j=await api("/api/send",{url:v("r_url"),method:v("r_m"),headers:v("r_h"),body:v("r_b"),confirm:ck("r_c")});
+    if(j.status==="confirmation_required"){ out("o_replay",'<div class="err">'+esc(j.reason)+'</div><pre class="out">'+esc(JSON.stringify(j.preview,null,2))+'</pre>'); return; }
+    let h='<p class="hint">'+esc(j.method)+' '+esc(j.url)+' → '+esc(j.status)+' ('+esc(j.resp_len)+' bytes, '+esc(j.roundtrip_ms)+' ms, stored #'+esc(j.stored_id)+')</p>';
+    if(j.response_headers&&j.response_headers.length){ h+='<pre class="out">'+j.response_headers.map(x=>esc(x[0]+": "+x[1])).join("\n")+'</pre>'; }
+    h+='<pre class="out">'+esc(j.response_body||"")+'</pre>'; out("o_replay",h);
+  }catch(e){err("o_replay",e);} }};
+
+S.discover = {html:`<h2>Discover inputs</h2><p class="hint">Enumerate injectable inputs of a request.</p>
+  <div class="row"><div style="flex:0 0 110px"><label>Method</label><input id="d_m" value="GET"></div>
+  <div style="flex:4"><label>URL</label><input id="d_url" placeholder="https://x.test/s?q=1&id=2"></div></div>
+  <label>Headers</label><textarea id="d_h" placeholder="Cookie: sid=abc"></textarea>
+  <label>Body</label><textarea id="d_b"></textarea>
+  <button class="go" onclick="S.discover.run()">Discover</button><div class="out" id="o_discover"></div>`,
+  async run(){ try{const j=await api("/api/discover",{url:v("d_url"),method:v("d_m"),headers:v("d_h"),body:v("d_b")});
+    let h='<p class="hint">'+j.count+' input(s)</p><div class="tablewrap"><table><tr><th>Kind</th><th>Name</th><th>Value</th></tr>';
+    for(const i of j.inputs){ h+='<tr><td>'+esc(i.kind)+'</td><td>'+esc(i.name)+'</td><td class="mono">'+esc(i.value)+'</td></tr>'; }
+    out("o_discover",h+'</table></div>'); }catch(e){err("o_discover",e);} }};
+
+S.fuzz = {html:`<h2>Automate / Fuzz</h2><p class="hint">Mark insertion points with §…§ (e.g. <code>id=§1§</code>). <b>Plan</b> shows the projected count; <b>Run</b> sends (in-scope + confirm).</p>
+  <div class="row"><div style="flex:0 0 110px"><label>Method</label><input id="f_m" value="GET"></div>
+  <div style="flex:4"><label>URL</label><input id="f_url" placeholder="https://example.org/item?id=§1§"></div></div>
+  <label>Headers</label><textarea id="f_h"></textarea><label>Body</label><textarea id="f_b"></textarea>
+  <div class="row">
+    <div><label>Attack</label><select id="f_a"><option>sniper</option><option>battering_ram</option><option>pitchfork</option><option>cluster_bomb</option></select></div>
+    <div><label>Payload packs (comma)</label><input id="f_p" placeholder="sqli,xss"></div>
+    <div><label>Budget</label><input id="f_budget" type="number" value="200"></div>
+  </div>
+  <label class="chk"><input type="checkbox" id="f_c"> confirm (run the active test)</label>
+  <div class="inline"><button class="go" onclick="S.fuzz.plan()">Plan</button>
+  <button class="go ghost" onclick="S.fuzz.run()">Run</button></div><div class="out" id="o_fuzz"></div>`,
+  packs(){ return v("f_p").split(",").map(s=>s.trim()).filter(Boolean); },
+  body(){ return {url:v("f_url"),method:v("f_m"),headers:v("f_h"),body:v("f_b"),attack:v("f_a"),payloads:this.packs(),budget:+v("f_budget")}; },
+  async plan(){ try{const j=await api("/api/fuzz_plan",this.body());
+    out("o_fuzz",'<pre class="out">'+esc(JSON.stringify(j,null,2))+'</pre>'); }catch(e){err("o_fuzz",e);} },
+  async run(){ try{const b=this.body(); b.confirm=ck("f_c"); const j=await api("/api/fuzz_run",b);
+    if(j.status==="confirmation_required"){ out("o_fuzz",'<div class="err">'+esc(j.reason)+'</div><pre class="out">'+esc(JSON.stringify(j.plan,null,2))+'</pre>'); return; }
+    let h='<p class="hint">sent '+j.sent+' request(s)</p><div class="tablewrap"><table><tr><th>Code</th><th>Len</th><th>Flags</th><th>Payload</th></tr>';
+    for(const r of j.results){ h+='<tr><td>'+esc(r.status??"-")+'</td><td>'+esc(r.body_len??"-")+'</td><td>'+(r.flags||[]).map(f=>'<span class="pill">'+esc(f)+'</span>').join("")+'</td><td class="mono">'+esc((r.payloads||[]).join(" | "))+'</td></tr>'; }
+    out("o_fuzz",h+'</table></div>'); }catch(e){err("o_fuzz",e);} }};
+
+S.scan = {html:`<h2>Scanner</h2><p class="hint">Passive checks over stored history. Optionally save findings.</p>
+  <label>Filter (CamioQL, optional)</label><input id="sc_q" placeholder="(all)">
+  <label class="chk"><input type="checkbox" id="sc_save"> save findings</label>
+  <button class="go" onclick="S.scan.run()">Scan</button><div class="out" id="o_scan"></div>`,
+  async run(){ try{const j=await api("/api/scan",{query:v("sc_q"),save:ck("sc_save")});
+    out("o_scan",'<p class="hint">scanned '+j.exchanges_scanned+' exchange(s), '+j.checks_run+' checks → '+j.finding_count+' finding(s)'+(j.saved?', saved '+j.saved:'')+'</p>'+findingsTable(j.findings)); }catch(e){err("o_scan",e);} }};
+
+S.findings = {html:`<h2>Findings</h2><p class="hint">Recorded findings, most severe first.</p>
+  <button class="go" onclick="S.findings.run()">Load</button><div class="out" id="o_findings"></div>`,
+  async run(){ try{const j=await api("/api/findings",{}); out("o_findings",'<p class="hint">'+j.count+' finding(s)</p>'+findingsTable(j.findings)); }catch(e){err("o_findings",e);} }};
+
+S.convert = {html:`<h2>Convert</h2><p class="hint">Pipeline runs left→right. e.g. <code>base64,gzip</code> or <code>base64-decode</code>. <span id="tx_hint"></span></p>
+  <label>Input</label><textarea id="cv_in"></textarea>
+  <label>Steps (comma-separated)</label><input id="cv_steps" placeholder="base64">
+  <button class="go" onclick="S.convert.run()">Apply</button><div class="out" id="o_convert"></div>`,
+  async run(){ try{const j=await api("/api/convert",{input:v("cv_in"),steps:v("cv_steps")});
+    out("o_convert",'<p class="hint">'+j.output_len+' bytes · '+esc(j.steps.join(" → "))+'</p><pre class="out">'+esc(j.output_text)+'</pre><label>hex</label><pre class="out">'+esc(j.output_hex)+'</pre>'); }catch(e){err("o_convert",e);} }};
+
+S.jwt = {html:`<h2>JWT decode</h2><p class="hint">Decodes header + payload. The signature is NOT verified.</p>
+  <label>Token</label><textarea id="jw_t"></textarea>
+  <button class="go" onclick="S.jwt.run()">Decode</button><div class="out" id="o_jwt"></div>`,
+  async run(){ try{const j=await api("/api/jwt",{token:v("jw_t").trim()});
+    out("o_jwt",'<label>header</label><pre class="out">'+esc(j.header)+'</pre><label>payload</label><pre class="out">'+esc(j.payload)+'</pre><p class="hint">signature not verified — claims are untrusted.</p>'); }catch(e){err("o_jwt",e);} }};
+
+S.sequencer = {html:`<h2>Sequencer</h2><p class="hint">Entropy estimate for session tokens (one per line). Statistical estimate, not a proof.</p>
+  <label>Samples</label><textarea id="sq_t" style="min-height:160px"></textarea>
+  <button class="go" onclick="S.sequencer.run()">Analyze</button><pre class="out" id="o_sequencer"></pre>`,
+  async run(){ try{const j=await api("/api/sequencer",{text:v("sq_t")}); out("o_sequencer",esc(JSON.stringify(j,null,2))); }catch(e){err("o_sequencer",e);} }};
+
+S.scope = {html:`<h2>Scope check</h2><p class="hint">The one shared scope path (SSRF guard runs first).</p>
+  <label>URL</label><input id="sp_url" placeholder="http://169.254.169.254/">
+  <button class="go" onclick="S.scope.run()">Check</button><div class="out" id="o_scope"></div>`,
+  async run(){ try{const j=await api("/api/scope",{url:v("sp_url")});
+    const cls = j.decision==="in_scope"?"ok":"bad";
+    out("o_scope",'<p style="margin-top:14px">'+esc(j.url)+' → <span class="badge '+cls+'">'+esc(j.decision)+'</span></p>'); }catch(e){err("o_scope",e);} }};
+
+S.payloads = {html:`<h2>Payloads</h2><p class="hint">Built-in packs — for AUTHORIZED testing only.</p>
+  <button class="go" onclick="S.payloads.run()">Load</button><div class="out" id="o_payloads"></div>`,
+  async run(){ try{const j=await api("/api/payloads",{});
+    let h='';for(const p of j.packs){ h+='<p><b>'+esc(p.name)+'</b> <span class="hint">('+p.size+')</span><br>'+(p.sample||[]).map(s=>'<span class="pill mono">'+esc(s)+'</span>').join(" ")+'</p>'; }
+    out("o_payloads",h); }catch(e){err("o_payloads",e);} }};
+
+S.import = {html:`<h2>Import</h2><p class="hint">Burp items XML or HAR. Paste content or give a local path.</p>
+  <label>Local path (optional)</label><input id="im_path" placeholder="/path/to/capture.har">
+  <label>…or paste content</label><textarea id="im_content" style="min-height:120px"></textarea>
+  <label class="chk"><input type="checkbox" id="im_save" checked> store exchanges</label>
+  <button class="go" onclick="S.import.run()">Import</button><pre class="out" id="o_import"></pre>`,
+  async run(){ try{const body={save:ck("im_save")}; const p=v("im_path").trim(), c=v("im_content");
+    if(p) body.path=p; else if(c.trim()) body.content=c; else throw new Error("give a path or paste content");
+    const j=await api("/api/import",body); out("o_import",esc(JSON.stringify(j,null,2))); }catch(e){err("o_import",e);} }};
+
+// ---- plumbing -------------------------------------------------------------
+function v(id){const e=document.getElementById(id);return e?e.value:"";}
+function ck(id){const e=document.getElementById(id);return e?e.checked:false;}
+function show(id){
+  for(const b of document.querySelectorAll("nav button")) b.classList.toggle("active", b.dataset.id===id);
+  const main=document.getElementById("main"); main.innerHTML="";
+  const sec=document.createElement("section"); sec.className="active"; sec.id="sec_"+id;
+  sec.innerHTML=S[id].html + '<div class="disclaimer">Camio is for authorized testing only. Fingerprint transparency means Camio adds no tool tell — it is not a promise of undetectability.</div>';
+  main.appendChild(sec);
+  if(S[id].init) S[id].init();
+  location.hash=id;
+}
+function buildNav(){
+  const nav=document.getElementById("nav");
+  for(const n of NAV){
+    if(n.group){const g=document.createElement("div");g.className="group";g.textContent=n.group;nav.appendChild(g);continue;}
+    const b=document.createElement("button");b.textContent=n.name;b.dataset.id=n.id;b.onclick=()=>show(n.id);nav.appendChild(b);
+  }
+}
+async function loadMeta(toStatus){
+  try{
+    const r=await fetch("/api/meta"); const m=await r.json();
+    const fpok = m.fingerprint_matched;
+    document.getElementById("status").innerHTML =
+      '<span class="badge">'+esc(m.profile)+'</span>'
+      +'<span class="badge '+(fpok?"ok":"bad")+'">'+(fpok?"fingerprint-matched":"NOT matched")+'</span>'
+      +'<span class="badge">'+esc(m.fingerprint_target)+'</span>'
+      +'<span>'+esc(m.engine)+'</span>'
+      +(m.parity_note?'<span class="badge bad" title="'+esc(m.parity_note)+'">parity note</span>':'');
+    if(toStatus){ out("o_status", esc(JSON.stringify(m,null,2))); }
+    const th=document.getElementById("tx_hint"); if(th) th.textContent = "available: "+(m.transforms||[]).join(", ");
+  }catch(e){ document.getElementById("status").textContent="offline"; }
+}
+buildNav();
+loadMeta(false);
+show((location.hash||"#status").slice(1) in S ? location.hash.slice(1) : "status");
+</script>
+</body>
+</html>

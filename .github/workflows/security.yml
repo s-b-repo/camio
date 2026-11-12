@@ -1,0 +1,40 @@
+name: Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly, so newly published advisories are caught even without a code change.
+    - cron: "17 6 * * 1"
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cargo-deny:
+    name: cargo-deny (advisories · licenses · bans · sources)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # cargo-deny runs `cargo metadata`, which resolves the ENTIRE dependency
+      # graph in Cargo.lock — including the macOS/Windows-only crates that
+      # egui/eframe pull in (accesskit/objc/windows-sys/…) and that a Linux build
+      # never compiles. If those manifests are missing, metadata fails.
+      #
+      # `cargo fetch --locked` downloads the whole locked graph for every target
+      # (verified: it is what makes `cargo metadata --offline` succeed), so the
+      # audit below resolves deterministically regardless of host platform.
+      - name: Fetch full dependency graph (all targets)
+        run: cargo fetch --locked
+
+      - name: cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          # Uses deny.toml at the repo root (advisories, licenses, bans, sources).
+          arguments: --locked --all-features

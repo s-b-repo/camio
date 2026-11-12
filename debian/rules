@@ -1,0 +1,24 @@
+#!/usr/bin/make -f
+# Build Camio's `camio` binary with cargo and install it with the man page and
+# desktop entry. For a network-isolated Debian/Kali build, vendor the crates
+# first (`cargo vendor` + a .cargo/config.toml) or build in an environment with
+# registry access; see docs/KALI_SUBMISSION.md.
+
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+export CARGO_HOME = $(CURDIR)/debian/.cargo
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	cargo build --release --locked --package camio-cli
+
+override_dh_auto_test:
+	cargo test --release --locked --workspace
+
+override_dh_auto_install:
+	install -D -m 0755 target/release/camio debian/camio/usr/bin/camio
+
+override_dh_auto_clean:
+	cargo clean || true
+	rm -rf debian/.cargo

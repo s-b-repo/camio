@@ -11,8 +11,18 @@ name = "camio"
 path = "src/main.rs"
 
 [dependencies]
-camio-core = { path = "../camio-core" }
-camio-engine = { path = "../camio-engine" }
+camio-core.workspace = true
+camio-engine.workspace = true
+camio-request = { workspace = true, features = ["impersonate"] }
+camio-store.workspace = true
+camio-convert.workspace = true
+camio-scan.workspace = true
+camio-automate.workspace = true
+camio-import.workspace = true
+camio-sequencer.workspace = true
+camio-web.workspace = true
+camio-app.workspace = true
+camio-mcp.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
 clap.workspace = true

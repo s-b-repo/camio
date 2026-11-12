@@ -7,6 +7,16 @@ resolver = "2"
 members = [
     "crates/camio-core",
     "crates/camio-engine",
+    "crates/camio-request",
+    "crates/camio-store",
+    "crates/camio-convert",
+    "crates/camio-scan",
+    "crates/camio-automate",
+    "crates/camio-import",
+    "crates/camio-sequencer",
+    "crates/camio-web",
+    "crates/camio-app",
+    "crates/camio-mcp",
     "crates/camio-cli",
 ]
 
@@ -25,7 +35,37 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-zip = "2"
+zip = "9"
+url = "2.5.4"
+base64 = "0.22.1"
+sha2 = "0.10.9"
+regex = "1.11.1"
+# rusqlite 0.42 pulls libsqlite3-sys 0.39+, which bundles patched SQLite
+# (fixes RUSTSEC-2026-0459 / SQLite CVE-2026-119375).
+rusqlite = { version = "0.42", features = ["bundled"] }
+flate2 = "1.0"
+# quick-xml 0.41 fixes the XML-parser DoS advisories RUSTSEC-2026-0194/0195,
+# which matter because camio-import parses untrusted Burp XML.
+quick-xml = "0.41"
+md-5 = "0.10"
+sha1 = "0.10"
+tiny_http = "0.12"
+
+# Internal crates (path deps, versioned together). The explicit `version` keeps
+# them from being treated as wildcard (`*`) dependencies by cargo-deny and is
+# what publishing would require anyway.
+camio-core = { path = "crates/camio-core", version = "0.0.1" }
+camio-engine = { path = "crates/camio-engine", version = "0.0.1" }
+camio-request = { path = "crates/camio-request", version = "0.0.1", default-features = false }
+camio-store = { path = "crates/camio-store", version = "0.0.1" }
+camio-convert = { path = "crates/camio-convert", version = "0.0.1" }
+camio-scan = { path = "crates/camio-scan", version = "0.0.1" }
+camio-automate = { path = "crates/camio-automate", version = "0.0.1" }
+camio-import = { path = "crates/camio-import", version = "0.0.1" }
+camio-sequencer = { path = "crates/camio-sequencer", version = "0.0.1" }
+camio-web = { path = "crates/camio-web", version = "0.0.1" }
+camio-app = { path = "crates/camio-app", version = "0.0.1" }
+camio-mcp = { path = "crates/camio-mcp", version = "0.0.1" }
 
 [profile.release]
 lto = "thin"

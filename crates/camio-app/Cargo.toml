@@ -1,0 +1,33 @@
+[package]
+name = "camio-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Camio native desktop workbench (egui/eframe) — every capability in one window."
+
+[lib]
+name = "camio_app"
+path = "src/lib.rs"
+
+[[bin]]
+name = "camio-app"
+path = "src/main.rs"
+
+[dependencies]
+camio-core.workspace = true
+camio-engine.workspace = true
+camio-store.workspace = true
+camio-request = { workspace = true, features = ["impersonate"] }
+camio-convert.workspace = true
+camio-scan.workspace = true
+camio-automate.workspace = true
+camio-import.workspace = true
+camio-sequencer.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+eframe = "0.29"
+egui = "0.29"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }

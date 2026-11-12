@@ -48,8 +48,8 @@ pub fn download_url() -> Result<String> {
 /// `dest` should be a fresh, dedicated directory (the zip is a large upstream
 /// artifact; keep it isolated from Camio's own code).
 pub fn unpack(zip_path: &Path, dest: &Path) -> Result<PathBuf> {
-    let file = fs::File::open(zip_path)
-        .with_context(|| format!("opening {}", zip_path.display()))?;
+    let file =
+        fs::File::open(zip_path).with_context(|| format!("opening {}", zip_path.display()))?;
     let mut archive = zip::ZipArchive::new(file).context("reading zip archive")?;
 
     fs::create_dir_all(dest).with_context(|| format!("creating {}", dest.display()))?;
@@ -69,8 +69,8 @@ pub fn unpack(zip_path: &Path, dest: &Path) -> Result<PathBuf> {
         if let Some(parent) = out.parent() {
             fs::create_dir_all(parent)?;
         }
-        let mut out_file = fs::File::create(&out)
-            .with_context(|| format!("writing {}", out.display()))?;
+        let mut out_file =
+            fs::File::create(&out).with_context(|| format!("writing {}", out.display()))?;
         io::copy(&mut entry, &mut out_file)?;
 
         // Preserve the executable bit from the archive on unix.
@@ -154,7 +154,9 @@ pub fn config_env_vars(config: &serde_json::Value) -> Vec<(String, String)> {
         while end < bytes.len() && (bytes[end] & 0xC0) == 0x80 {
             end -= 1;
         }
-        let part = std::str::from_utf8(&bytes[start..end]).unwrap_or("").to_string();
+        let part = std::str::from_utf8(&bytes[start..end])
+            .unwrap_or("")
+            .to_string();
         out.push((format!("CAMOU_CONFIG_{idx}"), part));
         idx += 1;
         start = end;
@@ -211,7 +213,10 @@ impl Camoufox {
         opts: &LaunchOptions,
     ) -> Command {
         let mut cmd = Command::new(&self.binary);
-        cmd.arg("-profile").arg(profile_dir).arg("-no-remote").arg("-new-instance");
+        cmd.arg("-profile")
+            .arg(profile_dir)
+            .arg("-no-remote")
+            .arg("-new-instance");
         if opts.headless {
             cmd.arg("-headless");
         }
@@ -241,9 +246,9 @@ impl Camoufox {
         if opts.dry_run {
             return Ok(None);
         }
-        let child = cmd.spawn().with_context(|| {
-            format!("launching Camoufox binary {}", self.binary.display())
-        })?;
+        let child = cmd
+            .spawn()
+            .with_context(|| format!("launching Camoufox binary {}", self.binary.display()))?;
         Ok(Some(child))
     }
 }
@@ -276,11 +281,15 @@ mod tests {
     #[test]
     fn build_command_sets_profile_and_tz() {
         let tmp = std::env::temp_dir().join("camio_test_prof");
-        let cam = Camoufox { binary: PathBuf::from("/nonexistent/camoufox") };
+        let cam = Camoufox {
+            binary: PathBuf::from("/nonexistent/camoufox"),
+        };
         let prof = FingerprintProfile::new("t", PINNED_VERSION);
         let cmd = cam.build_command(&tmp, &prof, &LaunchOptions::default());
         let envs: Vec<_> = cmd.get_envs().collect();
         assert!(envs.iter().any(|(k, _)| *k == std::ffi::OsStr::new("TZ")));
-        assert!(envs.iter().any(|(k, _)| k.to_string_lossy().starts_with("CAMOU_CONFIG_")));
+        assert!(envs
+            .iter()
+            .any(|(k, _)| k.to_string_lossy().starts_with("CAMOU_CONFIG_")));
     }
 }

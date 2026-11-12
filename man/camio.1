@@ -1,0 +1,128 @@
+.\" Manpage for camio.
+.TH CAMIO 1 "2026-11-12" "camio 0.1.0" "Camio Manual"
+.SH NAME
+camio \- local-first, fingerprint-transparent web security testing workbench
+.SH SYNOPSIS
+.B camio
+.I COMMAND
+.RI [ OPTIONS ]
+.SH DESCRIPTION
+.B Camio
+is a Rust web-security testing workbench built around the Camoufox anti-detect
+Firefox engine. Tool-originated traffic (Replay, Automate, Scanner, MCP) is sent
+through a BoringSSL-based impersonating client whose TLS/JA3/JA4 and HTTP/2
+fingerprint is derived from, and pinned to, the same profile the managed browser
+uses, so testing traffic does not stand out \fIbecause of the tool\fR.
+.PP
+Fingerprint transparency means Camio does not add a tool tell on top of the
+browser. It is \fBnot\fR a promise of undetectability and does not defeat a
+specific target's defenses. Camio is for \fBauthorized testing only\fR.
+.SH COMMANDS
+.TP
+.B engine info|unpack
+Show the pinned Camoufox build and download URL, or unpack a downloaded engine.
+.TP
+.B fingerprint show|spec
+Render the anti-detection policy (as \fIuser.js\fR prefs, Camoufox config, or
+full profile JSON) or the matched-engine fingerprint spec.
+.TP
+.B launch
+Launch the managed browser with a fingerprint policy applied against an
+authorized target URL.
+.TP
+.B send \fIURL\fR
+Send a request through the fingerprint-matched engine. Policy-gated: previews by
+default, requires \fB\-\-confirm\fR to send. Supports \fB\-\-rewrite\fR
+(Match & Replace).
+.TP
+.B query \fICAMIOQL\fR
+Run a CamioQL (HTTPQL-compatible) query over stored history.
+.TP
+.B history
+Show recent captured exchanges.
+.TP
+.B scope \fIURL\fR
+Report the scope decision for a URL via the one shared scope path (SSRF guard).
+.TP
+.B convert \fISTEPS\fR
+Apply a Convert/Decoder pipeline (base64, url, html, hex, gzip/deflate, hashes).
+Use \fB\-\-list\fR to list transforms.
+.TP
+.B jwt \fITOKEN\fR
+Decode a JWT header and payload (signature is NOT verified).
+.TP
+.B compare \fIA\fR \fIB\fR
+Byte/line diff between two files (Comparer).
+.TP
+.B scan \fR[\fICAMIOQL\fR]
+Run passive security checks over stored history; \fB\-\-save\fR persists findings.
+.TP
+.B fuzz \fIURL\fR
+Intruder-class fuzzing over \[char167]...\[char167] insertion points. Shows the
+projected request count; sends only with \fB\-\-confirm\fR (active test).
+.TP
+.B discover \fIURL\fR
+Enumerate injectable inputs of a request.
+.TP
+.B import \fIFILE\fR
+Import a Burp items XML export or a HAR archive into history.
+.TP
+.B sequencer
+Estimate token randomness/entropy from samples (one per line).
+.TP
+.B sitemap \fR[\fICAMIOQL\fR]
+Build a site map tree from stored history.
+.TP
+.B payloads \fR[\fINAME\fR]
+List the built-in payload packs, or show one pack's entries.
+.TP
+.B app
+Launch the native desktop workbench (egui). Every capability in one window, with
+customizable themes, a plugin system, and an "Open in browser" launcher.
+.TP
+.B ui
+Serve the local web UI on loopback (default 127.0.0.1:8787).
+.TP
+.B mcp serve
+Serve the Model Context Protocol over stdio for an agent/MCP client.
+.SH FILES
+.TP
+.I camio.db
+Default SQLite history database in the working directory.
+.TP
+.I ~/.config/camio/theme.json
+Saved native-app theme.
+.TP
+.I ./plugins/
+Directory scanned by the native app for process-based plugins.
+.SH EXAMPLES
+.PP
+Inspect the anti-detection policy:
+.PP
+.RS
+.B camio fingerprint show \-\-preset hardened \-\-format user-js
+.RE
+.PP
+Preview then send a request (authorized target):
+.PP
+.RS
+.B camio send https://example.org \-\-confirm \-H "X-Test: 1"
+.RE
+.PP
+Import a capture, scan it, and view the site map:
+.PP
+.RS
+.B camio import capture.har \-\-db camio.db
+.br
+.B camio scan \-\-db camio.db \-\-save
+.br
+.B camio sitemap \-\-db camio.db
+.RE
+.SH SEE ALSO
+Project documentation and the full product plan ship with the source
+(\fIREADME.md\fR, \fIplan.md\fR).
+.SH AUTHORS
+Camio contributors.
+.SH BUGS
+Report issues at https://github.com/s-b-repo/camio/issues. Report security
+vulnerabilities privately; see \fISECURITY.md\fR.

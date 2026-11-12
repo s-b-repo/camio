@@ -1,0 +1,22 @@
+[package]
+name = "camio-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Camio's local MCP server (plan §11): capabilities and data over stdio JSON-RPC."
+
+[dependencies]
+camio-core.workspace = true
+camio-store.workspace = true
+# Only the engine trait + dry-run backend are needed here; the real BoringSSL
+# backend is injected by the binary, so MCP stays light (workspace default is
+# default-features = false).
+camio-request.workspace = true
+camio-convert.workspace = true
+camio-scan.workspace = true
+camio-automate.workspace = true
+camio-import.workspace = true
+camio-sequencer.workspace = true
+serde.workspace = true
+serde_json.workspace = true

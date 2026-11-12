@@ -1,0 +1,31 @@
+[package]
+name = "camio-request"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Camio's fingerprint-matched request engine for tool-originated traffic (plan §6.2)."
+
+[features]
+# The real BoringSSL-based impersonating backend is on by default. It is the
+# plan's "matched request engine" (§6.2) — the whole point of the project — so
+# it ships by default; build with `--no-default-features` for a pure, no-network
+# core (spec + dry-run engine) in constrained environments.
+default = ["impersonate"]
+impersonate = ["dep:wreq", "dep:wreq-util", "dep:tokio"]
+
+[dependencies]
+camio-core.workspace = true
+serde.workspace = true
+
+# `wreq` (formerly `rquest`) is the BoringSSL-based impersonating HTTP client the
+# plan names (§6.2: "a BoringSSL-based HTTP client (e.g. the `rquest` crate /
+# curl-impersonate approach)"). `wreq-util` supplies the browser emulation presets.
+# Decompression features let the engine decode response bodies so CamioQL
+# `resp.body`/free-text search works on real (gzip/br/deflate/zstd) responses.
+wreq = { version = "0.16.3", optional = true, features = ["gzip", "brotli", "deflate", "zstd"] }
+wreq-util = { version = "0.2.1", optional = true }
+tokio = { version = "1.43", features = ["rt", "net", "time"], optional = true }
+
+[dev-dependencies]
+camio-core.workspace = true

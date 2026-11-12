@@ -1,0 +1,6 @@
+camio (0.1.0-1) kali-dev; urgency=medium
+
+  * Initial packaging of Camio: a fingerprint-transparent web security testing
+    workbench built around the Camoufox engine.
+
+ -- Camio contributors <camio@users.noreply.github.com>  Wed, 12 Nov 2026 12:00:00 +0000

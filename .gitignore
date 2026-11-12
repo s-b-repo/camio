@@ -5,3 +5,8 @@
 .DS_Store
 *.log
 /profiles/
+# Local history databases created by `camio send` / `camio ui` / `camio app`.
+*.db
+*.db-wal
+*.db-shm
+camio.db

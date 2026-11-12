@@ -298,23 +298,38 @@ impl FingerprintProfile {
         let mut set = |k: &str, v: PrefValue| prefs.push((k.to_string(), v));
 
         // --- Identity ---------------------------------------------------------
-        set("general.useragent.override", PrefValue::Str(persona.user_agent.clone()));
-        set("intl.accept_languages", PrefValue::Str(persona.accept_language.clone()));
+        set(
+            "general.useragent.override",
+            PrefValue::Str(persona.user_agent.clone()),
+        );
+        set(
+            "intl.accept_languages",
+            PrefValue::Str(persona.accept_language.clone()),
+        );
 
         // --- Resist Fingerprinting (omnibus) ---------------------------------
-        set("privacy.resistFingerprinting", PrefValue::Bool(p.resist_fingerprinting));
+        set(
+            "privacy.resistFingerprinting",
+            PrefValue::Bool(p.resist_fingerprinting),
+        );
         set(
             "privacy.resistFingerprinting.letterboxing",
             PrefValue::Bool(p.letterboxing),
         );
         // Still allow our own UA override to take effect under RFP.
         if p.resist_fingerprinting {
-            set("privacy.resistFingerprinting.block_mozAddonManager", PrefValue::Bool(true));
+            set(
+                "privacy.resistFingerprinting.block_mozAddonManager",
+                PrefValue::Bool(true),
+            );
             set("privacy.spoof_english", PrefValue::Int(2));
         }
 
         // --- First-party isolation -------------------------------------------
-        set("privacy.firstPartyIsolation", PrefValue::Bool(p.first_party_isolation));
+        set(
+            "privacy.firstPartyIsolation",
+            PrefValue::Bool(p.first_party_isolation),
+        );
 
         // --- WebRTC leak control ---------------------------------------------
         match p.webrtc {
@@ -323,9 +338,15 @@ impl FingerprintProfile {
             }
             WebRtcMode::LeakProtected => {
                 set("media.peerconnection.enabled", PrefValue::Bool(true));
-                set("media.peerconnection.ice.default_address_only", PrefValue::Bool(true));
+                set(
+                    "media.peerconnection.ice.default_address_only",
+                    PrefValue::Bool(true),
+                );
                 set("media.peerconnection.ice.no_host", PrefValue::Bool(true));
-                set("media.peerconnection.ice.proxy_only_if_behind_proxy", PrefValue::Bool(true));
+                set(
+                    "media.peerconnection.ice.proxy_only_if_behind_proxy",
+                    PrefValue::Bool(true),
+                );
             }
             WebRtcMode::Disabled => {
                 set("media.peerconnection.enabled", PrefValue::Bool(false));
@@ -348,7 +369,10 @@ impl FingerprintProfile {
         }
 
         // --- Tracking protection ---------------------------------------------
-        set("privacy.trackingprotection.enabled", PrefValue::Bool(p.tracking_protection));
+        set(
+            "privacy.trackingprotection.enabled",
+            PrefValue::Bool(p.tracking_protection),
+        );
         set(
             "privacy.trackingprotection.fingerprinting.enabled",
             PrefValue::Bool(p.tracking_protection),
@@ -363,7 +387,10 @@ impl FingerprintProfile {
         );
 
         // --- Do Not Track -----------------------------------------------------
-        set("privacy.donottrackheader.enabled", PrefValue::Bool(p.do_not_track));
+        set(
+            "privacy.donottrackheader.enabled",
+            PrefValue::Bool(p.do_not_track),
+        );
 
         // --- Referer ----------------------------------------------------------
         match p.referer {
@@ -371,7 +398,10 @@ impl FingerprintProfile {
             RefererPolicy::TrimToOrigin => {
                 // 2 = send scheme+host+port only.
                 set("network.http.referer.trimmingPolicy", PrefValue::Int(2));
-                set("network.http.referer.XOriginTrimmingPolicy", PrefValue::Int(2));
+                set(
+                    "network.http.referer.XOriginTrimmingPolicy",
+                    PrefValue::Int(2),
+                );
             }
             RefererPolicy::Disabled => {
                 set("network.http.sendRefererHeader", PrefValue::Int(0));
@@ -379,7 +409,10 @@ impl FingerprintProfile {
         }
 
         // --- Cookies ----------------------------------------------------------
-        set("network.cookie.cookieBehavior", PrefValue::Int(p.cookie_behavior as i64));
+        set(
+            "network.cookie.cookieBehavior",
+            PrefValue::Int(p.cookie_behavior as i64),
+        );
 
         // --- Hide automation tell (keep control channel working) -------------
         if p.hide_automation {
@@ -406,7 +439,10 @@ impl FingerprintProfile {
 
         // --- Tab history ------------------------------------------------------
         if let Some(n) = p.limit_tab_history {
-            set("browser.sessionhistory.max_entries", PrefValue::Int(n as i64));
+            set(
+                "browser.sessionhistory.max_entries",
+                PrefValue::Int(n as i64),
+            );
         }
 
         prefs
@@ -416,13 +452,22 @@ impl FingerprintProfile {
     pub fn to_user_js(&self) -> String {
         let mut out = String::new();
         let _ = writeln!(out, "// Generated by Camio — do not edit by hand.");
-        let _ = writeln!(out, "// Profile: {} (Camoufox {})", self.name, self.camoufox_build);
+        let _ = writeln!(
+            out,
+            "// Profile: {} (Camoufox {})",
+            self.name, self.camoufox_build
+        );
         let _ = writeln!(
             out,
             "// Fingerprint policy rendered to about:config preferences.\n"
         );
         for (k, v) in self.to_prefs() {
-            let _ = writeln!(out, "user_pref({}, {});", PrefValue::Str(k).render(), v.render());
+            let _ = writeln!(
+                out,
+                "user_pref({}, {});",
+                PrefValue::Str(k).render(),
+                v.render()
+            );
         }
         out
     }
@@ -446,7 +491,10 @@ impl FingerprintProfile {
             "navigator.languages",
             serde_json::json!([persona.locale, "en"]),
         );
-        put("navigator.hardwareConcurrency", persona.hardware_concurrency.into());
+        put(
+            "navigator.hardwareConcurrency",
+            persona.hardware_concurrency.into(),
+        );
         put("navigator.deviceMemory", persona.device_memory.into());
         put("screen.width", persona.screen.width.into());
         put("screen.height", persona.screen.height.into());
@@ -460,7 +508,10 @@ impl FingerprintProfile {
             put("webGl:vendor", persona.webgl_vendor.clone().into());
             put("webGl:renderer", persona.webgl_renderer.clone().into());
             put("webGl:unmaskedVendor", persona.webgl_vendor.clone().into());
-            put("webGl:unmaskedRenderer", persona.webgl_renderer.clone().into());
+            put(
+                "webGl:unmaskedRenderer",
+                persona.webgl_renderer.clone().into(),
+            );
         }
 
         serde_json::Value::Object(cfg)
@@ -474,8 +525,12 @@ mod tests {
     #[test]
     fn user_agent_version_tracks_aligned_firefox() {
         let p = Persona::default();
-        assert!(p.user_agent.contains(&format!("Firefox/{}.0", ALIGNED_FIREFOX_MAJOR)));
-        assert!(p.user_agent.contains(&format!("rv:{}.0", ALIGNED_FIREFOX_MAJOR)));
+        assert!(p
+            .user_agent
+            .contains(&format!("Firefox/{}.0", ALIGNED_FIREFOX_MAJOR)));
+        assert!(p
+            .user_agent
+            .contains(&format!("rv:{}.0", ALIGNED_FIREFOX_MAJOR)));
     }
 
     #[test]
@@ -487,11 +542,22 @@ mod tests {
             policy: FingerprintPolicy::hardened(),
         };
         let prefs = prof.to_prefs();
-        let find = |k: &str| prefs.iter().find(|(key, _)| key == k).map(|(_, v)| v.clone());
+        let find = |k: &str| {
+            prefs
+                .iter()
+                .find(|(key, _)| key == k)
+                .map(|(_, v)| v.clone())
+        };
 
-        assert_eq!(find("media.peerconnection.enabled"), Some(PrefValue::Bool(false)));
+        assert_eq!(
+            find("media.peerconnection.enabled"),
+            Some(PrefValue::Bool(false))
+        );
         assert_eq!(find("dom.webdriver.enabled"), Some(PrefValue::Bool(false)));
-        assert_eq!(find("privacy.resistFingerprinting"), Some(PrefValue::Bool(true)));
+        assert_eq!(
+            find("privacy.resistFingerprinting"),
+            Some(PrefValue::Bool(true))
+        );
     }
 
     #[test]

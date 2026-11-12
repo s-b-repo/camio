@@ -1,0 +1,12 @@
+[package]
+name = "camio-sequencer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Sequencer: randomness/entropy analysis of session tokens and other samples."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

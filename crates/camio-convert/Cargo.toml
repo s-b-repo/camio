@@ -1,0 +1,21 @@
+[package]
+name = "camio-convert"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Convert/Decoder/Comparer: reversible encodings, hashes, and byte-level diff for Camio."
+
+[dependencies]
+serde.workspace = true
+base64.workspace = true
+sha2.workspace = true
+md-5.workspace = true
+sha1.workspace = true
+flate2.workspace = true
+
+[dev-dependencies]
+# Test-only: asserts the public result types' serde wire form (snake_case tags,
+# round-trips). Not pulled into the library build.
+serde_json.workspace = true

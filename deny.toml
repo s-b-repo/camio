@@ -1,0 +1,97 @@
+# cargo-deny configuration for Camio.
+#
+# Implements plan §14 ("Pin dependencies, generate an SBOM, audit
+# licenses/advisories") and §20 ("dependency/advisory review"). Run with:
+#   cargo deny check
+#
+# The graph is scoped to the platforms Camio ships on so that platform-specific
+# transitive dependencies (e.g. the macOS/Windows accessibility and windowing
+# backends pulled in by egui/eframe) are audited where they actually ship and the
+# result is deterministic regardless of the host that runs the check.
+
+[graph]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]
+all-features = true
+
+[output]
+feature-depth = 1
+
+# ---------------------------------------------------------------------------
+# Security advisories (RustSec). Vulnerabilities fail the build; nothing is
+# ignored by default — add a documented entry here only with a tracking note.
+# ---------------------------------------------------------------------------
+[advisories]
+version = 2
+yanked = "deny"
+# Each ignore is crate-scoped (not a bare advisory id) so Camio's OWN direct uses
+# stay audited — e.g. a regression of camio-import below quick-xml 0.41 would still
+# be flagged. Every entry is a transitive dependency with no reachable fix.
+ignore = [
+    # quick-xml DoS (RUSTSEC-2026-0194 / 0195): the ONLY affected copy is
+    # quick-xml 0.30, pulled transitively by eframe's Linux accessibility stack
+    # (accesskit → atspi → zbus_xml) to parse the local D-Bus introspection XML —
+    # not an untrusted-network attack surface. Camio's OWN Burp-XML parsing
+    # (camio-import) is pinned to the patched quick-xml 0.41 in Cargo.toml.
+    { id = "RUSTSEC-2026-0194", reason = "only transitive quick-xml 0.30 (eframe D-Bus a11y); camio-import uses patched 0.41" },
+    { id = "RUSTSEC-2026-0195", reason = "only transitive quick-xml 0.30 (eframe D-Bus a11y); camio-import uses patched 0.41" },
+    # Unmaintained (not vulnerable) transitive deps with no reachable upgrade:
+    { id = "RUSTSEC-2024-0436", reason = "paste: unmaintained build-time proc-macro, pulled transitively" },
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser: unmaintained; egui font stack parses the app's own bundled fonts" },
+    { id = "RUSTSEC-2026-0370", reason = "zvariant: unmaintained; eframe Linux accessibility (zbus/atspi)" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names: unmaintained; eframe Linux accessibility (zbus/atspi)" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive: unmaintained; eframe Linux accessibility (zbus/atspi)" },
+]
+
+# ---------------------------------------------------------------------------
+# Licenses. Allowlist is explicit: anything not listed fails the check, so a new
+# dependency with an unexpected license is caught in review (plan §12: "don't
+# imply third-party components adopt Camio's license").
+# ---------------------------------------------------------------------------
+[licenses]
+version = 2
+confidence-threshold = 0.9
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "MPL-2.0",
+    "CC0-1.0",
+    "Unicode-3.0",
+    "BSL-1.0",
+    # `bzip2` (optional compression in the zip crate) uses its own permissive license.
+    "bzip2-1.0.6",
+    # Bundled fonts in egui/epaint (the native app) are OFL / Ubuntu Font License.
+    "OFL-1.1",
+    "LicenseRef-UFL-1.0",
+    # A permissive data-license crate in the dependency tree.
+    "CDLA-Permissive-2.0",
+]
+
+# ---------------------------------------------------------------------------
+# Dependency bans. Duplicate versions are a warning (a large GUI + TLS tree will
+# have some); add explicit `deny` entries for anything that must never appear.
+# ---------------------------------------------------------------------------
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+deny = []
+
+# ---------------------------------------------------------------------------
+# Sources. Only crates.io is allowed by default; a git dependency must be listed
+# explicitly (plan §16: supply-chain review).
+# ---------------------------------------------------------------------------
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = []

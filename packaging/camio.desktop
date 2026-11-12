@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Camio
+GenericName=Web Security Workbench
+Comment=Fingerprint-transparent web security testing workbench
+Exec=camio app
+Terminal=false
+Categories=Development;Security;Network;
+Keywords=security;pentest;websecurity;proxy;http;fingerprint;burp;caido;camoufox;
+Icon=camio
+StartupNotify=true

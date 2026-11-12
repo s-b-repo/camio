@@ -1,0 +1,6 @@
+{
+  "name": "ROT13",
+  "description": "ROT13 the input (demo transform plugin using coreutils `tr`).",
+  "kind": "transform",
+  "command": ["tr", "A-Za-z", "N-ZA-Mn-za-m"]
+}

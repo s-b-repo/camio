@@ -1,0 +1,41 @@
+Source: camio
+Section: utils
+Priority: optional
+Maintainer: Camio contributors <camio@users.noreply.github.com>
+Build-Depends:
+ debhelper-compat (= 13),
+ cargo,
+ rustc (>= 1.80),
+ cmake,
+ clang,
+ pkg-config,
+ libxkbcommon-dev,
+ libwayland-dev,
+ libxcb-render0-dev,
+ libxcb-shape0-dev,
+ libxcb-xfixes0-dev
+Standards-Version: 4.6.2
+Homepage: https://github.com/s-b-repo/camio
+Vcs-Git: https://github.com/s-b-repo/camio.git
+Vcs-Browser: https://github.com/s-b-repo/camio
+Rules-Requires-Root: no
+
+Package: camio
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Recommends: camoufox | librewolf
+Description: fingerprint-transparent web security testing workbench
+ Camio is a local-first web security testing workbench built around the Camoufox
+ anti-detect Firefox engine. Tool-originated traffic (Replay, Automate, Scanner,
+ MCP) is sent through a BoringSSL-based impersonating client whose TLS/JA3/JA4 and
+ HTTP/2 fingerprint is derived from, and pinned to, the same profile the managed
+ browser uses, so authorized testing traffic does not stand out because of the
+ tool.
+ .
+ It provides a CamioQL (HTTPQL-compatible) query language, a passive scanner,
+ Intruder-class fuzzing, Convert/Decoder/Comparer, Burp/HAR importers, a
+ sequencer, a native desktop app and an optional web UI, a plugin system, and a
+ built-in MCP server — all under one shared scope and authorization policy.
+ .
+ Fingerprint transparency is a measured property, not a promise of
+ undetectability. Camio is for authorized testing only.
