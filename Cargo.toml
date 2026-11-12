@@ -14,6 +14,8 @@ members = [
     "crates/camio-automate",
     "crates/camio-import",
     "crates/camio-sequencer",
+    "crates/camio-active",
+    "crates/camio-ai",
     "crates/camio-web",
     "crates/camio-app",
     "crates/camio-mcp",
@@ -50,6 +52,11 @@ quick-xml = "0.41"
 md-5 = "0.10"
 sha1 = "0.10"
 tiny_http = "0.12"
+# Reused by camio-ai for OpenAI-compatible API calls (NVIDIA NIM, OpenAI,
+# Ollama, …) — the same BoringSSL client the matched engine uses, so no second
+# TLS stack is added.
+wreq = { version = "0.16.3", features = ["gzip", "brotli", "deflate", "zstd"] }
+tokio = { version = "1.43", features = ["rt", "net", "time"] }
 
 # Internal crates (path deps, versioned together). The explicit `version` keeps
 # them from being treated as wildcard (`*`) dependencies by cargo-deny and is
@@ -63,6 +70,8 @@ camio-scan = { path = "crates/camio-scan", version = "0.0.1" }
 camio-automate = { path = "crates/camio-automate", version = "0.0.1" }
 camio-import = { path = "crates/camio-import", version = "0.0.1" }
 camio-sequencer = { path = "crates/camio-sequencer", version = "0.0.1" }
+camio-active = { path = "crates/camio-active", version = "0.0.1" }
+camio-ai = { path = "crates/camio-ai", version = "0.0.1" }
 camio-web = { path = "crates/camio-web", version = "0.0.1" }
 camio-app = { path = "crates/camio-app", version = "0.0.1" }
 camio-mcp = { path = "crates/camio-mcp", version = "0.0.1" }

@@ -17,6 +17,7 @@ mod browser;
 mod plugins;
 mod theme;
 
+use camio_ai::{AiClient, AiConfig, Message};
 use camio_automate::{AttackType, Baseline, Campaign, PayloadSet};
 use camio_convert::Transform;
 use camio_core::{
@@ -27,6 +28,7 @@ use camio_request::{matched_engine, DryRunEngine, FingerprintSpec, RequestEngine
 use camio_store::Store;
 use plugins::Plugin;
 use std::path::PathBuf;
+use std::sync::mpsc;
 use theme::Theme;
 
 /// What the app needs to run: the history DB and the shared profile/scope/policy.
@@ -74,6 +76,9 @@ enum Surface {
     Payloads,
     Import,
     Fingerprint,
+    ActiveScan,
+    AnalyzeJs,
+    Ai,
     Browser,
     Plugins,
     Settings,
@@ -181,6 +186,13 @@ struct CamioApp {
     plugins: Vec<Plugin>,
     selected_plugin: Option<usize>,
     plugin_input: String,
+    // AI assistant (optional, BYO key; calls run on a background thread)
+    ai_config: AiConfig,
+    ai_prompt: String,
+    ai_pending: Option<mpsc::Receiver<Result<String, String>>>,
+    // analyze-js / active-scan
+    js_blob: String,
+    active_save: bool,
     // output
     out: Output,
 }
@@ -254,6 +266,11 @@ impl CamioApp {
             plugins,
             selected_plugin: None,
             plugin_input: String::new(),
+            ai_config: AiConfig::from_env(),
+            ai_prompt: String::new(),
+            ai_pending: None,
+            js_blob: String::new(),
+            active_save: true,
             out: Output::None,
         }
     }
@@ -556,7 +573,7 @@ impl CamioApp {
             HttpRequest::get(self.url.trim()),
             Source::Replay,
         ));
-        self.out = Output::Text(format!("{}  →  {}", self.url.trim(), d.as_str()));
+        self.out = Output::Text(format!("{}  ->  {}", self.url.trim(), d.as_str()));
     }
 
     fn run_payloads(&mut self) {
@@ -902,6 +919,7 @@ impl CamioApp {
                     (Surface::Discover, "Discover inputs"),
                     (Surface::Fuzz, "Automate / Fuzz"),
                     (Surface::Scan, "Scanner"),
+                    (Surface::ActiveScan, "Active scan"),
                     (Surface::Findings, "Findings"),
                 ],
             ),
@@ -916,8 +934,10 @@ impl CamioApp {
                     (Surface::Scope, "Scope check"),
                     (Surface::Payloads, "Payloads"),
                     (Surface::Import, "Import"),
+                    (Surface::AnalyzeJs, "Analyze JS"),
                 ],
             ),
+            ("ASSISTANT", &[(Surface::Ai, "AI assistant")]),
             ("BROWSER", &[(Surface::Browser, "Open browser")]),
             (
                 "EXTEND",
@@ -1025,7 +1045,7 @@ impl CamioApp {
             }
             Surface::Convert => {
                 ui.heading("Convert");
-                ui.label("Pipeline runs left→right, e.g. base64,gzip or base64-decode.");
+                ui.label("Pipeline runs left-to-right, e.g. base64,gzip or base64-decode.");
                 ui.label("Input");
                 ui.add(
                     egui::TextEdit::multiline(&mut self.convert_in).desired_width(f32::INFINITY),
@@ -1115,6 +1135,9 @@ impl CamioApp {
                     self.run_import();
                 }
             }
+            Surface::ActiveScan => self.active_scan_surface(ui),
+            Surface::AnalyzeJs => self.analyze_js_surface(ui),
+            Surface::Ai => self.ai_surface(ui),
             Surface::Browser => self.browser_surface(ui),
             Surface::Plugins => self.plugins_surface(ui),
             Surface::Settings => self.settings_surface(ui),
@@ -1286,6 +1309,235 @@ impl CamioApp {
         });
         if ui.button("Preview rewrite").clicked() {
             self.run_matchreplace();
+        }
+    }
+
+    fn ai_surface(&mut self, ui: &mut egui::Ui) {
+        ui.heading("AI assistant");
+        let ready = self.ai_config.is_ready();
+        ui.horizontal(|ui| {
+            ui.label(format!(
+                "provider: {}  ·  model: {}",
+                self.ai_config.provider, self.ai_config.model
+            ));
+            if ready {
+                ui.colored_label(egui::Color32::from_rgb(63, 185, 80), "ready");
+            } else {
+                ui.colored_label(
+                    egui::Color32::from_rgb(210, 153, 34),
+                    "no key — set NVIDIA_API_KEY / OPENAI_API_KEY (Ollama needs none)",
+                );
+            }
+        });
+        ui.label("Bring your own key. Nothing is sent to a model unless you ask; no telemetry. Set CAMIO_AI_PROVIDER / CAMIO_AI_MODEL to choose.");
+        ui.add(
+            egui::TextEdit::multiline(&mut self.ai_prompt)
+                .hint_text("Ask about your testing, or describe a query for NL->CamioQL…")
+                .desired_width(f32::INFINITY)
+                .desired_rows(4),
+        );
+        let busy = self.ai_pending.is_some();
+        ui.horizontal(|ui| {
+            if ui.add_enabled(!busy, egui::Button::new("Ask")).clicked() {
+                let msgs = vec![
+                    Message::system("You are a concise, precise web-security testing assistant. Be specific; avoid filler."),
+                    Message::user(self.ai_prompt.clone()),
+                ];
+                self.start_ai(msgs);
+            }
+            if ui.add_enabled(!busy, egui::Button::new("NL -> CamioQL")).clicked() {
+                self.start_ai(camio_ai::nl_to_camioql(&self.ai_prompt));
+            }
+            if ui.add_enabled(!busy, egui::Button::new("Explain latest exchange")).clicked() {
+                match self.open().and_then(|s| s.recent(1).map_err(|e| e.to_string())) {
+                    Ok(v) if !v.is_empty() => self.start_ai(camio_ai::explain_exchange(&v[0])),
+                    Ok(_) => self.out = Output::Error("no exchanges in history yet".into()),
+                    Err(e) => self.out = Output::Error(e),
+                }
+            }
+            if ui.add_enabled(!busy, egui::Button::new("Suggest tests")).clicked() {
+                let context = self.findings_context();
+                self.start_ai(camio_ai::suggest_tests(&context));
+            }
+            if busy {
+                ui.spinner();
+            }
+        });
+    }
+
+    fn findings_context(&self) -> String {
+        match self
+            .open()
+            .and_then(|s| s.list_findings().map_err(|e| e.to_string()))
+        {
+            Ok(fs) if !fs.is_empty() => {
+                let mut s = String::from("Findings recorded so far:\n");
+                for f in fs.iter().take(50) {
+                    s.push_str(&format!(
+                        "- [{:?}/{:?}] {}\n",
+                        f.severity, f.confidence, f.title
+                    ));
+                }
+                s
+            }
+            _ => "No findings recorded yet. Suggest an initial web-app testing plan.".into(),
+        }
+    }
+
+    /// Spawn the AI request on a background thread so the window stays responsive.
+    fn start_ai(&mut self, messages: Vec<Message>) {
+        if !self.ai_config.is_ready() {
+            self.out = Output::Error(format!(
+                "AI not configured: provider {} has no API key. Set NVIDIA_API_KEY (NVIDIA NIM) or OPENAI_API_KEY, or run a local Ollama.",
+                self.ai_config.provider
+            ));
+            return;
+        }
+        if messages.iter().all(|m| m.content.trim().is_empty()) {
+            self.out = Output::Error("enter a prompt first".into());
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        let cfg = self.ai_config.clone();
+        std::thread::spawn(move || {
+            let result = AiClient::new(cfg)
+                .map_err(|e| e.to_string())
+                .and_then(|c| c.chat(&messages).map_err(|e| e.to_string()));
+            let _ = tx.send(result);
+        });
+        self.ai_pending = Some(rx);
+        self.out = Output::Text("Thinking…".to_string());
+    }
+
+    fn active_scan_surface(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Active scan");
+        ui.colored_label(
+            egui::Color32::from_rgb(210, 153, 34),
+            "Active testing SENDS probe requests (reflected XSS, error-based SQLi, open redirect). In-scope + confirm required; launch with --allow-active.",
+        );
+        self.request_builder(ui);
+        ui.checkbox(&mut self.confirm, "confirm (run the active test)");
+        ui.checkbox(&mut self.active_save, "save findings");
+        if ui.button("Run active scan").clicked() {
+            self.run_active_scan();
+        }
+    }
+
+    fn run_active_scan(&mut self) {
+        let res = (|| {
+            let base = self.built_request()?;
+            let decision = self
+                .cfg
+                .scope
+                .decide(&HttpExchange::new(base.clone(), Source::Scanner));
+            match self
+                .cfg
+                .policy
+                .gate(ActionClass::Active, decision, self.confirm)
+            {
+                PolicyOutcome::Deny(r) => return Err(format!("refused: {r}")),
+                PolicyOutcome::NeedsConfirmation(r) => {
+                    return Err(format!(
+                        "{r}. Tick 'confirm' to run (scope {}).",
+                        decision.as_str()
+                    ))
+                }
+                PolicyOutcome::Allow => {}
+            }
+            let store = std::cell::RefCell::new(self.open()?);
+            let engine = self.engine.as_ref();
+            let scope = &self.cfg.scope;
+            let findings = {
+                let send = |req: HttpRequest| -> Option<HttpExchange> {
+                    if !scope
+                        .decide(&HttpExchange::new(req.clone(), Source::Scanner))
+                        .is_sendable()
+                    {
+                        return None; // never send out of scope (plan §16)
+                    }
+                    match engine.send(req, Source::Scanner) {
+                        Ok(ex) => {
+                            let _ = store.borrow_mut().insert(&ex);
+                            Some(ex)
+                        }
+                        Err(_) => None,
+                    }
+                };
+                camio_active::run_active(&base, &send)
+            };
+            if self.active_save {
+                for f in &findings {
+                    let _ = store.borrow_mut().insert_finding(f);
+                }
+            }
+            Ok::<_, String>(findings)
+        })();
+        self.out = match res {
+            Ok(findings) if findings.is_empty() => {
+                Output::Text("active scan complete — no issues confirmed".into())
+            }
+            Ok(findings) => Output::Table {
+                cols: vec!["Severity".into(), "Confidence".into(), "Title".into()],
+                rows: findings
+                    .iter()
+                    .map(|f| {
+                        vec![
+                            format!("{:?}", f.severity).to_lowercase(),
+                            format!("{:?}", f.confidence).to_lowercase(),
+                            f.title.clone(),
+                        ]
+                    })
+                    .collect(),
+            },
+            Err(e) => Output::Error(e),
+        };
+    }
+
+    fn analyze_js_surface(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Analyze JS / secrets");
+        ui.label("Passively extract hard-coded secrets and endpoints from a JavaScript (or any) blob — no traffic sent.");
+        ui.add(
+            egui::TextEdit::multiline(&mut self.js_blob)
+                .hint_text("paste JS / a response body…")
+                .desired_width(f32::INFINITY)
+                .desired_rows(10),
+        );
+        if ui.button("Analyze").clicked() {
+            let a = camio_scan::analyze_js(&self.js_blob);
+            self.out = if a.secrets.is_empty() && a.endpoints.is_empty() {
+                Output::Text("(nothing found)".into())
+            } else {
+                Output::Text(format!(
+                    "secrets ({}): {}\n\nendpoints ({}):\n{}",
+                    a.secrets.len(),
+                    if a.secrets.is_empty() {
+                        "none".into()
+                    } else {
+                        a.secrets.join(", ")
+                    },
+                    a.endpoints.len(),
+                    a.endpoints.join("\n")
+                ))
+            };
+        }
+    }
+
+    fn poll_ai(&mut self, ctx: &egui::Context) {
+        if let Some(rx) = &self.ai_pending {
+            match rx.try_recv() {
+                Ok(result) => {
+                    self.out = match result {
+                        Ok(t) => Output::Text(t),
+                        Err(e) => Output::Error(e),
+                    };
+                    self.ai_pending = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => ctx.request_repaint(),
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.out = Output::Error("AI request failed (worker thread ended)".into());
+                    self.ai_pending = None;
+                }
+            }
         }
     }
 
@@ -1550,6 +1802,7 @@ impl eframe::App for CamioApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.theme.apply(ctx);
         self.sync_bg(ctx);
+        self.poll_ai(ctx);
 
         egui::TopBottomPanel::top("status_bar").show(ctx, |ui| {
             ui.add_space(3.0);
@@ -1557,6 +1810,48 @@ impl eframe::App for CamioApp {
                 ui.label(egui::RichText::new(&self.status_line).small());
             });
             ui.add_space(3.0);
+        });
+        egui::TopBottomPanel::bottom("bottom_bar").show(ctx, |ui| {
+            ui.add_space(2.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    egui::RichText::new(format!("db: {}", self.cfg.db.display()))
+                        .small()
+                        .weak(),
+                );
+                ui.separator();
+                ui.label(
+                    egui::RichText::new(format!(
+                        "ai: {} {}",
+                        self.ai_config.provider,
+                        if self.ai_config.is_ready() {
+                            "ready"
+                        } else {
+                            "no key"
+                        }
+                    ))
+                    .small()
+                    .weak(),
+                );
+                ui.separator();
+                ui.label(
+                    egui::RichText::new(format!(
+                        "active checks: {}",
+                        if self.cfg.policy.allow_active {
+                            "enabled"
+                        } else {
+                            "off (--allow-active)"
+                        }
+                    ))
+                    .small()
+                    .weak(),
+                );
+                if self.ai_pending.is_some() {
+                    ui.separator();
+                    ui.label(egui::RichText::new("AI: thinking…").small());
+                }
+            });
+            ui.add_space(2.0);
         });
         egui::SidePanel::left("nav")
             .resizable(false)
@@ -1593,6 +1888,9 @@ fn surface_from_name(s: &str) -> Option<Surface> {
         "scope" => Surface::Scope,
         "payloads" => Surface::Payloads,
         "import" => Surface::Import,
+        "activescan" | "active" => Surface::ActiveScan,
+        "analyzejs" | "js" => Surface::AnalyzeJs,
+        "ai" => Surface::Ai,
         "browser" => Surface::Browser,
         "plugins" => Surface::Plugins,
         "settings" => Surface::Settings,

@@ -26,10 +26,17 @@ mod basic_auth;
 mod cookies;
 mod cors;
 mod directory_listing;
+mod exposed_api_docs;
+mod graphql_introspection;
+mod js_endpoints;
+mod js_secrets;
 mod mixed_content;
 mod reflected_input;
 mod security_headers;
+mod sensitive_json_fields;
+mod sensitive_path_exposure;
 mod sensitive_url;
+mod source_map_exposed;
 mod verbose_error;
 
 pub use banner::ServerBannerDisclosure;
@@ -37,10 +44,17 @@ pub use basic_auth::BasicAuthOverHttp;
 pub use cookies::InsecureCookies;
 pub use cors::CorsMisconfig;
 pub use directory_listing::DirectoryListing;
+pub use exposed_api_docs::ExposedApiDocs;
+pub use graphql_introspection::GraphqlIntrospection;
+pub use js_endpoints::JsEndpoints;
+pub use js_secrets::JsSecretsLeak;
 pub use mixed_content::MixedContent;
 pub use reflected_input::ReflectedInput;
 pub use security_headers::MissingSecurityHeaders;
+pub use sensitive_json_fields::SensitiveJsonFields;
+pub use sensitive_path_exposure::SensitivePathExposure;
 pub use sensitive_url::SensitiveDataInUrl;
+pub use source_map_exposed::SourceMapExposed;
 pub use verbose_error::VerboseError;
 
 // ---------------------------------------------------------------------------
@@ -102,6 +116,15 @@ pub(crate) fn is_html_or_text(resp: &HttpResponse) -> bool {
             let ct = ct.to_ascii_lowercase();
             ct.starts_with("text/") || ct.contains("html")
         })
+        .unwrap_or(false)
+}
+
+/// `true` when the response declares a JavaScript content type
+/// (`application/javascript`, `text/javascript`, …). Used to gate the
+/// JavaScript-only discovery checks.
+pub(crate) fn is_javascript(resp: &HttpResponse) -> bool {
+    content_type(resp)
+        .map(|ct| ct.to_ascii_lowercase().contains("javascript"))
         .unwrap_or(false)
 }
 
@@ -206,6 +229,118 @@ pub(crate) fn http_resource_re() -> Option<&'static Regex> {
             .ok()
     })
     .as_ref()
+}
+
+// ---------------------------------------------------------------------------
+// Hard-coded-secret scanning (shared by the js-secrets check and analyze_js)
+// ---------------------------------------------------------------------------
+
+/// One hard-coded-secret match: a human-readable `kind` and a redacted
+/// four-character preview (`AKIA…`). The full secret is **never** stored here,
+/// so a finding built from it cannot re-leak the value (plan §16).
+pub(crate) struct SecretHit {
+    pub kind: &'static str,
+    pub redacted: String,
+}
+
+/// The secret patterns, compiled at most once (process-wide). Each entry is
+/// `(kind, regex)`. A (practically impossible) compile failure drops that one
+/// pattern rather than panicking, so the scanner degrades to fewer kinds instead
+/// of crashing. Fixed-format cloud/API tokens stay case-sensitive; only the
+/// generic credential assignment is case-insensitive.
+fn secret_patterns() -> &'static [(&'static str, Regex)] {
+    static PATS: OnceLock<Vec<(&'static str, Regex)>> = OnceLock::new();
+    PATS.get_or_init(|| {
+        // The generic assignment allows an optional quote *after* the key name
+        // so the common JSON form (`"api_key": "…"`) is caught as well as the
+        // bare `api_key = "…"` form; the value itself is never captured into the
+        // finding, only a redacted prefix of the whole match.
+        let specs: &[(&str, &str)] = &[
+            ("AWS access key", r"AKIA[0-9A-Z]{16}"),
+            ("Google API key", r"AIza[0-9A-Za-z_\-]{35}"),
+            ("Slack token", r"xox[baprs]-[0-9A-Za-z-]{10,}"),
+            ("GitHub token", r"gh[pousr]_[0-9A-Za-z]{36,}"),
+            ("Stripe secret key", r"sk_live_[0-9A-Za-z]{10,}"),
+            (
+                "Private key block",
+                r"-----BEGIN (RSA |EC |OPENSSH |)PRIVATE KEY-----",
+            ),
+            (
+                "Generic credential assignment",
+                r#"(?i)(api[_-]?key|secret|access[_-]?token|client[_-]?secret)["']?\s*[:=]\s*['"][0-9A-Za-z_\-]{16,}['"]"#,
+            ),
+        ];
+        specs
+            .iter()
+            .filter_map(|(kind, pat)| Regex::new(pat).ok().map(|re| (*kind, re)))
+            .collect()
+    })
+    .as_slice()
+}
+
+/// Redact a matched secret to its first four characters plus an ellipsis, so a
+/// finding can say *which* value matched without echoing it (plan §16). Char-
+/// (not byte-) based so a multi-byte prefix never splits mid-codepoint.
+fn redact_preview(s: &str) -> String {
+    let prefix: String = s.chars().take(4).collect();
+    format!("{prefix}…")
+}
+
+/// Scan `text` for hard-coded secrets, returning one [`SecretHit`] per distinct
+/// kind found (the first match of each kind supplies the redacted preview).
+/// Shared by the [`JsSecretsLeak`](crate::JsSecretsLeak) check and
+/// [`crate::analyze_js`]; it sends no traffic and never returns the raw secret.
+pub(crate) fn find_secrets(text: &str) -> Vec<SecretHit> {
+    let mut out = Vec::new();
+    for (kind, re) in secret_patterns() {
+        if let Some(m) = re.find(text) {
+            out.push(SecretHit {
+                kind,
+                redacted: redact_preview(m.as_str()),
+            });
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// JavaScript endpoint extraction (shared by the js-endpoints check and
+// analyze_js)
+// ---------------------------------------------------------------------------
+
+/// Upper bound on endpoints reported from one JavaScript body — keeps a single
+/// finding readable even for a large bundle.
+pub(crate) const ENDPOINT_CAP: usize = 40;
+
+/// Quoted path / URL references in a JavaScript body: an absolute or
+/// protocol-relative URL (`//[^"'\s]+`), or an absolute path
+/// (`/[A-Za-z0-9_./-]{2,}`). The excluded `"`/`'`/whitespace characters bound
+/// each token at its surrounding quote.
+fn endpoint_re() -> Option<&'static Regex> {
+    static RE: OnceLock<Option<Regex>> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r#"(?:https?:)?//[^"'\s]+|/[A-Za-z0-9_./\-]{2,}"#).ok())
+        .as_ref()
+}
+
+/// Extract referenced endpoints/paths from `text`, de-duplicated in first-seen
+/// order and capped at [`ENDPOINT_CAP`]. Passive: it only reads a body the
+/// browser already fetched. Shared by the js-endpoints check and
+/// [`crate::analyze_js`].
+pub(crate) fn extract_endpoints(text: &str) -> Vec<String> {
+    let Some(re) = endpoint_re() else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = Vec::new();
+    for m in re.find_iter(text) {
+        let s = m.as_str();
+        if !out.iter().any(|e| e == s) {
+            out.push(s.to_string());
+        }
+        if out.len() >= ENDPOINT_CAP {
+            break;
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -330,5 +465,87 @@ mod tests {
         // Navigational <a href>/<base href> are NOT mixed content → must not match.
         assert!(!re.is_match(r#"<a href="http://external.test/page">go</a>"#));
         assert!(!re.is_match(r#"<base href="http://external.test/">"#));
+    }
+
+    #[test]
+    fn find_secrets_detects_each_kind_once() {
+        let blob = concat!(
+            "aws = AKIAIOSFODNN7EXAMPLE\n",
+            "google = AIzaSyA1234567890abcdefghijklmnopqrstuvw\n",
+            "slack = xoxb-1234567890-abcdefghij\n",
+            "gh = ghp_0123456789abcdefghijklmnopqrstuvwxyzAB\n",
+            "stripe = sk_live_0123456789abcdef\n",
+            "key = \"-----BEGIN RSA PRIVATE KEY-----\"\n",
+            "api_key = \"abcdefghijklmnop12345\"\n",
+        );
+        let hits = find_secrets(blob);
+        let kinds: Vec<&str> = hits.iter().map(|h| h.kind).collect();
+        for expected in [
+            "AWS access key",
+            "Google API key",
+            "Slack token",
+            "GitHub token",
+            "Stripe secret key",
+            "Private key block",
+            "Generic credential assignment",
+        ] {
+            assert!(kinds.contains(&expected), "missing kind `{expected}`");
+        }
+        // Each kind appears exactly once even though several could repeat.
+        let mut sorted = kinds.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), kinds.len(), "kinds must be unique");
+    }
+
+    #[test]
+    fn find_secrets_redacts_to_four_chars_and_never_echoes_value() {
+        let hits = find_secrets("k = AKIAIOSFODNN7EXAMPLE");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].redacted, "AKIA…");
+        assert!(!hits[0].redacted.contains("IOSFODNN7EXAMPLE"));
+    }
+
+    #[test]
+    fn find_secrets_matches_json_and_bare_credential_assignment() {
+        // Both the JSON `"api_key": "…"` form and the bare `secret = "…"` form.
+        assert!(!find_secrets(r#"{ "api_key": "abcdefghijklmnop1234" }"#).is_empty());
+        assert!(!find_secrets(r#"client_secret = 'ABCDEFGHIJKLMNOP0000'"#).is_empty());
+        // Too-short value (< 16) and no credential keyword do not match.
+        assert!(find_secrets(r#"{ "api_key": "short" }"#).is_empty());
+        assert!(find_secrets("function add(a, b) { return a + b; }").is_empty());
+    }
+
+    #[test]
+    fn extract_endpoints_dedupes_and_caps() {
+        let body = r#"fetch("/api/users"); x("https://api.test/v1/orders"); y("/api/users");"#;
+        let eps = extract_endpoints(body);
+        assert!(eps.contains(&"/api/users".to_string()));
+        assert!(eps.contains(&"https://api.test/v1/orders".to_string()));
+        // Deduped: `/api/users` appears once despite two references.
+        assert_eq!(eps.iter().filter(|e| *e == "/api/users").count(), 1);
+
+        // The cap bounds the output.
+        let mut many = String::new();
+        for i in 0..100 {
+            many.push_str(&format!("\"/api/item{i}\" "));
+        }
+        assert_eq!(extract_endpoints(&many).len(), ENDPOINT_CAP);
+    }
+
+    #[test]
+    fn is_javascript_detects_script_content_types() {
+        let mut resp = camio_core::HttpResponse {
+            status: 200,
+            version: camio_core::HttpVersion::Http11,
+            reason: None,
+            headers: camio_core::HeaderList::new(),
+            body: camio_core::Body::empty(),
+        };
+        resp.headers.push("Content-Type", "application/javascript");
+        assert!(is_javascript(&resp));
+        resp.headers = camio_core::HeaderList::new();
+        resp.headers.push("Content-Type", "text/html");
+        assert!(!is_javascript(&resp));
     }
 }

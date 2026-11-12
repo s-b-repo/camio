@@ -10,6 +10,7 @@
 //!   * `camio mcp serve`              — the local MCP server over stdio
 
 use anyhow::{bail, Context, Result};
+use camio_ai::{AiClient, AiConfig, Message};
 use camio_automate::{AttackType, Baseline, Campaign, PayloadSet};
 use camio_convert::Transform;
 use camio_core::{
@@ -22,6 +23,7 @@ use camio_mcp::McpServer;
 use camio_request::{matched_engine, FingerprintSpec};
 use camio_store::Store;
 use clap::{Parser, Subcommand, ValueEnum};
+use std::cell::RefCell;
 use std::io::Read as _;
 use std::path::PathBuf;
 
@@ -78,6 +80,10 @@ enum Command {
     Sitemap(SitemapArgs),
     /// List or show the built-in payload packs.
     Payloads(PayloadsArgs),
+    /// Opt-in ACTIVE scan (reflected XSS, error-based SQLi, open redirect) via the matched engine.
+    Activescan(ActiveArgs),
+    /// Ask the optional AI assistant (NVIDIA NIM / OpenAI / Ollama; BYO key via env).
+    Ai(AiArgs),
     /// Launch the native desktop app — every capability in one window.
     App(AppArgs),
     /// Launch the local web UI — every capability in your browser (loopback-only).
@@ -332,6 +338,8 @@ fn main() -> Result<()> {
         Command::Sequencer(args) => sequencer_cmd(args),
         Command::Sitemap(args) => sitemap_cmd(args),
         Command::Payloads(args) => payloads_cmd(args),
+        Command::Activescan(args) => activescan_cmd(args),
+        Command::Ai(args) => ai_cmd(args),
         Command::App(args) => app_cmd(args),
         Command::Ui(args) => ui_cmd(args),
         Command::Mcp { action } => match action {
@@ -1371,6 +1379,199 @@ fn truncate(s: &str, max: usize) -> String {
         let t: String = s.chars().take(max.saturating_sub(1)).collect();
         format!("{t}…")
     }
+}
+
+// ===========================================================================
+// Active scan (opt-in)
+// ===========================================================================
+
+#[derive(Parser)]
+struct ActiveArgs {
+    /// Authorized target URL (the scanner derives injectable inputs from it).
+    url: String,
+    #[arg(long, short = 'X', default_value = "GET")]
+    method: String,
+    #[arg(long = "header", short = 'H')]
+    headers: Vec<String>,
+    #[arg(long)]
+    body: Option<String>,
+    #[arg(long, value_enum, default_value_t = Preset::Balanced)]
+    preset: Preset,
+    #[arg(long = "scope-include")]
+    scope_include: Vec<String>,
+    #[arg(long = "scope-exclude")]
+    scope_exclude: Vec<String>,
+    #[arg(long)]
+    allow_private: bool,
+    /// Actually run the active probes. Without this, prints what would run.
+    #[arg(long)]
+    confirm: bool,
+    #[arg(long, default_value = "camio.db")]
+    db: PathBuf,
+    /// Persist findings to the findings store.
+    #[arg(long)]
+    save: bool,
+    #[arg(long)]
+    json: bool,
+}
+
+fn activescan_cmd(args: ActiveArgs) -> Result<()> {
+    let profile = profile_for(args.preset);
+    let scope = build_scope(&args.scope_include, &args.scope_exclude, args.allow_private)?;
+    let base = build_request(&args.url, &args.method, &args.headers, &args.body, &None)?;
+    let decision = scope.decide(&HttpExchange::new(base.clone(), Source::Scanner));
+
+    // Active testing (plan §16): must be in scope and explicitly confirmed.
+    let policy = Policy {
+        allow_active: true,
+        allow_destructive: false,
+        require_confirmation: true,
+    };
+    match policy.gate(ActionClass::Active, decision, args.confirm) {
+        PolicyOutcome::Deny(reason) => bail!("refused: {reason}"),
+        PolicyOutcome::NeedsConfirmation(reason) => {
+            println!("{reason}.");
+            println!(
+                "Would actively probe {} (scope {}) for reflected XSS, error-based SQLi and open redirect.",
+                args.url,
+                decision.as_str()
+            );
+            println!("Re-run with --confirm to execute (authorized targets only).");
+            return Ok(());
+        }
+        PolicyOutcome::Allow => {}
+    }
+
+    let eng = matched_engine(&profile).context("building matched request engine")?;
+    eprintln!(
+        "engine: {} (fingerprint-matched: {})",
+        eng.label(),
+        eng.is_fingerprint_matched()
+    );
+    let store = RefCell::new(
+        Store::open(&args.db).with_context(|| format!("opening {}", args.db.display()))?,
+    );
+
+    // The sender is the one place scope is re-enforced on every probe (plan §16).
+    let findings = {
+        let send = |req: HttpRequest| -> Option<HttpExchange> {
+            if !scope
+                .decide(&HttpExchange::new(req.clone(), Source::Scanner))
+                .is_sendable()
+            {
+                return None;
+            }
+            match eng.send(req, Source::Scanner) {
+                Ok(ex) => {
+                    let _ = store.borrow_mut().insert(&ex);
+                    Some(ex)
+                }
+                Err(e) => {
+                    eprintln!("probe send failed: {e}");
+                    None
+                }
+            }
+        };
+        camio_active::run_active(&base, &send)
+    };
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&findings)?);
+    } else {
+        print_findings(&findings);
+        println!("\n{} finding(s) from the active scan.", findings.len());
+    }
+    if args.save {
+        let mut n = 0;
+        for f in &findings {
+            if store.borrow_mut().insert_finding(f).is_ok() {
+                n += 1;
+            }
+        }
+        println!("saved {n} finding(s) to {}", args.db.display());
+    }
+    Ok(())
+}
+
+// ===========================================================================
+// AI assistant (optional, BYO key)
+// ===========================================================================
+
+#[derive(Copy, Clone, ValueEnum)]
+enum AiProviderArg {
+    NvidiaNim,
+    Openai,
+    Ollama,
+}
+
+#[derive(Parser)]
+struct AiArgs {
+    /// The prompt (free text; multiple words are joined).
+    prompt: Vec<String>,
+    /// Provider; default auto-detects from env (CAMIO_AI_PROVIDER / available key, else Ollama).
+    #[arg(long, value_enum)]
+    provider: Option<AiProviderArg>,
+    /// Model id (else the provider default or CAMIO_AI_MODEL).
+    #[arg(long)]
+    model: Option<String>,
+    /// Optional system prompt.
+    #[arg(long)]
+    system: Option<String>,
+    /// Translate the prompt into a CamioQL query instead of a chat answer.
+    #[arg(long)]
+    camioql: bool,
+}
+
+fn ai_cmd(args: AiArgs) -> Result<()> {
+    let prompt = args.prompt.join(" ");
+    if prompt.trim().is_empty() {
+        bail!("give a prompt, e.g.  camio ai \"explain this CSRF defence\"");
+    }
+    let default_model = |p: AiProviderArg| match p {
+        AiProviderArg::NvidiaNim => "meta/llama-3.1-70b-instruct",
+        AiProviderArg::Openai => "gpt-4o-mini",
+        AiProviderArg::Ollama => "llama3.1",
+    };
+    let cfg = match args.provider {
+        Some(p) => {
+            let model = args
+                .model
+                .clone()
+                .unwrap_or_else(|| default_model(p).to_string());
+            match p {
+                AiProviderArg::NvidiaNim => AiConfig::nvidia_nim(model),
+                AiProviderArg::Openai => AiConfig::openai(model),
+                AiProviderArg::Ollama => AiConfig::ollama(model),
+            }
+        }
+        None => {
+            let mut c = AiConfig::from_env();
+            if let Some(m) = args.model.clone() {
+                c.model = m;
+            }
+            c
+        }
+    };
+    if !cfg.is_ready() {
+        bail!(
+            "AI not configured: provider {} has no API key. Set NVIDIA_API_KEY (NVIDIA NIM) or OPENAI_API_KEY, or use --provider ollama with a local Ollama.",
+            cfg.provider
+        );
+    }
+    let client = AiClient::new(cfg).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let messages = if args.camioql {
+        camio_ai::nl_to_camioql(&prompt)
+    } else {
+        let mut m = Vec::new();
+        if let Some(s) = &args.system {
+            m.push(Message::system(s.clone()));
+        }
+        m.push(Message::user(prompt));
+        m
+    };
+    let response = client.chat(&messages).map_err(|e| anyhow::anyhow!("{e}"))?;
+    println!("{response}");
+    Ok(())
 }
 
 // ===========================================================================

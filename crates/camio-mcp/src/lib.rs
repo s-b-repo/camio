@@ -164,6 +164,8 @@ impl McpServer {
             "fuzz_plan" => self.tool_fuzz_plan(&args),
             "import_file" => self.tool_import(&args),
             "payloads_list" => Ok(self.tool_payloads()),
+            "active_scan" => self.tool_active_scan(&args),
+            "analyze_js" => self.tool_analyze_js(&args),
             other => Err(format!("unknown tool: {other}")),
         };
         match result {
@@ -443,6 +445,70 @@ impl McpServer {
             })
             .collect();
         json!({ "packs": packs })
+    }
+
+    /// Run the opt-in ACTIVE scan (reflected XSS, error-based SQLi, open redirect)
+    /// against a target. Policy-gated: Active class, in-scope + confirm required
+    /// (plan §16); the sender re-checks scope on every probe.
+    fn tool_active_scan(&mut self, args: &Value) -> Result<Value, String> {
+        let base = request_from_args(args)?;
+        let confirm = args
+            .get("confirm")
+            .and_then(|c| c.as_bool())
+            .unwrap_or(false);
+        let decision = self
+            .scope
+            .decide(&HttpExchange::new(base.clone(), Source::Mcp));
+        match self.policy.gate(ActionClass::Active, decision, confirm) {
+            PolicyOutcome::Deny(reason) => return Err(format!("refused: {reason}")),
+            PolicyOutcome::NeedsConfirmation(reason) => {
+                return Ok(json!({
+                    "status": "confirmation_required",
+                    "reason": reason,
+                    "scope": decision.as_str(),
+                    "note": "re-call active_scan with confirm:true to run the active probes",
+                }));
+            }
+            PolicyOutcome::Allow => {}
+        }
+        let findings = {
+            let engine = self.engine.as_ref();
+            let scope = &self.scope;
+            let send = |req: HttpRequest| -> Option<HttpExchange> {
+                if !scope
+                    .decide(&HttpExchange::new(req.clone(), Source::Mcp))
+                    .is_sendable()
+                {
+                    return None;
+                }
+                engine.send(req, Source::Mcp).ok()
+            };
+            camio_active::run_active(&base, &send)
+        };
+        let mut saved = 0u64;
+        if let Some(store) = self.store.as_mut() {
+            for f in &findings {
+                if store.insert_finding(f).is_ok() {
+                    saved += 1;
+                }
+            }
+        }
+        Ok(json!({
+            "status": "done",
+            "count": findings.len(),
+            "saved": saved,
+            "findings": serde_json::to_value(&findings).unwrap_or(json!([])),
+        }))
+    }
+
+    /// Passively extract hard-coded secrets and endpoints from a JS (or any) blob.
+    fn tool_analyze_js(&self, args: &Value) -> Result<Value, String> {
+        let body = args
+            .get("body")
+            .and_then(|b| b.as_str())
+            .ok_or("missing `body`")?;
+        let a = camio_scan::analyze_js(body);
+        Ok(json!({ "secrets": a.secrets, "endpoints": a.endpoints }))
     }
 
     // --- Resources ----------------------------------------------------------
@@ -750,6 +816,30 @@ fn tool_defs() -> Value {
             "name": "payloads_list",
             "description": "List the built-in payload packs and their sizes.",
             "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "active_scan",
+            "description": "Opt-in ACTIVE scan (reflected XSS, error-based SQLi, open redirect) against a target. Sends probes via the matched engine. Policy-gated: out-of-scope/blocked refused; requires confirm:true (a dry call returns the scope decision).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string" },
+                    "method": { "type": "string" },
+                    "headers": { "type": "object" },
+                    "body": { "type": "string" },
+                    "confirm": { "type": "boolean", "description": "must be true to run the active probes" }
+                },
+                "required": ["url"]
+            }
+        },
+        {
+            "name": "analyze_js",
+            "description": "Passively extract hard-coded secrets (redacted) and referenced endpoints from a JavaScript (or any) body.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "body": { "type": "string" } },
+                "required": ["body"]
+            }
         }
     ])
 }

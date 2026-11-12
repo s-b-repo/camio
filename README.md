@@ -66,11 +66,24 @@ problem, and measures fingerprint parity rather than claiming undetectability.
   (loopback/link-local/metadata/private are blocked unless a lab profile opts in),
   and one shared authorization policy (reads free; sends in-scope + confirmed;
   active/destructive disabled by default).
-- **Passive scanner** (`camio-scan`): ten passive checks (missing security
-  headers, insecure cookies, banner/version disclosure, directory listing,
-  verbose errors, reflected input, CORS misconfig, secrets in the URL, basic-auth
-  over HTTP, mixed content) run over captured history and produce deduplicated,
-  severity-ranked findings (plan §8, §15 Phase 4: "passive checks first").
+- **Passive scanner** (`camio-scan`): seventeen passive checks over captured
+  history — security headers, insecure cookies, banner/version disclosure,
+  directory listing, verbose errors, reflected input, CORS misconfig, secrets in
+  the URL, basic-auth over HTTP, mixed content, **plus automated API/JS/web-domain
+  testing**: hard-coded secret leaks in responses (redacted), JavaScript endpoint
+  discovery, exposed Swagger/OpenAPI docs, GraphQL introspection, exposed source
+  maps, sensitive JSON fields, and sensitive path exposure (`.git`/`.env`/…) —
+  producing deduplicated, severity-ranked findings (plan §8, §15 Phase 4). The
+  reusable `analyze_js` helper extracts secrets + endpoints from any JS blob.
+- **Active scanner** (`camio-active`, opt-in): reflected-XSS, error-based SQLi and
+  open-redirect probes that send through the matched engine. It is pure — the
+  caller injects a scope- and policy-gated sender — so active testing stays
+  in-scope, confirmed and bounded (plan §16). Run it with `camio activescan`.
+- **AI assistant** (`camio-ai`, optional, BYO key): an OpenAI-compatible client
+  for **NVIDIA NIM**, OpenAI, or a local Ollama — explain an exchange, suggest
+  next tests, or translate natural language to CamioQL. Off by default, needs an
+  explicit API key (from env), no telemetry; the key is never logged or persisted
+  (plan §11).
 - **Automate / Intruder** (`camio-automate`): `§…§` insertion points, built-in
   payload packs plus file imports, the four attack types (Sniper, Battering Ram,
   Pitchfork, Cluster Bomb), **bounded campaigns** that show a projected request
@@ -91,16 +104,18 @@ problem, and measures fingerprint parity rather than claiming undetectability.
   history (Discover), and CamioQL-gated match-and-replace rules that rewrite
   outgoing requests without reordering or recasing headers (plan §7.2).
 - **MCP server** (`camio-mcp`): a local stdio MCP server exposing Camio's data
-  (fingerprint status, history, findings) and **14 tools** — CamioQL query, scope
-  check, policy-gated send, plus convert, scan, sequencer, input discovery, site
-  map, fuzz planning, file import and payload listing — all under the same policy
-  as the CLI.
+  (fingerprint status, history, findings) and **16 tools** — CamioQL query, scope
+  check, policy-gated send, convert, scan, sequencer, input discovery, site map,
+  fuzz planning, file import, payload listing, a policy-gated **active_scan**, and
+  **analyze_js** — all under the same policy as the CLI.
 - **Native desktop app** (`camio-app`): `camio app` opens a real egui/eframe
-  window (no Electron, no bundled JS runtime) with a grouped left rail of 21
+  window (no Electron, no bundled JS runtime) with a grouped left rail of 24
   surfaces — Status, Fingerprint, History, Query, Site map, Replay, Discover,
-  Automate/Fuzz, Scanner, Findings, Convert, Comparer, JWT, Sequencer, Match &
-  Replace, Scope, Payloads, Import, Open-browser, Plugins, Settings — calling the
-  same crates in-process under the same scope/policy gates as the CLI. It adds:
+  Automate/Fuzz, Scanner, **Active scan**, Findings, Convert, Comparer, JWT,
+  Sequencer, Match & Replace, Scope, Payloads, Import, **Analyze JS**, **AI
+  assistant**, Open-browser, Plugins, Settings — calling the same crates in-process
+  under the same scope/policy gates as the CLI (AI calls run on a background thread
+  so the window stays responsive). It adds:
   - **Customizable themes + background image**: seven presets (Midnight,
     Antigravity, LibreWolf, Carbon, Matrix, Daylight, High Contrast), a live
     editor (accent/window/panel/text colours, corner rounding) and an optional
@@ -214,6 +229,14 @@ cargo run -p camio-cli -- fuzz 'https://example.org/item?id=§1§' \
 
 # Analyse session-token randomness
 cargo run -p camio-cli -- sequencer --file tokens.txt
+
+# Opt-in ACTIVE scan of an authorized target (preview first, then --confirm)
+cargo run -p camio-cli -- activescan 'https://example.org/item?id=1' --confirm
+
+# Ask the optional AI assistant (BYO key via env)
+export NVIDIA_API_KEY=nvapi-...                                # or OPENAI_API_KEY
+cargo run -p camio-cli -- ai --provider nvidia-nim "explain the risks in a reflected 'next' param"
+cargo run -p camio-cli -- ai --camioql "find 5xx responses from the api host"
 
 # Rewrite an outgoing request (Match & Replace), then send
 cargo run -p camio-cli -- send https://example.org --confirm \

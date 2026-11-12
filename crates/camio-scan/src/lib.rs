@@ -38,8 +38,10 @@ use serde::{Deserialize, Serialize};
 mod checks;
 
 pub use checks::{
-    BasicAuthOverHttp, CorsMisconfig, DirectoryListing, InsecureCookies, MissingSecurityHeaders,
-    MixedContent, ReflectedInput, SensitiveDataInUrl, ServerBannerDisclosure, VerboseError,
+    BasicAuthOverHttp, CorsMisconfig, DirectoryListing, ExposedApiDocs, GraphqlIntrospection,
+    InsecureCookies, JsEndpoints, JsSecretsLeak, MissingSecurityHeaders, MixedContent,
+    ReflectedInput, SensitiveDataInUrl, SensitiveJsonFields, SensitivePathExposure,
+    ServerBannerDisclosure, SourceMapExposed, VerboseError,
 };
 
 /// A single passive security check.
@@ -82,6 +84,14 @@ pub fn default_checks() -> Vec<Box<dyn PassiveCheck>> {
         Box::new(SensitiveDataInUrl),
         Box::new(BasicAuthOverHttp),
         Box::new(MixedContent),
+        // Passive API / JavaScript / web-domain checks (plan §8).
+        Box::new(JsSecretsLeak),
+        Box::new(JsEndpoints),
+        Box::new(ExposedApiDocs),
+        Box::new(GraphqlIntrospection),
+        Box::new(SourceMapExposed),
+        Box::new(SensitiveJsonFields),
+        Box::new(SensitivePathExposure),
     ]
 }
 
@@ -95,6 +105,36 @@ pub fn scan_exchange(ex: &HttpExchange) -> Vec<Finding> {
         out.extend(check.check(ex));
     }
     out
+}
+
+/// The result of statically analysing one JavaScript (or JSON/text) body:
+/// the *kinds* of hard-coded secret found and the endpoints/paths it references
+/// (plan §8 "Scan & crawl"; §15 Phase 4 "crawler/discovery").
+///
+/// This is the reusable core behind the [`JsSecretsLeak`] and [`JsEndpoints`]
+/// checks, exposed so the app/CLI can analyse a bundle directly. It is purely
+/// passive — it sends no traffic — and, per plan §16, `secrets` holds only the
+/// kind labels, never the raw secret values.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JsAnalysis {
+    /// Kinds of hard-coded secret detected (e.g. `"AWS access key"`), each at
+    /// most once. The secret values themselves are never included.
+    pub secrets: Vec<String>,
+    /// Referenced endpoints/paths (absolute/protocol-relative URLs or absolute
+    /// paths), de-duplicated in first-seen order and capped.
+    pub endpoints: Vec<String>,
+}
+
+/// Analyse a JavaScript/JSON/text `body` for hard-coded secrets and referenced
+/// endpoints, returning a [`JsAnalysis`]. Sends no traffic; the returned
+/// `secrets` are kind labels only (plan §16), never the raw values.
+pub fn analyze_js(body: &str) -> JsAnalysis {
+    let secrets = checks::find_secrets(body)
+        .into_iter()
+        .map(|hit| hit.kind.to_string())
+        .collect();
+    let endpoints = checks::extract_endpoints(body);
+    JsAnalysis { secrets, endpoints }
 }
 
 /// The result of scanning a batch of exchanges (plan §8: evidence,
@@ -200,13 +240,13 @@ mod tests {
     }
 
     #[test]
-    fn default_checks_are_ten_with_unique_ids() {
+    fn default_checks_have_unique_ids() {
         let checks = default_checks();
-        assert_eq!(checks.len(), 10);
+        assert_eq!(checks.len(), 17);
         let mut ids: Vec<&str> = checks.iter().map(|c| c.id()).collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 10, "check ids must be unique");
+        assert_eq!(ids.len(), 17, "check ids must be unique");
     }
 
     #[test]
@@ -263,7 +303,7 @@ mod tests {
         );
         assert_eq!(csp[0].evidence, vec![ExchangeId(1), ExchangeId(2)]);
         assert_eq!(report.exchanges_scanned, 2);
-        assert_eq!(report.checks_run, 10);
+        assert_eq!(report.checks_run, 17);
     }
 
     #[test]
@@ -312,7 +352,7 @@ mod tests {
         let report = scan_all(&[]);
         assert!(report.findings.is_empty());
         assert_eq!(report.exchanges_scanned, 0);
-        assert_eq!(report.checks_run, 10);
+        assert_eq!(report.checks_run, 17);
     }
 
     #[test]
@@ -344,5 +384,27 @@ mod tests {
         // Request-only checks (sensitive URL, basic auth) still don't fire on a
         // clean https GET with no query or auth.
         assert!(scan_exchange(&ex).is_empty());
+    }
+
+    #[test]
+    fn analyze_js_reports_secret_kinds_and_endpoints() {
+        let blob = r#"const AWS_KEY = "AKIAIOSFODNN7EXAMPLE"; fetch("/api/x");"#;
+        let a = analyze_js(blob);
+        // Secret kind is named; the raw value is never surfaced.
+        assert!(a.secrets.iter().any(|s| s.contains("AWS")));
+        assert!(!a.secrets.iter().any(|s| s.contains("AKIAIOSFODNN7EXAMPLE")));
+        // The `/api/x` endpoint is discovered.
+        assert!(a.endpoints.iter().any(|e| e == "/api/x"));
+    }
+
+    #[test]
+    fn analyze_js_is_empty_for_benign_code_and_roundtrips() {
+        let a = analyze_js("function add(a, b) { return a + b; }");
+        assert!(a.secrets.is_empty());
+        assert!(a.endpoints.is_empty());
+        // JsAnalysis is serde-serializable for export.
+        let json = serde_json::to_string(&a).expect("serialize");
+        let back: JsAnalysis = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(a, back);
     }
 }

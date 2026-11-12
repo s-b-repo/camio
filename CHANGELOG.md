@@ -4,6 +4,29 @@ All notable changes to Camio are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project uses semantic
 versioning once it reaches 1.0.
 
+## [Unreleased]
+
+### Added
+
+- **AI assistant** (`camio-ai`): optional, BYO-key, OpenAI-compatible client for
+  NVIDIA NIM, OpenAI, or a local Ollama — explain an exchange, suggest next tests,
+  or translate natural language to CamioQL. Off by default; the API key is read
+  from env and never logged, serialized, or carried in errors. CLI `camio ai`,
+  and an "AI assistant" surface in the native app (calls run on a background
+  thread so the window stays responsive).
+- **Active scanner** (`camio-active`): opt-in reflected-XSS, error-based SQLi and
+  open-redirect probes. The checks are pure; the caller injects a scope- and
+  policy-gated sender, so active testing stays in-scope, confirmed and bounded.
+  CLI `camio activescan`, native-app "Active scan" surface, and a policy-gated
+  `active_scan` MCP tool.
+- **Automated passive API / JavaScript / web-domain testing** (`camio-scan`):
+  seven new passive checks — hard-coded secret leaks (redacted), JS endpoint
+  discovery, exposed Swagger/OpenAPI docs, GraphQL introspection, exposed source
+  maps, sensitive JSON fields, and sensitive-path exposure — plus a reusable
+  `analyze_js` helper and an `analyze_js` MCP tool (17 passive checks total).
+- Native UI: a bottom status bar (DB, AI status, active-check state) and the three
+  new surfaces above.
+
 ## [0.1.0] — 2026-11-12
 
 First tagged release: a working, local-first web-security workbench with

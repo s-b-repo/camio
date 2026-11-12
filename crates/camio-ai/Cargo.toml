@@ -1,0 +1,15 @@
+[package]
+name = "camio-ai"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Optional AI assistant: OpenAI-compatible client (NVIDIA NIM, OpenAI, Ollama) for Camio."
+
+[dependencies]
+camio-core.workspace = true
+wreq.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true

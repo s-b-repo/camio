@@ -798,10 +798,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "camio-active"
+version = "0.0.1"
+dependencies = [
+ "camio-automate",
+ "camio-core",
+ "regex",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "camio-ai"
+version = "0.0.1"
+dependencies = [
+ "camio-core",
+ "serde",
+ "serde_json",
+ "tokio",
+ "wreq",
+]
+
+[[package]]
 name = "camio-app"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "camio-active",
+ "camio-ai",
  "camio-automate",
  "camio-convert",
  "camio-core",
@@ -832,6 +856,8 @@ name = "camio-cli"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "camio-active",
+ "camio-ai",
  "camio-app",
  "camio-automate",
  "camio-convert",
@@ -898,6 +924,7 @@ dependencies = [
 name = "camio-mcp"
 version = "0.0.1"
 dependencies = [
+ "camio-active",
  "camio-automate",
  "camio-convert",
  "camio-core",
