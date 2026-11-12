@@ -1,0 +1,18 @@
+[package]
+name = "camio-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Camio command-line interface."
+
+[[bin]]
+name = "camio"
+path = "src/main.rs"
+
+[dependencies]
+camio-core = { path = "../camio-core" }
+camio-engine = { path = "../camio-engine" }
+serde_json.workspace = true
+anyhow.workspace = true
+clap.workspace = true

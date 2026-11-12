@@ -1,0 +1,14 @@
+[package]
+name = "camio-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Camoufox engine supervisor: unpack, locate, configure and launch the managed browser."
+
+[dependencies]
+camio-core = { path = "../camio-core" }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+zip.workspace = true

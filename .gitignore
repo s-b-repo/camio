@@ -1,0 +1,7 @@
+/target
+/vendor/camoufox/*
+!/vendor/camoufox/.gitkeep
+**/*.rs.bk
+.DS_Store
+*.log
+/profiles/
