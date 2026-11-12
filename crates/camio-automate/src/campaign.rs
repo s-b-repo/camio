@@ -318,6 +318,9 @@ fn build_items(c: &Campaign, p: usize) -> Vec<Item> {
         AttackType::Pitchfork => {
             let min = c.sets.iter().map(|s| s.len()).min().unwrap_or(0);
             let mut items = Vec::with_capacity(min);
+            // `i` indexes payloads across DIFFERENT sets (`c.sets[j].payloads[i]`),
+            // so a plain iterator cannot replace this range index.
+            #[allow(clippy::needless_range_loop)]
             for i in 0..min {
                 let mut assign = vec![None; p];
                 let mut payloads = Vec::with_capacity(p);

@@ -29,7 +29,6 @@ edition = "2021"
 # plan.md §12 after full dependency review.
 license = "MPL-2.0"
 authors = ["Camio contributors"]
-repository = ""
 rust-version = "1.80"
 
 [workspace.dependencies]
