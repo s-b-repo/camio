@@ -9,6 +9,9 @@ description = "Passive (and opt-in active) security checks that produce Camio fi
 
 [dependencies]
 camio-core.workspace = true
+camio-import.workspace = true
+camio-store.workspace = true
+anyhow.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true

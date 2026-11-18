@@ -17,14 +17,22 @@ use anyhow::{anyhow, Result};
 use camio_automate::{AttackType, Baseline, Campaign, PayloadSet};
 use camio_convert::Transform;
 use camio_core::{
-    ActionClass, Body, FingerprintProfile, HttpExchange, HttpRequest, Policy, PolicyOutcome, Query,
-    Scope, SiteMap, Source,
+    ActionClass, Body, FingerprintProfile, HttpExchange, HttpRequest, Policy, PolicyOutcome, Scope,
+    SiteMap, Source,
 };
 use camio_request::{matched_engine, DryRunEngine, FingerprintSpec, RequestEngine};
-use camio_store::Store;
+use camio_store::{Store, ARTIFACT_BYTES};
 use serde_json::{json, Value};
+use std::io::Read;
 use std::path::PathBuf;
 use tiny_http::{Header, Method, Response, Server};
+
+mod access;
+mod workbench;
+
+use access::LocalAccess;
+type WebResponse = Response<std::io::Cursor<Vec<u8>>>;
+const MAX_BODY: u64 = 8 * 1024 * 1024;
 
 /// Everything the server needs: where to listen, the history DB, and the shared
 /// profile/scope/policy it enforces.
@@ -39,27 +47,32 @@ pub struct WebConfig {
 /// Serve the UI until the process is stopped. Requests are handled sequentially
 /// on one thread, so the store and request engine need no locking.
 pub fn serve(cfg: WebConfig) -> Result<()> {
-    let server = Server::http(&cfg.addr).map_err(|e| anyhow!("binding {}: {e}", cfg.addr))?;
+    let bind = access::loopback(&cfg.addr)?;
+    let server = Server::http(bind).map_err(|e| anyhow!("binding {bind}: {e}"))?;
+    let socket = server
+        .server_addr()
+        .to_ip()
+        .ok_or_else(|| anyhow!("expected a TCP address"))?;
+    let access = LocalAccess::new(socket)?;
+    open(&cfg).map_err(|error| anyhow!(error))?;
     let spec = FingerprintSpec::from_profile(&cfg.profile);
     // Best available engine; falls back to a no-network dry-run that is honest
     // about not being fingerprint-matched.
     let engine: Box<dyn RequestEngine> =
-        matched_engine(&cfg.profile).unwrap_or_else(|_| Box::new(DryRunEngine::new(spec.clone())));
+        matched_engine(&cfg.profile).unwrap_or_else(|_| Box::new(DryRunEngine::new(spec)));
 
-    eprintln!(
-        "camio web UI: http://{} (db {})",
-        cfg.addr,
-        cfg.db.display()
+    println!(
+        "Camio web workbench (Ctrl-C to stop)\n{}",
+        access.open_url()
     );
-    eprintln!("  loopback-only; active actions require confirm + in-scope. Ctrl-C to stop.");
 
     for mut request in server.incoming_requests() {
         let method = request.method().clone();
         let url = request.url().to_string();
         let path = url.split('?').next().unwrap_or("").to_string();
 
-        let response = route(&cfg, engine.as_ref(), &mut request, &method, &path);
-        let _ = request.respond(response);
+        let response = route(&cfg, engine.as_ref(), &access, &mut request, &method, &path);
+        let _ = request.respond(access::secure_headers(response));
     }
     Ok(())
 }
@@ -67,13 +80,24 @@ pub fn serve(cfg: WebConfig) -> Result<()> {
 fn route(
     cfg: &WebConfig,
     engine: &dyn RequestEngine,
+    access: &LocalAccess,
     request: &mut tiny_http::Request,
     method: &Method,
     path: &str,
-) -> Response<std::io::Cursor<Vec<u8>>> {
-    // Static page.
-    if method == &Method::Get && (path == "/" || path == "/index.html") {
-        return html_response(UI_HTML);
+) -> WebResponse {
+    if !access.same_origin(request.headers()) {
+        return error_response(403, "open the local address printed by Camio");
+    }
+    if method == &Method::Get {
+        if let Some((mime, bytes)) = static_asset(path) {
+            return Response::from_data(bytes).with_header(header("Content-Type", mime));
+        }
+    }
+    if !path.starts_with("/api/") {
+        return error_response(404, "not found");
+    }
+    if !access.authorized(request.headers()) {
+        return error_response(401, "open the session URL printed by Camio");
     }
     if method == &Method::Get && path == "/api/meta" {
         return json_response(&meta(cfg, engine));
@@ -82,16 +106,14 @@ fn route(
         return error_response(404, "not found");
     }
 
-    // All actions are POST + JSON.
-    let body = read_body(request);
-    let args: Value = serde_json::from_str(&body).unwrap_or(json!({}));
+    let args = match read_json(request) {
+        Ok(args) => args,
+        Err((status, message)) => return error_response(status, message),
+    };
 
     let result: Result<Value, String> = match path {
-        "/api/query" => api_query(cfg, &args),
-        "/api/history" => api_history(cfg, &args),
         "/api/scan" => api_scan(cfg, &args),
         "/api/sitemap" => api_sitemap(cfg, &args),
-        "/api/findings" => api_findings(cfg),
         "/api/convert" => api_convert(&args),
         "/api/jwt" => api_jwt(&args),
         "/api/sequencer" => api_sequencer(&args),
@@ -102,7 +124,10 @@ fn route(
         "/api/import" => api_import(cfg, &args),
         "/api/send" => api_send(cfg, engine, &args),
         "/api/fuzz_run" => api_fuzz_run(cfg, engine, &args),
-        other => Err(format!("unknown endpoint: {other}")),
+        other => match workbench::dispatch(cfg, other, &args) {
+            Some(result) => result,
+            None => return error_response(404, "unknown endpoint"),
+        },
     };
 
     match result {
@@ -135,38 +160,23 @@ fn open(cfg: &WebConfig) -> Result<Store, String> {
     Store::open(&cfg.db).map_err(|e| format!("opening {}: {e}", cfg.db.display()))
 }
 
-fn api_query(cfg: &WebConfig, args: &Value) -> Result<Value, String> {
-    let q = args.get("query").and_then(|q| q.as_str()).unwrap_or("");
-    let limit = args.get("limit").and_then(|l| l.as_u64()).unwrap_or(200) as usize;
-    let compiled = Query::compile(q).map_err(|e| format!("invalid CamioQL: {e}"))?;
-    let store = open(cfg)?;
-    let rows = store.query(&compiled, limit).map_err(|e| e.to_string())?;
-    Ok(json!({ "count": rows.len(), "exchanges": rows.iter().map(summary).collect::<Vec<_>>() }))
-}
-
-fn api_history(cfg: &WebConfig, args: &Value) -> Result<Value, String> {
-    let limit = args.get("limit").and_then(|l| l.as_u64()).unwrap_or(200) as usize;
-    let store = open(cfg)?;
-    let rows = store.recent(limit).map_err(|e| e.to_string())?;
-    Ok(json!({ "count": rows.len(), "exchanges": rows.iter().map(summary).collect::<Vec<_>>() }))
-}
-
 fn api_scan(cfg: &WebConfig, args: &Value) -> Result<Value, String> {
     let q = args.get("query").and_then(|q| q.as_str()).unwrap_or("");
     let limit = args.get("limit").and_then(|l| l.as_u64()).unwrap_or(1000) as usize;
     let save = args.get("save").and_then(|s| s.as_bool()).unwrap_or(false);
-    let compiled = Query::compile(q).map_err(|e| format!("invalid CamioQL: {e}"))?;
+    let compiled = workbench::compile(q).map_err(|e| format!("{e:#}"))?;
     let mut store = open(cfg)?;
-    let rows = store.query(&compiled, limit).map_err(|e| e.to_string())?;
+    let rows = store
+        .query_with_bodies(&compiled, limit.min(1000))
+        .map_err(|e| e.to_string())?;
     let report = camio_scan::scan_all(&rows);
-    let mut saved = 0u64;
-    if save {
-        for f in &report.findings {
-            if store.insert_finding(f).is_ok() {
-                saved += 1;
-            }
-        }
-    }
+    let saved = if save {
+        store
+            .insert_findings(&report.findings)
+            .map_err(|e| e.to_string())?
+    } else {
+        0
+    };
     Ok(json!({
         "exchanges_scanned": report.exchanges_scanned,
         "checks_run": report.checks_run,
@@ -179,20 +189,12 @@ fn api_scan(cfg: &WebConfig, args: &Value) -> Result<Value, String> {
 fn api_sitemap(cfg: &WebConfig, args: &Value) -> Result<Value, String> {
     let q = args.get("query").and_then(|q| q.as_str()).unwrap_or("");
     let limit = args.get("limit").and_then(|l| l.as_u64()).unwrap_or(5000) as usize;
-    let compiled = Query::compile(q).map_err(|e| format!("invalid CamioQL: {e}"))?;
+    let compiled = workbench::compile(q).map_err(|e| format!("{e:#}"))?;
     let store = open(cfg)?;
     let rows = store.query(&compiled, limit).map_err(|e| e.to_string())?;
     let map = SiteMap::build(&rows);
     Ok(
         json!({ "origin_count": map.origin_count(), "url_count": map.url_count(), "tree": map.render_tree() }),
-    )
-}
-
-fn api_findings(cfg: &WebConfig) -> Result<Value, String> {
-    let store = open(cfg)?;
-    let findings = store.list_findings().map_err(|e| e.to_string())?;
-    Ok(
-        json!({ "count": findings.len(), "findings": serde_json::to_value(&findings).unwrap_or(json!([])) }),
     )
 }
 
@@ -205,7 +207,11 @@ fn api_convert(args: &Value) -> Result<Value, String> {
     if steps.is_empty() {
         return Err("no transforms given".into());
     }
-    let out = camio_convert::apply_pipeline(input.as_bytes(), &steps).map_err(|e| e.to_string())?;
+    if steps.len() > 16 {
+        return Err("use at most 16 transforms per pipeline".into());
+    }
+    let out = camio_convert::apply_pipeline_limited(input.as_bytes(), &steps, 2 * 1024 * 1024)
+        .map_err(|e| e.to_string())?;
     let hex = Transform::HexEncode
         .apply(&out)
         .ok()
@@ -308,24 +314,21 @@ fn api_fuzz_plan(args: &Value) -> Result<Value, String> {
 
 fn api_import(cfg: &WebConfig, args: &Value) -> Result<Value, String> {
     let save = args.get("save").and_then(|s| s.as_bool()).unwrap_or(true);
-    // Either an inline `content` string or a local `path`.
-    let data: Vec<u8> = if let Some(content) = args.get("content").and_then(|c| c.as_str()) {
-        content.as_bytes().to_vec()
-    } else if let Some(path) = args.get("path").and_then(|p| p.as_str()) {
-        std::fs::read(path).map_err(|e| format!("reading {path}: {e}"))?
-    } else {
-        return Err("provide `content` (inline) or `path` (local file)".into());
-    };
-    let result = camio_import::import_bytes(&data).map_err(|e| e.to_string())?;
-    let mut stored = 0u64;
-    if save {
-        let mut store = open(cfg)?;
-        for ex in &result.exchanges {
-            if store.insert(ex).is_ok() {
-                stored += 1;
-            }
-        }
+    let content = args
+        .get("content")
+        .and_then(Value::as_str)
+        .ok_or("select a file or paste its contents")?;
+    if content.len() > ARTIFACT_BYTES {
+        return Err("traffic archives support up to 4 MiB in the web workbench".into());
     }
+    let result = camio_import::import_bytes(content.as_bytes()).map_err(|e| e.to_string())?;
+    let stored = if save {
+        open(cfg)?
+            .insert_exchanges(&result.exchanges)
+            .map_err(|e| e.to_string())?
+    } else {
+        0
+    };
     Ok(
         json!({ "format": result.format, "imported": result.exchanges.len(), "stored": stored, "warnings": result.warnings }),
     )
@@ -568,10 +571,36 @@ fn summary(ex: &HttpExchange) -> Value {
     })
 }
 
-fn read_body(request: &mut tiny_http::Request) -> String {
-    let mut s = String::new();
-    let _ = request.as_reader().read_to_string(&mut s);
-    s
+fn read_json(request: &mut tiny_http::Request) -> Result<Value, (u16, &'static str)> {
+    let content_type = access::single_header(request.headers(), "Content-Type")
+        .ok()
+        .flatten();
+    if !content_type
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"))
+    {
+        return Err((415, "expected application/json"));
+    }
+    let length = request.body_length();
+    if length.is_some_and(|size| size as u64 > MAX_BODY) {
+        return Err((413, "request exceeds 8 MiB"));
+    }
+    let mut bytes = Vec::new();
+    request
+        .as_reader()
+        .take(MAX_BODY + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| (400, "could not read request body"))?;
+    if bytes.len() as u64 > MAX_BODY {
+        return Err((413, "request exceeds 8 MiB"));
+    }
+    if length.is_some_and(|size| size != bytes.len()) {
+        return Err((400, "incomplete request body"));
+    }
+    match serde_json::from_slice::<Value>(&bytes) {
+        Ok(args) if args.is_object() => Ok(args),
+        _ => Err((400, "expected a JSON object")),
+    }
 }
 
 fn json_response(v: &Value) -> Response<std::io::Cursor<Vec<u8>>> {
@@ -587,15 +616,38 @@ fn error_response(code: u16, msg: &str) -> Response<std::io::Cursor<Vec<u8>>> {
         .with_header(header("Content-Type", "application/json; charset=utf-8"))
 }
 
-fn html_response(html: &str) -> Response<std::io::Cursor<Vec<u8>>> {
-    Response::from_string(html.to_string())
-        .with_header(header("Content-Type", "text/html; charset=utf-8"))
-}
-
 fn header(name: &str, value: &str) -> Header {
     Header::from_bytes(name.as_bytes(), value.as_bytes())
         .unwrap_or_else(|_| Header::from_bytes(&b"X"[..], &b"x"[..]).unwrap())
 }
 
-/// The single-page UI, served from memory.
-const UI_HTML: &str = include_str!("ui.html");
+fn static_asset(path: &str) -> Option<(&'static str, &'static [u8])> {
+    Some(match path {
+        "/" | "/index.html" => ("text/html; charset=utf-8", include_bytes!("ui.html")),
+        "/ui.css" => ("text/css; charset=utf-8", include_bytes!("ui.css")),
+        "/ui.js" => ("text/javascript; charset=utf-8", include_bytes!("ui.js")),
+        "/fonts/chakrapetch-700.woff2" => {
+            ("font/woff2", include_bytes!("fonts/chakrapetch-700.woff2"))
+        }
+        "/fonts/ibmplexsans-var.woff2" => {
+            ("font/woff2", include_bytes!("fonts/ibmplexsans-var.woff2"))
+        }
+        "/fonts/jetbrainsmono-var.woff2" => (
+            "font/woff2",
+            include_bytes!("fonts/jetbrainsmono-var.woff2"),
+        ),
+        "/fonts/ChakraPetch-OFL.txt" => (
+            "text/plain; charset=utf-8",
+            include_bytes!("fonts/ChakraPetch-OFL.txt"),
+        ),
+        "/fonts/IBMPlexSans-OFL.txt" => (
+            "text/plain; charset=utf-8",
+            include_bytes!("fonts/IBMPlexSans-OFL.txt"),
+        ),
+        "/fonts/JetBrainsMono-OFL.txt" => (
+            "text/plain; charset=utf-8",
+            include_bytes!("fonts/JetBrainsMono-OFL.txt"),
+        ),
+        _ => return None,
+    })
+}

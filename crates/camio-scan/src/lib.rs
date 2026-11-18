@@ -36,6 +36,12 @@ use camio_core::{Finding, HttpExchange, Severity};
 use serde::{Deserialize, Serialize};
 
 mod checks;
+mod review;
+
+pub use camio_store::MAX_REVIEW_EXCHANGES;
+pub use review::{
+    start_archive_review, start_passive_review, start_review_workflow, ReviewArchiveInput,
+};
 
 pub use checks::{
     BasicAuthOverHttp, CorsMisconfig, DirectoryListing, ExposedApiDocs, GraphqlIntrospection,

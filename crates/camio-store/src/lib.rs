@@ -15,19 +15,39 @@
 
 use anyhow::{Context, Result};
 use camio_core::{Body, ExchangeId, Finding, FindingId, HttpExchange, Query};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+mod archive;
+mod bundle;
+mod evidence;
+mod history;
+mod inventory;
+mod report;
+mod review;
+mod workflow;
+mod workspace;
+
+pub use archive::ReviewArchive;
+pub use bundle::{ReviewEvidenceBundle, MAX_BUNDLE_BYTES};
+pub use evidence::{
+    ArtifactFormat, ArtifactImport, ArtifactSummary, Observation, ObservationPage, ARTIFACT_BYTES,
+};
+pub use history::{ExchangePreview, HistoryPage, HistoryRow, INSPECT_BYTES, REVIEW_BODY_LIMIT};
+pub use inventory::{Asset, AssetInventory, AssetNote, Endpoint, EndpointEvidence, InventoryEvidence, InventoryPage};
+pub use report::{FindingReport, ReportFormat};
+pub use review::{ReviewCandidate, ReviewCounts, ReviewTask};
+pub use workflow::{ReviewPlan, ReviewWorkflow, WorkflowVersion, MAX_REVIEW_EXCHANGES};
+pub use workspace::{FindingReview, ReviewState, SavedExchange, SavedQuery, WorkspaceSummary};
+
+const SCHEMA_VERSION: i64 = 4;
 
 /// The embedded store.
 pub struct Store {
     conn: Connection,
 }
-
-/// Columns selected when reconstructing an exchange (keep in sync with
-/// [`Store::row_to_exchange`]).
-const RECONSTRUCT_COLS: &str = "id, req_len, req_body_sha, resp_len, resp_body_sha, meta_json";
 
 impl Store {
     /// Open (creating if needed) a store at `path`.
@@ -42,14 +62,62 @@ impl Store {
         Self::init(conn)
     }
 
-    fn init(conn: Connection) -> Result<Self> {
+    /// Backing path for a durable workspace. In-memory databases have no path.
+    pub fn path(&self) -> Option<&Path> {
+        self.conn
+            .path()
+            .filter(|path| !path.is_empty())
+            .map(Path::new)
+    }
+
+    fn init(mut conn: Connection) -> Result<Self> {
         // WAL + NORMAL keeps writes durable and reads concurrent without the
         // full-sync cost; tuned for an interactive local workbench (plan §5).
-        conn.pragma_update(None, "journal_mode", "WAL").ok();
-        conn.pragma_update(None, "synchronous", "NORMAL").ok();
-        conn.pragma_update(None, "foreign_keys", "ON").ok();
-
-        conn.execute_batch(SCHEMA).context("creating schema")?;
+        conn.busy_timeout(Duration::from_secs(5))?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        anyhow::ensure!(
+            version <= SCHEMA_VERSION,
+            "unsupported store schema version {version}"
+        );
+        if version < SCHEMA_VERSION {
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+            anyhow::ensure!(
+                version <= SCHEMA_VERSION,
+                "unsupported store schema version {version}"
+            );
+            if version == 0 {
+                tx.execute_batch(SCHEMA)
+                    .context("creating history schema")?;
+                tx.execute_batch(workspace::SCHEMA)
+                    .context("creating workbench schema")?;
+                tx.execute_batch(review::SCHEMA)
+                    .context("creating review schema")?;
+                tx.execute_batch(evidence::SCHEMA)
+                    .context("creating evidence schema")?;
+            }
+            if version < 2 {
+                tx.execute_batch(workflow::SCHEMA)
+                    .context("creating workflow schema")?;
+            }
+            if version < 3 {
+                tx.execute_batch(archive::SCHEMA)
+                    .context("creating archive review schema")?;
+            }
+            if version < 4 {
+                inventory::migrate(&tx).context("indexing recorded assets")?;
+            }
+            tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            tx.commit()?;
+        }
+        // The journal mode is a database-wide setting. Updating it only when
+        // necessary lets readers open a connection during an existing write.
+        let journal: String = conn.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
+        if journal != "wal" && journal != "memory" {
+            conn.pragma_update(None, "journal_mode", "WAL")?;
+        }
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
         Ok(Store { conn })
     }
 
@@ -71,11 +139,32 @@ impl Store {
     /// deduplicated content-addressed blobs.
     pub fn insert(&mut self, ex: &HttpExchange) -> Result<ExchangeId> {
         let tx = self.conn.transaction()?;
+        let id = Self::write_exchange(&tx, ex)?;
+        tx.commit()?;
+        Ok(id)
+    }
 
-        let req_body_sha = store_blob(&tx, &ex.request.body)?;
+    /// Save an archive atomically. A storage error leaves the archive unsaved.
+    pub fn insert_exchanges(&mut self, exchanges: &[HttpExchange]) -> Result<usize> {
+        let tx = self.conn.transaction()?;
+        for exchange in exchanges {
+            Self::write_exchange(&tx, exchange)?;
+        }
+        tx.commit()?;
+        Ok(exchanges.len())
+    }
+
+    fn write_exchange(conn: &Connection, ex: &HttpExchange) -> Result<ExchangeId> {
+        let (id, created_at) = Self::write_exchange_record(conn, ex)?;
+        inventory::index_exchange(conn, id, &ex.request.url, created_at)?;
+        Ok(id)
+    }
+
+    fn write_exchange_record(conn: &Connection, ex: &HttpExchange) -> Result<(ExchangeId, i64)> {
+        let req_body_sha = store_blob(conn, &ex.request.body)?;
         let (resp_body_sha, resp_len, resp_status) = match &ex.response {
             Some(r) => (
-                store_blob(&tx, &r.body)?,
+                store_blob(conn, &r.body)?,
                 Some(r.body.len() as i64),
                 Some(r.status as i64),
             ),
@@ -97,7 +186,7 @@ impl Store {
             ex.created_at_ms
         };
 
-        tx.execute(
+        conn.execute(
             "INSERT INTO exchanges (
                 created_at_ms, source, scope, fingerprint, method, url, host, port, path, ext,
                 req_len, req_body_sha, has_response, resp_status, resp_len, resp_body_sha,
@@ -128,53 +217,58 @@ impl Store {
                 meta_json,
             ],
         )?;
-        let id = tx.last_insert_rowid();
-        tx.commit()?;
-        Ok(ExchangeId(id))
+        Ok((ExchangeId(conn.last_insert_rowid()), created_at))
     }
 
     /// Fetch one exchange by id (with full bodies).
     pub fn get(&self, id: ExchangeId) -> Result<Option<HttpExchange>> {
-        let sql = format!("SELECT {RECONSTRUCT_COLS} FROM exchanges WHERE id = ?1");
-        let row = self
-            .conn
-            .query_row(&sql, params![id.0], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, Option<i64>>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, String>(5)?,
-                ))
-            })
-            .optional()?;
-        match row {
-            Some(r) => Ok(Some(self.row_to_exchange(r, true)?)),
-            None => Ok(None),
-        }
+        self.exchange_with_preview(id, None)
+            .map(|preview| preview.map(|p| p.exchange))
     }
 
     /// Return the most recent exchanges matching `query`, newest first, capped
     /// at `limit`. Body blobs are loaded only when the query inspects them.
     pub fn query(&self, query: &Query, limit: usize) -> Result<Vec<HttpExchange>> {
+        self.query_exchanges(query, limit, false)
+    }
+
+    /// Return real body bytes even when a filter only matches metadata.
+    pub fn query_with_bodies(&self, query: &Query, limit: usize) -> Result<Vec<HttpExchange>> {
+        self.query_exchanges(query, limit, true)
+    }
+
+    fn query_exchanges(
+        &self,
+        query: &Query,
+        limit: usize,
+        full_results: bool,
+    ) -> Result<Vec<HttpExchange>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
         let with_bodies = query.needs_body();
-        let sql = format!("SELECT {RECONSTRUCT_COLS} FROM exchanges ORDER BY id DESC");
+        let sql = format!(
+            "SELECT {} FROM exchanges ORDER BY id DESC",
+            history::EXCHANGE_COLUMNS
+        );
         let mut stmt = self.conn.prepare(&sql)?;
         let mut rows = stmt.query([])?;
 
         let mut out = Vec::new();
         while let Some(row) = rows.next()? {
-            let tuple = (
-                row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<i64>>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, String>(5)?,
-            );
-            let ex = self.row_to_exchange(tuple, with_bodies)?;
-            if query.matches(&ex) {
+            let mut row = history::StoredExchange::from_row(row)?;
+            if with_bodies {
+                row.load_bodies(self)?;
+            }
+            if query.matches(&row) {
+                let ex = if with_bodies {
+                    row.exchange
+                } else if full_results {
+                    row.load_bodies(self)?;
+                    row.exchange
+                } else {
+                    row.with_length_placeholders()
+                };
                 out.push(ex);
                 if out.len() >= limit {
                     break;
@@ -189,50 +283,23 @@ impl Store {
         self.query(&Query::compile("").expect("empty query compiles"), limit)
     }
 
-    fn row_to_exchange(
-        &self,
-        (id, req_len, req_sha, resp_len, resp_sha, meta_json): (
-            i64,
-            i64,
-            Option<String>,
-            Option<i64>,
-            Option<String>,
-            String,
-        ),
-        with_bodies: bool,
-    ) -> Result<HttpExchange> {
-        let mut ex: HttpExchange =
-            serde_json::from_str(&meta_json).context("deserializing exchange")?;
-        ex.id = ExchangeId(id);
-        ex.request.body = self.load_body(req_sha, req_len, with_bodies)?;
-        if let Some(resp) = ex.response.as_mut() {
-            resp.body = self.load_body(resp_sha, resp_len.unwrap_or(0), with_bodies)?;
-        }
-        Ok(ex)
-    }
-
-    /// Reconstitute a body. With `with_bodies == false`, returns a zero-filled
-    /// placeholder of the correct length so length/metadata queries stay exact
-    /// without paying for the blob read.
-    fn load_body(&self, sha: Option<String>, len: i64, with_bodies: bool) -> Result<Body> {
-        match sha {
-            None => Ok(Body::empty()),
-            Some(sha) if with_bodies => {
-                let bytes: Vec<u8> = self.conn.query_row(
-                    "SELECT bytes FROM blobs WHERE sha = ?1",
-                    params![sha],
-                    |r| r.get(0),
-                )?;
-                Ok(Body::from_bytes(bytes))
-            }
-            Some(_) => Ok(Body::from_bytes(vec![0u8; len.max(0) as usize])),
-        }
-    }
-
     // --- Findings (plan §8) -------------------------------------------------
 
     /// Record a finding, returning its id.
     pub fn insert_finding(&mut self, finding: &Finding) -> Result<FindingId> {
+        Self::write_finding(&self.conn, finding)
+    }
+
+    pub fn insert_findings(&mut self, findings: &[Finding]) -> Result<usize> {
+        let tx = self.conn.transaction()?;
+        for finding in findings {
+            Self::write_finding(&tx, finding)?;
+        }
+        tx.commit()?;
+        Ok(findings.len())
+    }
+
+    fn write_finding(conn: &Connection, finding: &Finding) -> Result<FindingId> {
         let created_at = if finding.created_at_ms == 0 {
             now_ms()
         } else {
@@ -242,7 +309,7 @@ impl Store {
         f.id = FindingId(0);
         f.created_at_ms = created_at;
         let json = serde_json::to_string(&f)?;
-        self.conn.execute(
+        conn.execute(
             "INSERT INTO findings (title, severity, confidence, created_at_ms, data_json)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
@@ -253,7 +320,7 @@ impl Store {
                 json,
             ],
         )?;
-        Ok(FindingId(self.conn.last_insert_rowid()))
+        Ok(FindingId(conn.last_insert_rowid()))
     }
 
     /// All findings, most severe first.
@@ -496,5 +563,192 @@ mod tests {
         let findings = store.list_findings().unwrap();
         assert_eq!(findings.len(), 2);
         assert_eq!(findings[0].severity, Severity::High); // most severe first
+    }
+
+    #[test]
+    fn migrates_unversioned_history_and_pages_without_body_placeholders() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        let binary = vec![0xa5; INSPECT_BYTES as usize + 1];
+        let mut record = exchange("https://project.test/a", 204, "");
+        record.request.body = Body::from_bytes(binary.clone());
+        record.request.headers.push("x-Duplicate", "one");
+        record.request.headers.push("X-Duplicate", "two");
+        let (older, _) = Store::write_exchange_record(&conn, &record).unwrap();
+        record.request.url = "https://project.test/b".into();
+        let (newer, _) = Store::write_exchange_record(&conn, &record).unwrap();
+
+        let store = Store::init(conn).unwrap();
+        let filter = Query::compile("req.len.gt:65536 AND resp.code:204").unwrap();
+        let one = store.history_page(&filter, None, 1).unwrap();
+        assert_eq!(one.exchanges[0].id, newer);
+        assert_eq!(one.next_before, Some(newer));
+        let two = store.history_page(&filter, one.next_before, 1).unwrap();
+        assert_eq!(two.exchanges[0].id, older);
+        assert!(two.next_before.is_none());
+        let inspector = store.inspect_exchange(older).unwrap().unwrap();
+        assert_eq!(inspector.req_len, INSPECT_BYTES + 1);
+        assert_eq!(
+            inspector.exchange.request.body.as_bytes(),
+            &binary[..INSPECT_BYTES as usize]
+        );
+        assert_eq!(inspector.exchange.request.headers, record.request.headers);
+        assert_eq!(
+            store.get(older).unwrap().unwrap().request.body.as_bytes(),
+            binary
+        );
+        assert!(store.workspace().is_ok());
+        let asset = store.asset_inventory("https://project.test", None).unwrap();
+        assert_eq!(asset.asset.captured, 2);
+        assert_eq!(asset.endpoints.len(), 2);
+    }
+
+    #[test]
+    fn preserves_imported_artifacts_and_distinguishes_tool_errors() {
+        let mut store = Store::open_in_memory().unwrap();
+        let input = concat!(
+            r#"{"url":"https://left:right@EXAMPLE.test:8443/a?secret=value","status_code":429,"title":"Start"}"#,
+            "\ninvalid\n",
+            r#"{"input":"https://other.test/","failed":true}"#,
+        );
+        let preview = store
+            .import_artifact(ArtifactFormat::Httpx, input, None, false)
+            .unwrap();
+        assert_eq!(
+            (preview.records, preview.skipped, preview.artifact_id),
+            (2, 1, None)
+        );
+        assert_eq!(preview.sample[0].location, "https://example.test:8443/a");
+        let report = store
+            .import_artifact(ArtifactFormat::Httpx, input, None, true)
+            .unwrap();
+        let id = report.artifact_id.unwrap();
+        assert_eq!(store.artifact_text(id).unwrap().as_deref(), Some(input));
+        assert_eq!(
+            store.observations(id, None).unwrap().observations[0].outcome,
+            "probe failed"
+        );
+        assert!(
+            store
+                .import_artifact(ArtifactFormat::Httpx, input, None, true)
+                .unwrap()
+                .existing
+        );
+        assert_eq!(store.artifacts(None).unwrap().len(), 1);
+
+        let findings = concat!(
+            r#"{"template-id":"header-review","matched-at":"https://sample.test/page","info":{"name":"Header review","severity":"low"}}"#,
+            "\n",
+            r#"{"template-id":"header-review","matched-at":"https://sample.test/page","matcher-status":false}"#,
+        );
+        let nuclei = store
+            .import_artifact(ArtifactFormat::Nuclei, findings, None, true)
+            .unwrap();
+        assert_eq!(nuclei.records, 2);
+        assert_eq!(nuclei.sample[0].outcome, "unverified observation");
+        assert_eq!(nuclei.sample[1].outcome, "no match");
+        assert!(store.list_findings().unwrap().is_empty());
+    }
+
+    #[test]
+    fn cancelled_reviews_cannot_commit_and_reports_exclude_notes() {
+        let mut store = Store::open_in_memory().unwrap();
+        let id = store.queue_review("", 2, true).unwrap();
+        assert!(store.start_review(id).unwrap());
+        let candidate = ReviewCandidate {
+            rule: "test-check",
+            host: "sample.test".into(),
+            finding: Finding {
+                id: FindingId(0),
+                title: "Raw title marker".into(),
+                severity: Severity::Low,
+                confidence: Confidence::Firm,
+                detail: "Raw detail marker".into(),
+                evidence: Vec::new(),
+                created_at_ms: 0,
+            },
+        };
+        assert!(store
+            .commit_review(
+                id,
+                &ReviewCounts::default(),
+                std::slice::from_ref(&candidate),
+                true
+            )
+            .unwrap());
+        assert!(store.cancel_review(id).unwrap());
+        assert!(!store
+            .commit_review(id, &ReviewCounts::default(), &[candidate], true)
+            .unwrap());
+        let findings = store.finding_reviews(None, 0, 10).unwrap();
+        assert_eq!(findings.len(), 1);
+        let finding = findings[0].finding.id;
+        store
+            .update_finding_review(finding, ReviewState::Confirmed, "Raw notes marker")
+            .unwrap();
+        let report = store.finding_report(Some(ReviewState::Confirmed)).unwrap();
+        for format in ReportFormat::ALL {
+            let output = report.render(format).unwrap();
+            assert!(output.contains("test-check"));
+            assert!(!output.contains("marker"));
+            assert_eq!(report.render(format).unwrap(), output);
+        }
+        let sarif: serde_json::Value =
+            serde_json::from_str(&report.render(ReportFormat::Sarif).unwrap()).unwrap();
+        assert_eq!(sarif["version"], "2.1.0");
+        assert_eq!(
+            sarif["runs"][0]["results"][0]["properties"]["camioTriageStatus"],
+            "confirmed"
+        );
+        assert_eq!(
+            store.review_task(id).unwrap().unwrap().task.state,
+            camio_core::TaskState::Cancelled
+        );
+    }
+
+    #[test]
+    fn saved_workflow_runs_keep_the_selected_version_across_edits() {
+        let conn = Connection::open_in_memory().unwrap();
+        for schema in [SCHEMA, workspace::SCHEMA, review::SCHEMA, evidence::SCHEMA] {
+            conn.execute_batch(schema).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 1).unwrap();
+        conn.execute_batch(
+            "INSERT INTO review_tasks(state, query, scan_limit, save, created_at_ms, updated_at_ms)
+            VALUES ('completed', '', 50, 0, 1, 1)",
+        )
+        .unwrap();
+        let mut store = Store::init(conn).unwrap();
+        assert!(store.review_tasks().unwrap()[0].workflow.is_none());
+
+        let older_plan = ReviewPlan::new("resp.code.eq:200", 17, false);
+        let older = store
+            .save_review_workflow("Header review", &older_plan)
+            .unwrap();
+        let retry = store
+            .save_review_workflow("Header review", &older_plan)
+            .unwrap();
+        assert_eq!(retry.revision, older.revision);
+        let newer = store
+            .save_review_workflow("Header review", &ReviewPlan::new("", 30, true))
+            .unwrap();
+        assert_eq!(store.review_workflows().unwrap().len(), 1);
+        assert_eq!(newer.revision.id, older.revision.id);
+        assert_eq!(
+            store
+                .review_workflow_versions(older.revision.id)
+                .unwrap()
+                .len(),
+            2
+        );
+
+        let (task, filter) = store
+            .queue_saved_review(older.revision.id, Some(older.revision.version))
+            .unwrap();
+        assert_eq!(filter.source(), "resp.code.eq:200");
+        let task = store.review_task(task).unwrap().unwrap();
+        assert_eq!(task.workflow.unwrap(), older.revision);
+        assert_eq!(task.limit, 17);
+        assert!(!task.save);
     }
 }

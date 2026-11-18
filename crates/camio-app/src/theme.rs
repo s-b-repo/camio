@@ -32,10 +32,17 @@ pub struct Theme {
     /// Background image opacity, `0.0..=1.0`.
     #[serde(default = "default_opacity")]
     pub bg_opacity: f32,
+    /// Animate the overview and interface transitions.
+    #[serde(default = "motion_enabled")]
+    pub motion: bool,
 }
 
 fn default_opacity() -> f32 {
     0.18
+}
+
+fn motion_enabled() -> bool {
+    true
 }
 
 impl Default for Theme {
@@ -52,6 +59,18 @@ impl Theme {
     pub fn presets() -> Vec<Theme> {
         vec![
             Theme {
+                name: "Sentinel Blue".into(),
+                dark: true,
+                accent: [30, 128, 255],
+                window: [0, 0, 0],
+                panel: [7, 15, 28],
+                text: [192, 214, 240],
+                rounding: 8.0,
+                bg_image: None,
+                bg_opacity: 0.18,
+                motion: true,
+            },
+            Theme {
                 name: "Midnight".into(),
                 dark: true,
                 accent: [88, 166, 255],
@@ -61,6 +80,7 @@ impl Theme {
                 rounding: 6.0,
                 bg_image: None,
                 bg_opacity: 0.18,
+                motion: true,
             },
             Theme {
                 name: "Antigravity".into(),
@@ -72,6 +92,7 @@ impl Theme {
                 rounding: 10.0,
                 bg_image: None,
                 bg_opacity: 0.22,
+                motion: true,
             },
             Theme {
                 name: "LibreWolf".into(),
@@ -83,6 +104,7 @@ impl Theme {
                 rounding: 7.0,
                 bg_image: None,
                 bg_opacity: 0.18,
+                motion: true,
             },
             Theme {
                 name: "Carbon".into(),
@@ -94,6 +116,7 @@ impl Theme {
                 rounding: 4.0,
                 bg_image: None,
                 bg_opacity: 0.15,
+                motion: true,
             },
             Theme {
                 name: "Matrix".into(),
@@ -105,6 +128,7 @@ impl Theme {
                 rounding: 3.0,
                 bg_image: None,
                 bg_opacity: 0.2,
+                motion: true,
             },
             Theme {
                 name: "Daylight".into(),
@@ -116,6 +140,7 @@ impl Theme {
                 rounding: 6.0,
                 bg_image: None,
                 bg_opacity: 0.1,
+                motion: true,
             },
             Theme {
                 name: "High Contrast".into(),
@@ -127,6 +152,7 @@ impl Theme {
                 rounding: 2.0,
                 bg_image: None,
                 bg_opacity: 0.0,
+                motion: false,
             },
         ]
     }
@@ -138,7 +164,7 @@ impl Theme {
         } else {
             Visuals::light()
         };
-        let accent = col(self.accent);
+        let accent = self.accent_color();
 
         v.hyperlink_color = accent;
         v.selection.bg_fill = accent.gamma_multiply(0.45);
@@ -148,11 +174,23 @@ impl Theme {
         v.widgets.hovered.bg_fill = accent.gamma_multiply(0.30);
         v.widgets.active.weak_bg_fill = accent.gamma_multiply(0.55);
         v.widgets.active.bg_fill = accent.gamma_multiply(0.75);
+        v.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, accent);
+        v.widgets.active.bg_stroke = Stroke::new(1.5_f32, accent);
 
         v.window_fill = col(self.window);
         v.panel_fill = col(self.panel);
         v.extreme_bg_color = col(scale(self.window, 0.6));
         v.override_text_color = Some(col(self.text));
+        if self.name == "Sentinel Blue" {
+            v.widgets.noninteractive.bg_stroke =
+                Stroke::new(1.0_f32, Color32::from_rgb(26, 47, 76));
+            v.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(38, 65, 103));
+            v.widgets.inactive.weak_bg_fill = Color32::from_rgb(12, 25, 44);
+            v.widgets.inactive.bg_fill = Color32::from_rgb(12, 25, 44);
+            v.extreme_bg_color = Color32::from_rgb(4, 10, 19);
+            v.faint_bg_color = Color32::from_rgb(10, 20, 35);
+            v.window_stroke = v.widgets.inactive.bg_stroke;
+        }
 
         let r = Rounding::same(self.rounding);
         v.window_rounding = r;
@@ -163,7 +201,24 @@ impl Theme {
         v.widgets.active.rounding = r;
         v.widgets.open.rounding = r;
 
-        ctx.set_visuals(v);
+        ctx.style_mut(|style| {
+            style.visuals = v;
+            style.animation_time = if self.motion { 0.16 } else { 0.0 };
+            style.spacing.item_spacing = egui::vec2(9.0, 6.0);
+            style.spacing.button_padding = egui::vec2(9.0, 4.0);
+        });
+    }
+
+    pub fn accent_color(&self) -> Color32 {
+        col(self.accent)
+    }
+
+    pub fn panel_color(&self) -> Color32 {
+        col(self.panel)
+    }
+
+    pub fn window_color(&self) -> Color32 {
+        col(self.window)
     }
 }
 

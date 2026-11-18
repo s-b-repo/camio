@@ -520,6 +520,7 @@ pub enum TaskState {
     Completed,
     Cancelled,
     Failed,
+    Interrupted,
 }
 
 /// A bounded, cancellable unit of automated work (crawl, campaign, scan).

@@ -32,6 +32,16 @@ pub struct Query {
     needs_body: bool,
 }
 
+/// A comparison every matching exchange must satisfy. Storage can use it to
+/// read a smaller candidate set before evaluating the complete expression.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RequiredMetadata<'a> {
+    Method(&'a str),
+    Host(&'a str),
+    Source(&'a str),
+    Status(Operator, i64),
+}
+
 impl Query {
     /// Parse and compile a CamioQL string.
     pub fn compile(input: &str) -> Result<Query, ParseError> {
@@ -54,6 +64,10 @@ impl Query {
     /// (plan §5, history performance).
     pub fn needs_body(&self) -> bool {
         self.needs_body
+    }
+
+    pub fn required_metadata(&self) -> Option<RequiredMetadata<'_>> {
+        required_metadata(&self.root)
     }
 
     /// Test the query against a target. Unresolved `preset:` references match
@@ -120,10 +134,63 @@ fn expr_needs_body(expr: &Expr) -> bool {
         Expr::Not(a) => expr_needs_body(a),
         // Free text searches the raw message; presets are unknown → be safe.
         Expr::FreeText(_) | Expr::Preset(_) => true,
-        Expr::Clause(c) => c
-            .field
-            .iter()
-            .any(|s| s.eq_ignore_ascii_case("body") || s.eq_ignore_ascii_case("raw")),
+        Expr::Clause(c) => matches!(c.field.as_slice(), [side, field]
+            if (side.eq_ignore_ascii_case("req") || side.eq_ignore_ascii_case("resp"))
+                && (field.eq_ignore_ascii_case("body") || field.eq_ignore_ascii_case("raw"))),
+    }
+}
+
+fn required_metadata(node: &Node) -> Option<RequiredMetadata<'_>> {
+    let (field, test) = match node {
+        Node::And(left, right) => {
+            return required_metadata(left).or_else(|| required_metadata(right))
+        }
+        Node::Clause { field, test } => (field.as_slice(), test),
+        _ => return None,
+    };
+    let equal_string = match test {
+        Test::EqMaybeNum {
+            value,
+            negate: false,
+            ..
+        } => Some(value.as_str()),
+        _ => None,
+    };
+    match field {
+        [name] if name.eq_ignore_ascii_case("source") => equal_string.map(RequiredMetadata::Source),
+        [side, name] if side.eq_ignore_ascii_case("req") && name.eq_ignore_ascii_case("method") => {
+            equal_string.map(RequiredMetadata::Method)
+        }
+        [side, name] if side.eq_ignore_ascii_case("req") && name.eq_ignore_ascii_case("host") => {
+            equal_string.map(RequiredMetadata::Host)
+        }
+        [side, name]
+            if side.eq_ignore_ascii_case("resp")
+                && (name.eq_ignore_ascii_case("code") || name.eq_ignore_ascii_case("status")) =>
+        {
+            let (operator, value) = match test {
+                Test::Default {
+                    num: Some(value), ..
+                }
+                | Test::EqMaybeNum {
+                    num: Some(value),
+                    negate: false,
+                    ..
+                } => (Operator::Eq, *value),
+                Test::Num(comparison, value) => (
+                    match comparison {
+                        Cmp::Gt => Operator::Gt,
+                        Cmp::Gte => Operator::Gte,
+                        Cmp::Lt => Operator::Lt,
+                        Cmp::Lte => Operator::Lte,
+                    },
+                    *value,
+                ),
+                _ => return None,
+            };
+            Some(RequiredMetadata::Status(operator, value))
+        }
+        _ => None,
     }
 }
 

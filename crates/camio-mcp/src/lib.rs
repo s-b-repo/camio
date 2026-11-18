@@ -19,10 +19,10 @@ use camio_automate::{AttackType, Campaign, PayloadSet};
 use camio_convert::Transform;
 use camio_core::{
     ActionClass, FingerprintProfile, HttpExchange, HttpRequest, Policy, PolicyOutcome, Scope,
-    SiteMap, Source,
+    SiteMap, Source, TaskId,
 };
 use camio_request::{DryRunEngine, FingerprintSpec, RequestEngine};
-use camio_store::Store;
+use camio_store::{ReviewTask, Store};
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 
@@ -158,6 +158,18 @@ impl McpServer {
             "send_request" => self.tool_send_request(&args),
             "convert" => self.tool_convert(&args),
             "scan" => self.tool_scan(&args),
+            "review_start" => self.tool_review_start(&args),
+            "review_workflows" => self.tool_review_workflows(),
+            "review_workflow_run" => self.tool_review_workflow_run(&args),
+            "review_tasks" => self.tool_review_tasks(),
+            "review_task" => self.tool_review_task(&args),
+            "review_cancel" => self.tool_review_cancel(&args),
+            "review_report" => self.tool_review_report(&args),
+            "review_evidence_bundle" => self.tool_review_evidence_bundle(&args),
+            "inventory_list" => self.tool_inventory_list(&args),
+            "inventory_asset" => self.tool_inventory_asset(&args),
+            "inventory_evidence" => self.tool_inventory_evidence(&args),
+            "findings_report" => self.tool_findings_report(),
             "sequencer_analyze" => self.tool_sequencer(&args),
             "discover_inputs" => self.tool_discover(&args),
             "sitemap" => self.tool_sitemap(&args),
@@ -314,16 +326,17 @@ impl McpServer {
         let compiled =
             camio_core::Query::compile(query).map_err(|e| format!("invalid CamioQL: {e}"))?;
         let store = self.store.as_mut().ok_or("no history store configured")?;
-        let exchanges = store.query(&compiled, limit).map_err(|e| e.to_string())?;
+        let exchanges = store
+            .query_with_bodies(&compiled, limit)
+            .map_err(|e| e.to_string())?;
         let report = camio_scan::scan_all(&exchanges);
-        let mut saved = 0u64;
-        if save {
-            for f in &report.findings {
-                if store.insert_finding(f).is_ok() {
-                    saved += 1;
-                }
-            }
-        }
+        let saved = if save {
+            store
+                .insert_findings(&report.findings)
+                .map_err(|e| e.to_string())?
+        } else {
+            0
+        };
         Ok(json!({
             "exchanges_scanned": report.exchanges_scanned,
             "checks_run": report.checks_run,
@@ -331,6 +344,167 @@ impl McpServer {
             "saved": saved,
             "findings": serde_json::to_value(&report.findings).unwrap_or(json!([])),
         }))
+    }
+
+    fn review_store(&self) -> Result<&Store, String> {
+        self.store
+            .as_ref()
+            .ok_or_else(|| "no history store configured".into())
+    }
+
+    fn tool_review_start(&self, args: &Value) -> Result<Value, String> {
+        let path = self
+            .review_store()?
+            .path()
+            .ok_or("a file-backed workspace is required for review tasks")?;
+        let query = match args.get("query") {
+            None => "",
+            Some(value) => value.as_str().ok_or("query must be a string")?,
+        };
+        let limit = match args.get("limit") {
+            None => 200,
+            Some(value) => value
+                .as_u64()
+                .and_then(|value| usize::try_from(value).ok())
+                .ok_or("limit must be a positive integer")?,
+        };
+        let save = match args.get("save") {
+            None => false,
+            Some(value) => value.as_bool().ok_or("save must be a boolean")?,
+        };
+        let id = camio_scan::start_passive_review(path, query, limit, save)
+            .map_err(|error| format!("{error:#}"))?;
+        Ok(json!({ "id": id }))
+    }
+
+    fn tool_review_workflows(&self) -> Result<Value, String> {
+        let workflows = self
+            .review_store()?
+            .review_workflows()
+            .map_err(|error| error.to_string())?;
+        Ok(
+            json!({ "workflows": workflows.into_iter().map(|workflow| workflow.revision).collect::<Vec<_>>() }),
+        )
+    }
+
+    fn tool_review_workflow_run(&self, args: &Value) -> Result<Value, String> {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Archive {
+            name: String,
+            content: String,
+        }
+        let path = self
+            .review_store()?
+            .path()
+            .ok_or("a file-backed workspace is required for review tasks")?;
+        let id = args
+            .get("id")
+            .and_then(Value::as_i64)
+            .filter(|value| *value > 0)
+            .ok_or("enter a positive workflow ID")?;
+        let version = args
+            .get("version")
+            .and_then(Value::as_i64)
+            .filter(|value| *value > 0)
+            .ok_or("select a saved workflow version")?;
+        let task = if let Some(archive) = args.get("archive") {
+            let archive: Archive =
+                serde::Deserialize::deserialize(archive).map_err(|error| error.to_string())?;
+            camio_scan::start_archive_review(
+                path,
+                id,
+                Some(version),
+                camio_scan::ReviewArchiveInput::Bytes {
+                    name: archive.name,
+                    data: archive.content.into_bytes(),
+                },
+            )
+        } else {
+            camio_scan::start_review_workflow(path, id, Some(version))
+        }
+        .map_err(|error| format!("{error:#}"))?;
+        Ok(json!({ "id": task }))
+    }
+
+    fn tool_review_tasks(&self) -> Result<Value, String> {
+        let tasks = self
+            .review_store()?
+            .review_tasks()
+            .map_err(|error| error.to_string())?;
+        Ok(json!({ "tasks": tasks.iter().map(review_summary).collect::<Vec<_>>() }))
+    }
+
+    fn tool_review_task(&self, args: &Value) -> Result<Value, String> {
+        let id = review_id(args)?;
+        let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0);
+        if offset > 1_000_000 {
+            return Err("offset exceeds supported range".into());
+        }
+        let store = self.review_store()?;
+        let task = store
+            .review_task(id)
+            .map_err(|error| error.to_string())?
+            .ok_or("review task was not found")?;
+        let findings = store
+            .review_results(id, offset as usize)
+            .map_err(|error| error.to_string())?;
+        let rows: Vec<_> = findings.iter().map(|finding| json!({
+            "id": (finding.id.0 != 0).then_some(finding.id),
+            "severity": finding.severity, "confidence": finding.confidence, "evidence": finding.evidence,
+        })).collect();
+        Ok(json!({ "task": review_summary(&task), "findings": rows,
+            "next_offset": (rows.len() == 50).then_some(offset + 50) }))
+    }
+
+    fn tool_review_cancel(&self, args: &Value) -> Result<Value, String> {
+        let cancelled = self
+            .review_store()?
+            .cancel_review(review_id(args)?)
+            .map_err(|error| error.to_string())?;
+        Ok(json!({ "cancelled": cancelled }))
+    }
+
+    fn tool_findings_report(&self) -> Result<Value, String> {
+        let report = self
+            .review_store()?
+            .finding_report(None)
+            .map_err(|error| error.to_string())?;
+        serde_json::to_value(report).map_err(|error| error.to_string())
+    }
+
+    fn tool_review_report(&self, args: &Value) -> Result<Value, String> {
+        let report = self
+            .review_store()?
+            .review_report(review_id(args)?)
+            .map_err(|error| error.to_string())?;
+        serde_json::to_value(report).map_err(|error| error.to_string())
+    }
+
+    fn tool_review_evidence_bundle(&self, args: &Value) -> Result<Value, String> {
+        let bundle = self.review_store()?.review_evidence_bundle(review_id(args)?).map_err(|error| error.to_string())?;
+        serde_json::to_value(bundle).map_err(|error| error.to_string())
+    }
+
+    fn tool_inventory_list(&self, args: &Value) -> Result<Value, String> {
+        let filter = args.get("filter").and_then(Value::as_str).unwrap_or_default();
+        let after = args.get("after").and_then(Value::as_str);
+        let page = self.review_store()?.inventory(filter, after).map_err(|error| error.to_string())?;
+        serde_json::to_value(page).map_err(|error| error.to_string())
+    }
+
+    fn tool_inventory_asset(&self, args: &Value) -> Result<Value, String> {
+        let origin = args.get("origin").and_then(Value::as_str).ok_or("select a recorded origin")?;
+        let after = args.get("after").and_then(Value::as_str);
+        let page = self.review_store()?.asset_inventory(origin, after).map_err(|error| error.to_string())?;
+        serde_json::to_value(page).map_err(|error| error.to_string())
+    }
+
+    fn tool_inventory_evidence(&self, args: &Value) -> Result<Value, String> {
+        let location = args.get("location").and_then(Value::as_str).ok_or("select a recorded endpoint")?;
+        let before = args.get("before").and_then(Value::as_i64);
+        let page = self.review_store()?.endpoint_evidence(location, before).map_err(|error| error.to_string())?;
+        serde_json::to_value(page).map_err(|error| error.to_string())
     }
 
     /// Estimate the randomness of a set of tokens (plan §8 Sequencer).
@@ -678,6 +852,26 @@ fn tool_text(text: &str, is_error: bool) -> Value {
     })
 }
 
+fn review_id(args: &Value) -> Result<TaskId, String> {
+    args.get("id")
+        .and_then(Value::as_i64)
+        .filter(|id| *id > 0)
+        .map(TaskId)
+        .ok_or_else(|| "enter a positive task ID".into())
+}
+
+fn review_summary(review: &ReviewTask) -> Value {
+    let archive = review.archive.as_ref().map(|archive| {
+        json!({
+            "format": archive.format, "sha256": archive.sha256, "imported": archive.imported,
+            "warning_count": archive.warning_count, "reused": archive.reused,
+        })
+    });
+    json!({ "id": review.task.id, "state": review.task.state, "limit": review.limit, "save": review.save,
+        "counts": review.counts, "workflow": review.workflow, "archive": archive,
+        "created_at_ms": review.task.created_at_ms, "updated_at_ms": review.updated_at_ms })
+}
+
 fn tool_defs() -> Value {
     json!([
         {
@@ -840,6 +1034,90 @@ fn tool_defs() -> Value {
                 "properties": { "body": { "type": "string" } },
                 "required": ["body"]
             }
+        },
+        {
+            "name": "review_start",
+            "description": "Start a background passive review of previously stored traffic. Returns a task ID.",
+            "inputSchema": { "type": "object", "properties": {
+                "query": { "type": "string", "maxLength": 1024 },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 1000 },
+                "save": { "type": "boolean" }
+            } }
+        },
+        {
+            "name": "review_tasks",
+            "description": "List recent passive review tasks.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "review_workflows",
+            "description": "List the current versions of saved offline review workflows.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "review_workflow_run",
+            "description": "Run an exact saved workflow version on stored exchanges or an explicitly supplied capture archive. Returns a passive review task ID.",
+            "inputSchema": { "type": "object", "properties": {
+                "id": { "type": "integer", "minimum": 1 }, "version": { "type": "integer", "minimum": 1 },
+                "archive": { "type": "object", "properties": {
+                    "name": { "type": "string", "maxLength": 512 },
+                    "content": { "type": "string", "maxLength": 4194304, "description": "Content of a recorded HAR or Burp items XML archive" }
+                }, "required": ["name", "content"], "additionalProperties": false }
+            }, "required": ["id", "version"], "additionalProperties": false }
+        },
+        {
+            "name": "review_task",
+            "description": "Read progress and paginated evidence references from a passive review.",
+            "inputSchema": { "type": "object", "properties": {
+                "id": { "type": "integer", "minimum": 1 }, "offset": { "type": "integer", "minimum": 0 }
+            }, "required": ["id"] }
+        },
+        {
+            "name": "review_cancel",
+            "description": "Stop a queued or running passive review while retaining committed results.",
+            "inputSchema": { "type": "object", "properties": {
+                "id": { "type": "integer", "minimum": 1 }
+            }, "required": ["id"] }
+        },
+        {
+            "name": "findings_report",
+            "description": "Export finding statuses and evidence references without free text or captured messages.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "review_report",
+            "description": "Export a finished review task's redacted results and capture provenance.",
+            "inputSchema": { "type": "object", "properties": {
+                "id": { "type": "integer", "minimum": 1 }
+            }, "required": ["id"], "additionalProperties": false }
+        },
+        {
+            "name": "review_evidence_bundle",
+            "description": "Export checksummed, redacted evidence linked to a finished review task.",
+            "inputSchema": { "type": "object", "properties": {
+                "id": { "type": "integer", "minimum": 1 }
+            }, "required": ["id"], "additionalProperties": false }
+        },
+        {
+            "name": "inventory_list",
+            "description": "List normalized origins recorded in local captures and imported observations.",
+            "inputSchema": { "type": "object", "properties": {
+                "filter": { "type": "string", "maxLength": 256 }, "after": { "type": "string" }
+            }, "additionalProperties": false }
+        },
+        {
+            "name": "inventory_asset",
+            "description": "Read a recorded origin's endpoints and local notes.",
+            "inputSchema": { "type": "object", "properties": {
+                "origin": { "type": "string" }, "after": { "type": "string" }
+            }, "required": ["origin"], "additionalProperties": false }
+        },
+        {
+            "name": "inventory_evidence",
+            "description": "Read local evidence pointers for a recorded endpoint.",
+            "inputSchema": { "type": "object", "properties": {
+                "location": { "type": "string" }, "before": { "type": "integer" }
+            }, "required": ["location"], "additionalProperties": false }
         }
     ])
 }

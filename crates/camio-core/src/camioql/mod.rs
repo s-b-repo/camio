@@ -34,7 +34,7 @@ mod parser;
 mod token;
 
 pub use ast::{Clause, Expr, Operator};
-pub use eval::{matches, Query, QueryTarget};
+pub use eval::{matches, Query, QueryTarget, RequiredMetadata};
 pub use parser::{parse, ParseError};
 
 use crate::model::HttpExchange;

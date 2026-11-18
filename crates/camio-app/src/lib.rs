@@ -14,8 +14,11 @@
 //! ports the Camoufox fingerprint onto the user's browser.
 
 mod browser;
+mod inventory;
 mod plugins;
 mod theme;
+mod workbench;
+mod workflows;
 
 use camio_ai::{AiClient, AiConfig, Message};
 use camio_automate::{AttackType, Baseline, Campaign, PayloadSet};
@@ -27,6 +30,7 @@ use camio_core::{
 use camio_request::{matched_engine, DryRunEngine, FingerprintSpec, RequestEngine};
 use camio_store::Store;
 use plugins::Plugin;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use theme::Theme;
@@ -56,12 +60,17 @@ pub fn run(cfg: AppConfig) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Surface {
     Status,
+    Workflows,
+    Tasks,
+    Library,
+    Integrations,
     History,
     Query,
     Sitemap,
+    Inventory,
     Replay,
     Discover,
     Fuzz,
@@ -143,10 +152,12 @@ enum Output {
 struct CamioApp {
     cfg: AppConfig,
     engine: Box<dyn RequestEngine>,
-    status_line: String,
     surface: Surface,
     theme: Theme,
-    bg_texture: Option<(PathBuf, egui::TextureHandle)>,
+    bg_texture: Option<(PathBuf, Option<egui::TextureHandle>)>,
+    workbench: workbench::Workbench,
+    inventory: inventory::InventoryPane,
+    workflows: workflows::WorkflowView,
     // request builder
     url: String,
     method: String,
@@ -177,6 +188,7 @@ struct CamioApp {
     import_path: String,
     import_content: String,
     import_save: bool,
+    archive_pending: Option<mpsc::Receiver<Result<(String, bool), String>>>,
     // browser
     browser_bin: String,
     install_root: String,
@@ -195,6 +207,7 @@ struct CamioApp {
     active_save: bool,
     // output
     out: Output,
+    surface_outputs: HashMap<Surface, Output>,
 }
 
 impl CamioApp {
@@ -202,13 +215,6 @@ impl CamioApp {
         let spec = FingerprintSpec::from_profile(&cfg.profile);
         let engine: Box<dyn RequestEngine> =
             matched_engine(&cfg.profile).unwrap_or_else(|_| Box::new(DryRunEngine::new(spec)));
-        let status_line = format!(
-            "{}  ·  engine: {}  ·  {}  ·  fingerprint-matched: {}",
-            cfg.profile.name,
-            engine.label(),
-            engine.spec().target_label(),
-            engine.is_fingerprint_matched(),
-        );
         let plugins_dir = "plugins".to_string();
         let plugins = plugins::discover(std::path::Path::new(&plugins_dir));
         // Optional deep-link / theme override via env (also handy for scripting).
@@ -228,21 +234,23 @@ impl CamioApp {
             .ok()
             .and_then(|s| surface_from_name(&s))
             .unwrap_or(Surface::Status);
-        CamioApp {
+        let mut app = CamioApp {
             cfg,
             engine,
-            status_line,
             surface,
             theme,
             bg_texture: None,
+            workbench: workbench::Workbench::default(),
+            inventory: inventory::InventoryPane::default(),
+            workflows: workflows::WorkflowView::default(),
             url: String::new(),
             method: "GET".to_string(),
             headers: String::new(),
             body: String::new(),
             confirm: false,
             query: String::new(),
-            limit: "200".to_string(),
-            scan_save: false,
+            limit: "50".to_string(),
+            scan_save: true,
             convert_in: String::new(),
             convert_steps: "base64".to_string(),
             jwt_token: String::new(),
@@ -259,6 +267,7 @@ impl CamioApp {
             import_path: String::new(),
             import_content: String::new(),
             import_save: true,
+            archive_pending: None,
             browser_bin: String::new(),
             install_root: "vendor/camoufox/dist".to_string(),
             marionette: true,
@@ -272,7 +281,21 @@ impl CamioApp {
             js_blob: String::new(),
             active_save: true,
             out: Output::None,
+            surface_outputs: HashMap::new(),
+        };
+        app.enter_workbench(surface);
+        app
+    }
+
+    fn navigate(&mut self, next: Surface) {
+        if self.surface == next {
+            return;
         }
+        let previous = std::mem::replace(&mut self.surface, next);
+        let next_output = self.surface_outputs.remove(&next).unwrap_or(Output::None);
+        self.surface_outputs
+            .insert(previous, std::mem::replace(&mut self.out, next_output));
+        self.enter_workbench(next);
     }
 
     fn open(&self) -> Result<Store, String> {
@@ -304,58 +327,7 @@ impl CamioApp {
         self.limit.trim().parse().unwrap_or(default)
     }
 
-    fn exchange_table(rows: &[HttpExchange]) -> Output {
-        Output::Table {
-            cols: vec![
-                "ID".into(),
-                "Method".into(),
-                "Code".into(),
-                "Source".into(),
-                "URL".into(),
-            ],
-            rows: rows
-                .iter()
-                .map(|x| {
-                    vec![
-                        x.id.0.to_string(),
-                        x.request.method.clone(),
-                        x.response
-                            .as_ref()
-                            .map(|r| r.status.to_string())
-                            .unwrap_or_else(|| "-".into()),
-                        x.source.as_str().to_string(),
-                        x.request.url.clone(),
-                    ]
-                })
-                .collect(),
-        }
-    }
-
     // --- actions -----------------------------------------------------------
-
-    fn run_history(&mut self) {
-        self.out = match self
-            .open()
-            .and_then(|s| s.recent(self.limit_usize(200)).map_err(|e| e.to_string()))
-        {
-            Ok(rows) => Self::exchange_table(&rows),
-            Err(e) => Output::Error(e),
-        };
-    }
-
-    fn run_query(&mut self) {
-        let res = (|| {
-            let q =
-                Query::compile(self.query.trim()).map_err(|e| format!("invalid CamioQL: {e}"))?;
-            self.open()?
-                .query(&q, self.limit_usize(200))
-                .map_err(|e| e.to_string())
-        })();
-        self.out = match res {
-            Ok(rows) => Self::exchange_table(&rows),
-            Err(e) => Output::Error(e),
-        };
-    }
 
     fn run_sitemap(&mut self) {
         let res = (|| {
@@ -371,69 +343,6 @@ impl CamioApp {
                 map.origin_count(),
                 map.url_count()
             )),
-            Err(e) => Output::Error(e),
-        };
-    }
-
-    fn run_scan(&mut self) {
-        let res = (|| {
-            let q =
-                Query::compile(self.query.trim()).map_err(|e| format!("invalid CamioQL: {e}"))?;
-            let mut store = self.open()?;
-            let rows = store
-                .query(&q, self.limit_usize(1000))
-                .map_err(|e| e.to_string())?;
-            let report = camio_scan::scan_all(&rows);
-            if self.scan_save {
-                for f in &report.findings {
-                    let _ = store.insert_finding(f);
-                }
-            }
-            Ok::<_, String>(report)
-        })();
-        self.out = match res {
-            Ok(report) => Output::Table {
-                cols: vec![
-                    "Severity".into(),
-                    "Confidence".into(),
-                    "Evidence".into(),
-                    "Title".into(),
-                ],
-                rows: report
-                    .findings
-                    .iter()
-                    .map(|f| {
-                        vec![
-                            format!("{:?}", f.severity).to_lowercase(),
-                            format!("{:?}", f.confidence).to_lowercase(),
-                            f.evidence.len().to_string(),
-                            f.title.clone(),
-                        ]
-                    })
-                    .collect(),
-            },
-            Err(e) => Output::Error(e),
-        };
-    }
-
-    fn run_findings(&mut self) {
-        self.out = match self
-            .open()
-            .and_then(|s| s.list_findings().map_err(|e| e.to_string()))
-        {
-            Ok(findings) => Output::Table {
-                cols: vec!["Severity".into(), "Confidence".into(), "Title".into()],
-                rows: findings
-                    .iter()
-                    .map(|f| {
-                        vec![
-                            format!("{:?}", f.severity).to_lowercase(),
-                            format!("{:?}", f.confidence).to_lowercase(),
-                            f.title.clone(),
-                        ]
-                    })
-                    .collect(),
-            },
             Err(e) => Output::Error(e),
         };
     }
@@ -604,41 +513,83 @@ impl CamioApp {
         };
     }
 
-    fn run_import(&mut self) {
-        let res = (|| {
-            let data = if !self.import_path.trim().is_empty() {
-                std::fs::read(self.import_path.trim()).map_err(|e| format!("reading file: {e}"))?
-            } else if !self.import_content.trim().is_empty() {
-                self.import_content.as_bytes().to_vec()
-            } else {
-                return Err("give a path or paste content".into());
-            };
-            let result = camio_import::import_bytes(&data).map_err(|e| e.to_string())?;
-            let mut stored = 0;
-            if self.import_save {
-                let mut store = self.open()?;
-                for ex in &result.exchanges {
-                    if store.insert(ex).is_ok() {
-                        stored += 1;
+    fn run_import(&mut self, ctx: &egui::Context) {
+        if self.archive_pending.is_some() {
+            return;
+        }
+        let path = self.import_path.clone();
+        let content = self.import_content.clone();
+        let save = self.import_save;
+        let db = self.cfg.db.clone();
+        let ctx = ctx.clone();
+        let (tx, rx) = mpsc::channel();
+        let thread = std::thread::Builder::new()
+            .name("camio-archive-import".into())
+            .spawn(move || {
+                let result = (|| {
+                    let data = workbench::local_input(&path, &content)?;
+                    let result =
+                        camio_import::import_bytes(&data).map_err(|error| error.to_string())?;
+                    let stored = if save {
+                        Store::open(&db)
+                            .and_then(|mut store| store.insert_exchanges(&result.exchanges))
+                            .map_err(|error| error.to_string())?
+                    } else {
+                        0
+                    };
+                    let mut text = format!(
+                        "{} · {} exchanges · {} stored",
+                        result.format,
+                        result.exchanges.len(),
+                        stored
+                    );
+                    for warning in &result.warnings {
+                        text.push('\n');
+                        text.push_str(warning);
+                    }
+                    Ok((text, stored > 0))
+                })();
+                let _ = tx.send(result);
+                ctx.request_repaint();
+            });
+        match thread {
+            Ok(_) => {
+                self.archive_pending = Some(rx);
+                self.out = Output::Text("Reading archive…".into());
+            }
+            Err(error) => self.out = Output::Error(error.to_string()),
+        }
+    }
+
+    fn poll_archive(&mut self) {
+        let Some(rx) = self.archive_pending.as_ref() else {
+            return;
+        };
+        let out = match rx.try_recv() {
+            Ok(Ok((output, stored))) => {
+                if stored {
+                    self.workbench.history.invalidate();
+                    if matches!(
+                        self.surface,
+                        Surface::Status | Surface::History | Surface::Query
+                    ) {
+                        self.enter_workbench(self.surface);
                     }
                 }
+                Output::Text(output)
             }
-            Ok::<_, String>(format!(
-                "format: {}\nexchanges: {}\nstored: {}\nwarnings: {}",
-                result.format,
-                result.exchanges.len(),
-                stored,
-                if result.warnings.is_empty() {
-                    "none".into()
-                } else {
-                    result.warnings.join("; ")
-                }
-            ))
-        })();
-        self.out = match res {
-            Ok(t) => Output::Text(t),
-            Err(e) => Output::Error(e),
+            Ok(Err(error)) => Output::Error(error),
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Output::Error("The archive worker stopped.".into())
+            }
         };
+        self.archive_pending = None;
+        if self.surface == Surface::Import {
+            self.out = out;
+        } else {
+            self.surface_outputs.insert(Surface::Import, out);
+        }
     }
 
     fn resolve_sets(&self) -> Result<Vec<PayloadSet>, String> {
@@ -893,101 +844,82 @@ impl CamioApp {
     // --- UI ----------------------------------------------------------------
 
     fn nav_ui(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(6.0);
-        ui.heading(egui::RichText::new("CAMIO").strong());
-        ui.add_space(6.0);
-        let groups: &[(&str, &[(Surface, &str)])] = &[
-            (
-                "OVERVIEW",
-                &[
-                    (Surface::Status, "Status"),
-                    (Surface::Fingerprint, "Fingerprint"),
-                ],
-            ),
-            (
-                "CAPTURE",
-                &[
-                    (Surface::History, "History"),
-                    (Surface::Query, "Query"),
-                    (Surface::Sitemap, "Site map"),
-                ],
-            ),
-            (
-                "TEST",
-                &[
-                    (Surface::Replay, "Replay / Send"),
-                    (Surface::Discover, "Discover inputs"),
-                    (Surface::Fuzz, "Automate / Fuzz"),
-                    (Surface::Scan, "Scanner"),
-                    (Surface::ActiveScan, "Active scan"),
-                    (Surface::Findings, "Findings"),
-                ],
-            ),
-            (
-                "TOOLS",
-                &[
-                    (Surface::Convert, "Convert"),
-                    (Surface::Comparer, "Comparer"),
-                    (Surface::Jwt, "JWT decode"),
-                    (Surface::Sequencer, "Sequencer"),
-                    (Surface::MatchReplace, "Match & Replace"),
-                    (Surface::Scope, "Scope check"),
-                    (Surface::Payloads, "Payloads"),
-                    (Surface::Import, "Import"),
-                    (Surface::AnalyzeJs, "Analyze JS"),
-                ],
-            ),
-            ("ASSISTANT", &[(Surface::Ai, "AI assistant")]),
-            ("BROWSER", &[(Surface::Browser, "Open browser")]),
-            (
-                "EXTEND",
-                &[
-                    (Surface::Plugins, "Plugins"),
-                    (Surface::Settings, "Settings"),
-                ],
-            ),
-        ];
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for (group, items) in groups {
-                ui.add_space(8.0);
-                ui.label(egui::RichText::new(*group).small().weak());
-                for (surface, label) in *items {
-                    ui.selectable_value(&mut self.surface, *surface, *label);
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                for (group, items) in workbench::NAV {
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new(group.to_uppercase())
+                            .monospace()
+                            .size(10.0)
+                            .weak(),
+                    );
+                    for (surface, label) in *items {
+                        let active = self.surface == *surface;
+                        let color = if active {
+                            egui::Color32::from_rgb(113, 179, 255)
+                        } else {
+                            ui.visuals().text_color()
+                        };
+                        ui.horizontal(|ui| {
+                            let (marker, _) =
+                                ui.allocate_exact_size(egui::vec2(4.0, 19.0), egui::Sense::hover());
+                            if active {
+                                ui.painter()
+                                    .rect_filled(marker, 2.0, self.theme.accent_color());
+                            }
+                            if ui
+                                .selectable_label(active, egui::RichText::new(*label).color(color))
+                                .clicked()
+                            {
+                                self.navigate(*surface);
+                            }
+                        });
+                    }
                 }
-            }
-        });
+            });
     }
 
     fn central_ui(&mut self, ui: &mut egui::Ui) {
-        match self.surface {
-            Surface::Status => self.status_surface(ui),
+        let surface = self.surface;
+        if matches!(
+            surface,
+            Surface::Status
+                | Surface::Workflows
+                | Surface::History
+                | Surface::Inventory
+                | Surface::Query
+                | Surface::Scan
+                | Surface::Findings
+                | Surface::Integrations
+                | Surface::Tasks
+                | Surface::Library
+                | Surface::Settings
+        ) {
+            egui::ScrollArea::vertical()
+                .id_salt(surface)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    match surface {
+                        Surface::Status => self.overview_ui(ui),
+                        Surface::Workflows => self.workflows_ui(ui),
+                        Surface::History | Surface::Query => self.history_ui(ui),
+                        Surface::Inventory => self.inventory_ui(ui),
+                        Surface::Scan => self.scan_ui(ui),
+                        Surface::Findings => self.findings_ui(ui),
+                        Surface::Integrations => self.integrations_ui(ui),
+                        Surface::Tasks => self.tasks_ui(ui),
+                        Surface::Library => self.library_ui(ui),
+                        Surface::Settings => self.settings_surface(ui),
+                        _ => unreachable!(),
+                    }
+                    self.workbench_notice(ui);
+                });
+            return;
+        }
+        match surface {
             Surface::Fingerprint => self.fingerprint_surface(ui),
-            Surface::History => {
-                ui.heading("History");
-                ui.horizontal(|ui| {
-                    ui.label("Limit");
-                    ui.add(egui::TextEdit::singleline(&mut self.limit).desired_width(80.0));
-                    if ui.button("Load").clicked() {
-                        self.run_history();
-                    }
-                });
-            }
-            Surface::Query => {
-                ui.heading("Query — CamioQL");
-                ui.label("HTTPQL-compatible, e.g. resp.code.gte:500 AND req.host.cont:\"example\"");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.query)
-                        .hint_text("resp.code.gte:400")
-                        .desired_width(f32::INFINITY),
-                );
-                ui.horizontal(|ui| {
-                    ui.label("Limit");
-                    ui.add(egui::TextEdit::singleline(&mut self.limit).desired_width(80.0));
-                    if ui.button("Run").clicked() {
-                        self.run_query();
-                    }
-                });
-            }
             Surface::Sitemap => {
                 ui.heading("Site map");
                 ui.add(
@@ -1024,25 +956,6 @@ impl CamioApp {
                 }
             }
             Surface::Fuzz => self.fuzz_surface(ui),
-            Surface::Scan => {
-                ui.heading("Scanner");
-                ui.label("Passive checks over stored history.");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.query)
-                        .hint_text("filter (CamioQL, optional)")
-                        .desired_width(f32::INFINITY),
-                );
-                ui.checkbox(&mut self.scan_save, "save findings");
-                if ui.button("Scan").clicked() {
-                    self.run_scan();
-                }
-            }
-            Surface::Findings => {
-                ui.heading("Findings");
-                if ui.button("Load").clicked() {
-                    self.run_findings();
-                }
-            }
             Surface::Convert => {
                 ui.heading("Convert");
                 ui.label("Pipeline runs left-to-right, e.g. base64,gzip or base64-decode.");
@@ -1118,8 +1031,8 @@ impl CamioApp {
                 }
             }
             Surface::Import => {
-                ui.heading("Import");
-                ui.label("Burp items XML or HAR. Give a local path or paste content.");
+                ui.heading("Import traffic");
+                ui.label("Preview or store a HAR or Burp items XML archive of up to 4 MiB.");
                 ui.label("Path");
                 ui.add(
                     egui::TextEdit::singleline(&mut self.import_path).desired_width(f32::INFINITY),
@@ -1131,8 +1044,18 @@ impl CamioApp {
                         .desired_rows(6),
                 );
                 ui.checkbox(&mut self.import_save, "store exchanges");
-                if ui.button("Import").clicked() {
-                    self.run_import();
+                if ui
+                    .add_enabled(
+                        self.archive_pending.is_none(),
+                        egui::Button::new(if self.import_save {
+                            "Import exchanges"
+                        } else {
+                            "Preview archive"
+                        }),
+                    )
+                    .clicked()
+                {
+                    self.run_import(ui.ctx());
                 }
             }
             Surface::ActiveScan => self.active_scan_surface(ui),
@@ -1140,67 +1063,13 @@ impl CamioApp {
             Surface::Ai => self.ai_surface(ui),
             Surface::Browser => self.browser_surface(ui),
             Surface::Plugins => self.plugins_surface(ui),
-            Surface::Settings => self.settings_surface(ui),
+            _ => unreachable!(),
         }
 
         ui.add_space(10.0);
         ui.separator();
         ui.add_space(6.0);
         self.output_ui(ui);
-    }
-
-    fn status_surface(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Status");
-        ui.add_space(6.0);
-        ui.label(
-            "Active fingerprint profile and matched engine. Parity is measured, not asserted.",
-        );
-        ui.add_space(8.0);
-        egui::Grid::new("status")
-            .num_columns(2)
-            .spacing([12.0, 6.0])
-            .show(ui, |ui| {
-                ui.label("Profile");
-                ui.monospace(&self.cfg.profile.name);
-                ui.end_row();
-                ui.label("Camoufox build");
-                ui.monospace(&self.cfg.profile.camoufox_build);
-                ui.end_row();
-                ui.label("User-Agent");
-                ui.monospace(&self.cfg.profile.persona.user_agent);
-                ui.end_row();
-                ui.label("Engine");
-                ui.monospace(self.engine.label());
-                ui.end_row();
-                ui.label("Fingerprint target");
-                ui.monospace(self.engine.spec().target_label());
-                ui.end_row();
-                ui.label("Fingerprint matched");
-                let m = self.engine.is_fingerprint_matched();
-                ui.colored_label(
-                    if m {
-                        egui::Color32::from_rgb(63, 185, 80)
-                    } else {
-                        egui::Color32::from_rgb(248, 81, 73)
-                    },
-                    m.to_string(),
-                );
-                ui.end_row();
-                ui.label("Database");
-                ui.monospace(self.cfg.db.display().to_string());
-                ui.end_row();
-            });
-        if let Some(note) = self.engine.parity_note() {
-            ui.add_space(8.0);
-            ui.colored_label(
-                egui::Color32::from_rgb(210, 153, 34),
-                format!("parity note: {note}"),
-            );
-        }
-        ui.add_space(10.0);
-        if ui.button("Open target in browser").clicked() {
-            self.surface = Surface::Browser;
-        }
     }
 
     fn fingerprint_surface(&mut self, ui: &mut egui::Ui) {
@@ -1618,8 +1487,10 @@ impl CamioApp {
     }
 
     fn settings_surface(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Settings");
-        ui.label("Theme, background, plugins and browser. Themes apply live; Save persists them.");
+        ui.heading("Workspace settings");
+        self.workspace_settings(ui);
+        ui.separator();
+        ui.label("Themes apply live. Save theme to keep your preferences.");
         ui.add_space(8.0);
         ui.label(egui::RichText::new("THEME").small().weak());
         ui.horizontal(|ui| {
@@ -1632,11 +1503,17 @@ impl CamioApp {
                             .selectable_label(self.theme.name == p.name, &p.name)
                             .clicked()
                         {
+                            let motion = self.theme.motion;
                             self.theme = p;
+                            self.theme.motion = motion;
                         }
                     }
                 });
-            ui.checkbox(&mut self.theme.dark, "dark");
+            ui.checkbox(&mut self.theme.dark, "Dark");
+            let mut reduce_motion = !self.theme.motion;
+            if ui.checkbox(&mut reduce_motion, "Reduce motion").changed() {
+                self.theme.motion = !reduce_motion;
+            }
         });
         ui.horizontal(|ui| {
             ui.label("Accent");
@@ -1777,10 +1654,7 @@ impl CamioApp {
                     .map(|(p, _)| p != path)
                     .unwrap_or(true);
                 if need {
-                    match theme::load_texture(ctx, path) {
-                        Ok(tex) => self.bg_texture = Some((path.clone(), tex)),
-                        Err(_) => self.bg_texture = None,
-                    }
+                    self.bg_texture = Some((path.clone(), theme::load_texture(ctx, path).ok()));
                 }
             }
             None => self.bg_texture = None,
@@ -1788,7 +1662,7 @@ impl CamioApp {
     }
 
     fn paint_bg(&self, ui: &egui::Ui) {
-        if let Some((_, tex)) = &self.bg_texture {
+        if let Some((_, Some(tex))) = &self.bg_texture {
             let rect = ui.max_rect();
             let alpha = (self.theme.bg_opacity.clamp(0.0, 1.0) * 255.0) as u8;
             let tint = egui::Color32::from_white_alpha(alpha);
@@ -1804,65 +1678,85 @@ impl eframe::App for CamioApp {
         self.sync_bg(ctx);
         self.poll_ai(ctx);
 
-        egui::TopBottomPanel::top("status_bar").show(ctx, |ui| {
-            ui.add_space(3.0);
-            ui.horizontal_wrapped(|ui| {
-                ui.label(egui::RichText::new(&self.status_line).small());
-            });
-            ui.add_space(3.0);
-        });
-        egui::TopBottomPanel::bottom("bottom_bar").show(ctx, |ui| {
-            ui.add_space(2.0);
-            ui.horizontal_wrapped(|ui| {
-                ui.label(
-                    egui::RichText::new(format!("db: {}", self.cfg.db.display()))
-                        .small()
-                        .weak(),
-                );
-                ui.separator();
-                ui.label(
-                    egui::RichText::new(format!(
-                        "ai: {} {}",
-                        self.ai_config.provider,
-                        if self.ai_config.is_ready() {
-                            "ready"
-                        } else {
-                            "no key"
-                        }
-                    ))
-                    .small()
-                    .weak(),
-                );
-                ui.separator();
-                ui.label(
-                    egui::RichText::new(format!(
-                        "active checks: {}",
-                        if self.cfg.policy.allow_active {
-                            "enabled"
-                        } else {
-                            "off (--allow-active)"
-                        }
-                    ))
-                    .small()
-                    .weak(),
-                );
-                if self.ai_pending.is_some() {
-                    ui.separator();
-                    ui.label(egui::RichText::new("AI: thinking…").small());
-                }
-            });
-            ui.add_space(2.0);
-        });
-        egui::SidePanel::left("nav")
-            .resizable(false)
-            .exact_width(196.0)
+        self.poll_archive();
+
+        let panel = self.theme.panel_color();
+        let accent = self.theme.accent_color();
+        let line = ctx.style().visuals.window_stroke;
+        egui::TopBottomPanel::top("status_bar")
+            .frame(
+                egui::Frame::none()
+                    .fill(panel)
+                    .stroke(line)
+                    .inner_margin(egui::Margin::symmetric(15.0, 8.0)),
+            )
             .show(ctx, |ui| {
-                self.nav_ui(ui);
+                ui.horizontal(|ui| {
+                    let (mark, _) =
+                        ui.allocate_exact_size(egui::vec2(27.0, 27.0), egui::Sense::hover());
+                    ui.painter()
+                        .rect_filled(mark, 6.0, accent.gamma_multiply(0.25));
+                    ui.painter()
+                        .rect_stroke(mark, 6.0, egui::Stroke::new(1.0_f32, accent));
+                    ui.painter().circle_stroke(
+                        mark.center(),
+                        6.0,
+                        egui::Stroke::new(1.5_f32, accent),
+                    );
+                    ui.painter().circle_filled(mark.center(), 2.3, accent);
+                    ui.label(egui::RichText::new("CAMIO").size(21.0).strong());
+                    ui.separator();
+                    ui.label(format!("Workspace / {}", workbench::title(self.surface)));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Search tools   Ctrl K").clicked() {
+                            self.toggle_command();
+                        }
+                    });
+                });
             });
-        egui::CentralPanel::default().show(ctx, |ui| {
-            self.paint_bg(ui);
-            self.central_ui(ui);
-        });
+        egui::TopBottomPanel::bottom("bottom_bar")
+            .frame(
+                egui::Frame::none()
+                    .fill(panel)
+                    .stroke(line)
+                    .inner_margin(egui::Margin::symmetric(15.0, 5.0)),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(egui::RichText::new("LOCAL STORE").small().monospace());
+                    ui.label(egui::RichText::new(self.cfg.db.display().to_string()).small());
+                    if self.ai_pending.is_some() {
+                        ui.separator();
+                        ui.label("AI request running");
+                    }
+                    if self.archive_pending.is_some() {
+                        ui.separator();
+                        ui.label("Reading archive");
+                    }
+                });
+            });
+        egui::SidePanel::left("nav")
+            .default_width(188.0)
+            .width_range(152.0..=260.0)
+            .frame(
+                egui::Frame::none()
+                    .fill(panel)
+                    .stroke(line)
+                    .inner_margin(egui::Margin::symmetric(11.0, 7.0)),
+            )
+            .show(ctx, |ui| self.nav_ui(ui));
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::none()
+                    .fill(self.theme.window_color())
+                    .inner_margin(egui::Margin::same(19.0)),
+            )
+            .show(ctx, |ui| {
+                self.paint_bg(ui);
+                self.central_ui(ui);
+            });
+        self.inspector_ui(ctx);
+        self.command_ui(ctx);
     }
 }
 
@@ -1870,11 +1764,16 @@ impl eframe::App for CamioApp {
 /// [`Surface`]. Unknown names return `None`.
 fn surface_from_name(s: &str) -> Option<Surface> {
     Some(match s.trim().to_ascii_lowercase().as_str() {
-        "status" => Surface::Status,
+        "status" | "overview" => Surface::Status,
+        "workflows" | "workflow" => Surface::Workflows,
+        "tasks" => Surface::Tasks,
+        "library" => Surface::Library,
+        "integrations" | "evidence" => Surface::Integrations,
         "fingerprint" => Surface::Fingerprint,
         "history" => Surface::History,
         "query" => Surface::Query,
         "sitemap" | "site map" => Surface::Sitemap,
+        "inventory" | "assets" => Surface::Inventory,
         "replay" | "send" => Surface::Replay,
         "discover" => Surface::Discover,
         "fuzz" | "automate" => Surface::Fuzz,

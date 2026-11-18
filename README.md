@@ -15,10 +15,10 @@ anti-detect Firefox engine. See [`plan.md`](./plan.md) for the full product plan
 > **Intruder-class** fuzzing, **Convert/Decoder/Comparer**, **Burp/HAR importers**,
 > a **Sequencer**, a **site map**, and **Match & Replace** — all driven from the
 > CLI, a **native desktop app** (`camio app`, egui/eframe), an optional local web
-> UI (`camio ui`), and the MCP server under the one shared scope/policy. The
-> remaining frontier is browser-native WebDriver-BiDi request interception and
-> node-based *visual* workflows — these need a running Camoufox build, so they are
-> not built yet (see plan.md §15 phases).
+> UI (`camio ui`), and the MCP server under the one shared scope/policy. Stored
+> traffic can be reviewed with versioned offline workflows, evidence imports,
+> and finding reports. Live browser capture, WebDriver-BiDi interception, and a
+> general-purpose workflow editor remain on the roadmap.
 
 ## Camio vs Burp Suite and Caido
 
@@ -104,22 +104,23 @@ problem, and measures fingerprint parity rather than claiming undetectability.
   history (Discover), and CamioQL-gated match-and-replace rules that rewrite
   outgoing requests without reordering or recasing headers (plan §7.2).
 - **MCP server** (`camio-mcp`): a local stdio MCP server exposing Camio's data
-  (fingerprint status, history, findings) and **16 tools** — CamioQL query, scope
+  (fingerprint status, history, findings) and tools for CamioQL query, scope
   check, policy-gated send, convert, scan, sequencer, input discovery, site map,
   fuzz planning, file import, payload listing, a policy-gated **active_scan**, and
-  **analyze_js** — all under the same policy as the CLI.
+  **analyze_js** — all under the same policy as the CLI. Passive reviews also
+  expose task IDs, paginated results, cancellation, and redacted finding reports.
 - **Native desktop app** (`camio-app`): `camio app` opens a real egui/eframe
-  window (no Electron, no bundled JS runtime) with a grouped left rail of 24
-  surfaces — Status, Fingerprint, History, Query, Site map, Replay, Discover,
+  window (no Electron, no bundled JS runtime) with a grouped left rail for
+  Overview, Transport, History, Query, Site map, Replay, Discover,
   Automate/Fuzz, Scanner, **Active scan**, Findings, Convert, Comparer, JWT,
   Sequencer, Match & Replace, Scope, Payloads, Import, **Analyze JS**, **AI
-  assistant**, Open-browser, Plugins, Settings — calling the same crates in-process
-  under the same scope/policy gates as the CLI (AI calls run on a background thread
-  so the window stays responsive). It adds:
-  - **Customizable themes + background image**: seven presets (Midnight,
-    Antigravity, LibreWolf, Carbon, Matrix, Daylight, High Contrast), a live
-    editor (accent/window/panel/text colours, corner rounding) and an optional
-    background image with opacity — persisted to `~/.config/camio/theme.json`.
+  assistant**, Open-browser, Plugins, Settings, Review workflows, Review tasks, Library, and
+  Integration evidence. It uses the same storage and policy as the CLI.
+  - **Customizable themes and background image.** Sentinel Blue is the default,
+    with a black canvas, blue grid animation, and a Reduce motion setting. The
+    other presets, custom colours, and background controls are available in
+    Workspace settings. Save the theme to persist it to `~/.config/camio/theme.json`.
+    The default palette and terminal styling draw on the Cyber Sec site. [Cyber Sec](https://cybersec.org.za/)
   - **Open in browser**: launches a **LibreWolf / Camoufox** (Firefox-fork)
     browser with Camio's fingerprint profile written into its `about:config`, so
     browsing and tool traffic share one identity (plan §6.3), and with the
@@ -132,9 +133,9 @@ problem, and measures fingerprint parity rather than claiming undetectability.
     ported onto every sent request.
   - Deep-link a surface with `CAMIO_SURFACE=<name>` and pick a theme with
     `CAMIO_THEME=<preset>`.
-- **Local web UI** (`camio-web`, optional): `camio ui` serves the same workbench
-  on loopback (`127.0.0.1`) for headless/remote use — a single-page app over a
-  JSON API, same gates, no bundled JS runtime (plan §16).
+- **Local web UI** (`camio-web`): `camio ui` serves the workbench on loopback.
+  Open the full session link printed by the command. The interface bundles its
+  fonts locally and supports both browser-level and in-app reduced motion.
 - **No TLS MITM, no CA install** for browser traffic — the browser makes the real
   connection, so the server sees Camoufox's genuine fingerprint (plan §6).
 
@@ -245,12 +246,68 @@ cargo run -p camio-cli -- send https://example.org --confirm \
 # Launch the native desktop app — every capability in one window
 cargo run -p camio-cli -- app
 
-# …or the optional local web UI (headless/remote) — same workbench in a browser
-cargo run -p camio-cli -- ui                                   # http://127.0.0.1:8787
+# …or open the local web workbench using the session URL printed in the terminal
+cargo run -p camio-cli -- ui
 
 # Serve MCP over stdio (for an agent / MCP client)
 cargo run -p camio-cli -- mcp serve
 ```
+
+## Reviewing stored evidence
+
+Use the same `--db` path in `camio app`, `camio ui`, and `camio workbench` to
+share a workspace, or select a new path for an isolated project. Import HAR or
+Burp items XML, filter traffic with CamioQL, and open a row to inspect ordered
+headers and a bounded body preview. Save exchanges with notes and reuse named
+filters from the Library. Use `Ctrl+K` or `Cmd+K` to open tool search.
+
+Passive review tasks evaluate a snapshot of recent stored exchanges. For a
+repeatable review, save the CamioQL filter, exchange limit, and triage option as
+a version in **Review workflows**. Edit the fields or apply a schema-versioned
+JSON document. Each task records the version it ran and exposes progress,
+retained results, and cancellation.
+
+Attach a HAR or Burp items XML capture of up to 4 MiB in **Review workflows**
+to import and review that capture in one run. The task records the capture
+hash, import warnings, and review results. Running the same archive again
+reuses its stored exchanges. From **Review tasks**, export a redacted report
+for a finished run with its workflow version, capture hash, counts, and linked
+evidence IDs.
+
+Findings can be triaged and exported as Markdown, JSON, HTML, or SARIF 2.1.0.
+Reports include check IDs, statuses, and local evidence IDs. Free text and
+captured messages stay in the workspace. [SARIF format](https://docs.oasis-open.org/sarif/sarif/v2.1.0/os/sarif-v2.1.0-os.html)
+
+Use **Asset inventory** to group recorded HTTP and HTTPS origins and endpoints
+across captured exchanges and imported httpx and Nuclei observations. Sources
+retain their original exchange or artifact links. Add an origin label and note
+to record triage context.
+
+An evidence bundle combines a finished review report with redacted summaries
+of linked exchanges. Its manifest contains SHA-256 checksums for the report and
+each evidence item. Use `camio verify-bundle` to check integrity offline.
+
+Integration evidence accepts existing ProjectDiscovery httpx and Nuclei JSONL
+reports and stores the original text with its SHA-256 hash. Other tools' reports
+can be kept as raw evidence. Import previews show unmapped or malformed rows,
+and observed matches stay attributed to their source artifact.
+
+```bash
+camio workbench --db review.db import-evidence httpx observations.jsonl --preview
+camio workbench --db review.db review --query 'resp.code.gte:400' --save
+camio workbench --db review.db workflow save 'Error responses' review-plan.json
+camio workbench --db review.db workflow run 1 --version 1
+camio workbench --db review.db workflow run 1 --version 1 --archive capture.har
+camio workbench --db review.db review-report 1 --format json > review-report.json
+camio workbench --db review.db inventory --filter example
+camio workbench --db review.db review-bundle 1 > review-evidence.json
+camio verify-bundle review-evidence.json
+camio workbench --db review.db report --format sarif > findings.sarif
+camio workbench --db review.db backup review-backup.db
+```
+
+A review plan document can be exported from either interface. A minimal
+example is `{"schema_version":1,"query":"resp.code.gte:400","limit":200,"save":true}`.
 
 ## CamioQL
 

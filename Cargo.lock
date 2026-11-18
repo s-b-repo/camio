@@ -952,7 +952,10 @@ dependencies = [
 name = "camio-scan"
 version = "0.0.1"
 dependencies = [
+ "anyhow",
  "camio-core",
+ "camio-import",
+ "camio-store",
  "regex",
  "serde",
  "serde_json",
@@ -973,8 +976,10 @@ dependencies = [
  "anyhow",
  "camio-core",
  "rusqlite",
+ "serde",
  "serde_json",
  "sha2 0.10.9",
+ "url",
 ]
 
 [[package]]
@@ -990,6 +995,8 @@ dependencies = [
  "camio-scan",
  "camio-sequencer",
  "camio-store",
+ "getrandom 0.3.4",
+ "serde",
  "serde_json",
  "tiny_http",
 ]

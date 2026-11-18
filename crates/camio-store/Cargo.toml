@@ -10,5 +10,7 @@ description = "Camio storage: indexed history + content-addressed bodies (plan Â
 camio-core.workspace = true
 rusqlite.workspace = true
 sha2.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
+url.workspace = true

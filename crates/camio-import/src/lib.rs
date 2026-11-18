@@ -75,6 +75,7 @@ pub struct ImportResult {
 /// the presence of `<items` or `<?xml` means a Burp XML export; anything else is
 /// [`ImportError::Unsupported`].
 pub fn import_bytes(data: &[u8]) -> Result<ImportResult, ImportError> {
+    let data = data.strip_prefix(b"\xef\xbb\xbf").unwrap_or(data);
     let first_non_ws = data.iter().position(|b| !b.is_ascii_whitespace());
     match first_non_ws {
         Some(i) if data[i] == b'{' => {

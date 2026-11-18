@@ -69,6 +69,8 @@ pub enum ConvertError {
     Decompress(String),
     /// The requested transform is not available in this build/context.
     Unsupported(String),
+    /// A limited pipeline reached its per-step byte limit.
+    Limit(usize),
 }
 
 impl fmt::Display for ConvertError {
@@ -77,6 +79,7 @@ impl fmt::Display for ConvertError {
             ConvertError::Decode(s) => write!(f, "decode error: {s}"),
             ConvertError::Decompress(s) => write!(f, "decompress error: {s}"),
             ConvertError::Unsupported(s) => write!(f, "unsupported transform: {s}"),
+            ConvertError::Limit(bytes) => write!(f, "transform exceeds the {bytes}-byte limit"),
         }
     }
 }
@@ -250,6 +253,54 @@ pub fn apply_pipeline(input: &[u8], steps: &[Transform]) -> Result<Vec<u8>, Conv
         acc = step.apply(&acc)?;
     }
     Ok(acc)
+}
+
+/// Run a pipeline with an input and intermediate output limit, including a
+/// streaming limit for gzip and deflate expansion.
+pub fn apply_pipeline_limited(
+    input: &[u8],
+    steps: &[Transform],
+    limit: usize,
+) -> Result<Vec<u8>, ConvertError> {
+    if input.len() > limit {
+        return Err(ConvertError::Limit(limit));
+    }
+    let mut current = input.to_vec();
+    for step in steps {
+        current = match step {
+            Transform::GzipDecompress => {
+                inflate(GzDecoder::new(current.as_slice()), "gzip", limit)?
+            }
+            Transform::DeflateDecompress => {
+                inflate(DeflateDecoder::new(current.as_slice()), "deflate", limit)?
+            }
+            _ => step.apply(&current)?,
+        };
+        if current.len() > limit {
+            return Err(ConvertError::Limit(limit));
+        }
+    }
+    Ok(current)
+}
+
+#[cfg(test)]
+#[test]
+fn bounded_pipeline_limits_expansion_and_accepts_the_exact_boundary() {
+    for (pack, unpack) in [
+        (Transform::GzipCompress, Transform::GzipDecompress),
+        (Transform::DeflateCompress, Transform::DeflateDecompress),
+    ] {
+        let original = vec![b'x'; 4096];
+        let compressed = pack.apply(&original).unwrap();
+        assert_eq!(
+            apply_pipeline_limited(&compressed, &[unpack], 2048),
+            Err(ConvertError::Limit(2048))
+        );
+        assert_eq!(
+            apply_pipeline_limited(&compressed, &[unpack], 4096).unwrap(),
+            original
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -474,12 +525,7 @@ fn gzip_compress(input: &[u8]) -> Result<Vec<u8>, ConvertError> {
 }
 
 fn gzip_decompress(input: &[u8]) -> Result<Vec<u8>, ConvertError> {
-    let mut decoder = GzDecoder::new(input);
-    let mut out = Vec::new();
-    decoder
-        .read_to_end(&mut out)
-        .map_err(|e| ConvertError::Decompress(format!("gzip: {e}")))?;
-    Ok(out)
+    inflate(GzDecoder::new(input), "gzip", usize::MAX)
 }
 
 fn deflate_compress(input: &[u8]) -> Result<Vec<u8>, ConvertError> {
@@ -493,11 +539,18 @@ fn deflate_compress(input: &[u8]) -> Result<Vec<u8>, ConvertError> {
 }
 
 fn deflate_decompress(input: &[u8]) -> Result<Vec<u8>, ConvertError> {
-    let mut decoder = DeflateDecoder::new(input);
+    inflate(DeflateDecoder::new(input), "deflate", usize::MAX)
+}
+
+fn inflate(decoder: impl Read, name: &str, limit: usize) -> Result<Vec<u8>, ConvertError> {
     let mut out = Vec::new();
     decoder
+        .take((limit as u64).saturating_add(1))
         .read_to_end(&mut out)
-        .map_err(|e| ConvertError::Decompress(format!("deflate: {e}")))?;
+        .map_err(|e| ConvertError::Decompress(format!("{name}: {e}")))?;
+    if out.len() > limit {
+        return Err(ConvertError::Limit(limit));
+    }
     Ok(out)
 }
 

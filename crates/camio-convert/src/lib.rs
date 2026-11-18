@@ -21,4 +21,6 @@ pub mod compare;
 pub mod convert;
 
 pub use compare::{diff_bytes, diff_lines, unified_diff, ByteDiff, LineChange, LineOp};
-pub use convert::{apply_pipeline, decode_jwt, ConvertError, JwtParts, Transform};
+pub use convert::{
+    apply_pipeline, apply_pipeline_limited, decode_jwt, ConvertError, JwtParts, Transform,
+};

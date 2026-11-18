@@ -9,6 +9,8 @@
 //!   * `camio scope`                  — the one scope-decision path for a URL
 //!   * `camio mcp serve`              — the local MCP server over stdio
 
+mod workbench;
+
 use anyhow::{bail, Context, Result};
 use camio_ai::{AiClient, AiConfig, Message};
 use camio_automate::{AttackType, Baseline, Campaign, PayloadSet};
@@ -86,8 +88,12 @@ enum Command {
     Ai(AiArgs),
     /// Launch the native desktop app — every capability in one window.
     App(AppArgs),
-    /// Launch the local web UI — every capability in your browser (loopback-only).
+    /// Launch the local web workbench and print its session URL.
     Ui(UiArgs),
+    /// Review stored traffic, import evidence, and manage the workspace.
+    Workbench(workbench::Args),
+    /// Verify checksums and evidence references in an exported review bundle.
+    VerifyBundle { file: PathBuf },
     /// Local MCP server.
     Mcp {
         #[command(subcommand)]
@@ -342,6 +348,8 @@ fn main() -> Result<()> {
         Command::Ai(args) => ai_cmd(args),
         Command::App(args) => app_cmd(args),
         Command::Ui(args) => ui_cmd(args),
+        Command::Workbench(args) => workbench::run(args),
+        Command::VerifyBundle { file } => workbench::verify_bundle(&file),
         Command::Mcp { action } => match action {
             McpCmd::Serve(args) => mcp_serve_cmd(args),
         },
@@ -818,7 +826,7 @@ fn scan_cmd(args: ScanArgs) -> Result<()> {
     let mut store = open_store(&args.db)?;
     let q =
         Query::compile(args.query.as_deref().unwrap_or("")).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let exchanges = store.query(&q, args.limit)?;
+    let exchanges = store.query_with_bodies(&q, args.limit)?;
     let report = camio_scan::scan_all(&exchanges);
     if args.json {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -832,12 +840,7 @@ fn scan_cmd(args: ScanArgs) -> Result<()> {
         );
     }
     if args.save {
-        let mut n = 0;
-        for f in &report.findings {
-            if store.insert_finding(f).is_ok() {
-                n += 1;
-            }
-        }
+        let n = store.insert_findings(&report.findings)?;
         println!("saved {n} finding(s) to {}", args.db.display());
     }
     Ok(())
@@ -1211,12 +1214,7 @@ fn import_cmd(args: ImportArgs) -> Result<()> {
     if !args.dry_run {
         let mut store =
             Store::open(&args.db).with_context(|| format!("opening {}", args.db.display()))?;
-        let mut n = 0;
-        for ex in &result.exchanges {
-            if store.insert(ex).is_ok() {
-                n += 1;
-            }
-        }
+        let n = store.insert_exchanges(&result.exchanges)?;
         println!("stored   : {n} into {}", args.db.display());
     }
     if args.json {
@@ -1649,9 +1647,5 @@ fn ui_cmd(args: UiArgs) -> Result<()> {
         scope,
         policy,
     };
-    println!(
-        "Camio web UI → open http://{} in your browser (Ctrl-C to stop).",
-        args.addr
-    );
     camio_web::serve(cfg).context("serving the web UI")
 }
