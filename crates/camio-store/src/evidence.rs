@@ -177,7 +177,13 @@ impl Store {
                         observation.line as i64,
                         serde_json::to_string(observation)?
                     ])?;
-                    inventory::index_observation(&tx, tx.last_insert_rowid(), &observation.location, format.as_str(), imported_at)?;
+                    inventory::index_observation(
+                        &tx,
+                        tx.last_insert_rowid(),
+                        &observation.location,
+                        format.as_str(),
+                        imported_at,
+                    )?;
                 }
             }
             tx.commit()?;

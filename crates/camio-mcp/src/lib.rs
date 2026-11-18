@@ -482,28 +482,49 @@ impl McpServer {
     }
 
     fn tool_review_evidence_bundle(&self, args: &Value) -> Result<Value, String> {
-        let bundle = self.review_store()?.review_evidence_bundle(review_id(args)?).map_err(|error| error.to_string())?;
+        let bundle = self
+            .review_store()?
+            .review_evidence_bundle(review_id(args)?)
+            .map_err(|error| error.to_string())?;
         serde_json::to_value(bundle).map_err(|error| error.to_string())
     }
 
     fn tool_inventory_list(&self, args: &Value) -> Result<Value, String> {
-        let filter = args.get("filter").and_then(Value::as_str).unwrap_or_default();
+        let filter = args
+            .get("filter")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         let after = args.get("after").and_then(Value::as_str);
-        let page = self.review_store()?.inventory(filter, after).map_err(|error| error.to_string())?;
+        let page = self
+            .review_store()?
+            .inventory(filter, after)
+            .map_err(|error| error.to_string())?;
         serde_json::to_value(page).map_err(|error| error.to_string())
     }
 
     fn tool_inventory_asset(&self, args: &Value) -> Result<Value, String> {
-        let origin = args.get("origin").and_then(Value::as_str).ok_or("select a recorded origin")?;
+        let origin = args
+            .get("origin")
+            .and_then(Value::as_str)
+            .ok_or("select a recorded origin")?;
         let after = args.get("after").and_then(Value::as_str);
-        let page = self.review_store()?.asset_inventory(origin, after).map_err(|error| error.to_string())?;
+        let page = self
+            .review_store()?
+            .asset_inventory(origin, after)
+            .map_err(|error| error.to_string())?;
         serde_json::to_value(page).map_err(|error| error.to_string())
     }
 
     fn tool_inventory_evidence(&self, args: &Value) -> Result<Value, String> {
-        let location = args.get("location").and_then(Value::as_str).ok_or("select a recorded endpoint")?;
+        let location = args
+            .get("location")
+            .and_then(Value::as_str)
+            .ok_or("select a recorded endpoint")?;
         let before = args.get("before").and_then(Value::as_i64);
-        let page = self.review_store()?.endpoint_evidence(location, before).map_err(|error| error.to_string())?;
+        let page = self
+            .review_store()?
+            .endpoint_evidence(location, before)
+            .map_err(|error| error.to_string())?;
         serde_json::to_value(page).map_err(|error| error.to_string())
     }
 

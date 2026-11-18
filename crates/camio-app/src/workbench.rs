@@ -944,11 +944,16 @@ impl CamioApp {
                     self.report_menu(ui, Some(task.task.id));
                     if ui.button("Copy evidence bundle").clicked() {
                         let result = self.open().and_then(|store| {
-                            let bundle = store.review_evidence_bundle(task.task.id).map_err(message)?;
+                            let bundle = store
+                                .review_evidence_bundle(task.task.id)
+                                .map_err(message)?;
                             serde_json::to_string_pretty(&bundle).map_err(message)
                         });
                         match result {
-                            Ok(bundle) => { ui.ctx().copy_text(bundle); self.out = Output::Text("Evidence bundle copied.".into()); }
+                            Ok(bundle) => {
+                                ui.ctx().copy_text(bundle);
+                                self.out = Output::Text("Evidence bundle copied.".into());
+                            }
                             Err(error) => self.out = Output::Error(error),
                         }
                     }

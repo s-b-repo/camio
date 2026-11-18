@@ -36,7 +36,9 @@ pub use evidence::{
     ArtifactFormat, ArtifactImport, ArtifactSummary, Observation, ObservationPage, ARTIFACT_BYTES,
 };
 pub use history::{ExchangePreview, HistoryPage, HistoryRow, INSPECT_BYTES, REVIEW_BODY_LIMIT};
-pub use inventory::{Asset, AssetInventory, AssetNote, Endpoint, EndpointEvidence, InventoryEvidence, InventoryPage};
+pub use inventory::{
+    Asset, AssetInventory, AssetNote, Endpoint, EndpointEvidence, InventoryEvidence, InventoryPage,
+};
 pub use report::{FindingReport, ReportFormat};
 pub use review::{ReviewCandidate, ReviewCounts, ReviewTask};
 pub use workflow::{ReviewPlan, ReviewWorkflow, WorkflowVersion, MAX_REVIEW_EXCHANGES};

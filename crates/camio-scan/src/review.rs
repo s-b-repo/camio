@@ -304,9 +304,14 @@ mod tests {
         let mut exported = serde_json::to_value(bundle).unwrap();
         let original = serde_json::to_vec_pretty(&exported).unwrap();
         assert!(camio_store::ReviewEvidenceBundle::verified_json(&original).is_ok());
-        assert!(!String::from_utf8(original).unwrap().contains("archive.test"));
+        assert!(!String::from_utf8(original)
+            .unwrap()
+            .contains("archive.test"));
         exported["evidence"][0]["status"] = serde_json::json!(404);
-        assert!(camio_store::ReviewEvidenceBundle::verified_json(&serde_json::to_vec(&exported).unwrap()).is_err());
+        assert!(camio_store::ReviewEvidenceBundle::verified_json(
+            &serde_json::to_vec(&exported).unwrap()
+        )
+        .is_err());
 
         store
             .insert(&HttpExchange::new(

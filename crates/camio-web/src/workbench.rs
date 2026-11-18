@@ -347,7 +347,9 @@ pub(super) fn dispatch(cfg: &WebConfig, path: &str, args: &Value) -> Option<Resu
             }
             "/api/inventory/asset" => {
                 let args = AssetPage::deserialize(args)?;
-                serde_json::to_value(store()?.asset_inventory(&args.origin, args.after.as_deref())?)?
+                serde_json::to_value(
+                    store()?.asset_inventory(&args.origin, args.after.as_deref())?,
+                )?
             }
             "/api/inventory/evidence" => {
                 let args = InventoryLocation::deserialize(args)?;

@@ -1,6 +1,9 @@
 use anyhow::{bail, ensure, Context, Result};
 use camio_core::{ExchangeId, FindingId, Query, TaskId, TaskState};
-use camio_store::{ArtifactFormat, ReviewEvidenceBundle, ReviewPlan, ReviewState, Store, ARTIFACT_BYTES, MAX_BUNDLE_BYTES};
+use camio_store::{
+    ArtifactFormat, ReviewEvidenceBundle, ReviewPlan, ReviewState, Store, ARTIFACT_BYTES,
+    MAX_BUNDLE_BYTES,
+};
 use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::json;
 use std::io::Read;
@@ -244,9 +247,15 @@ pub(super) fn run(args: Args) -> Result<()> {
         }
         Operation::Artifacts { before } => json!(store.artifacts(before)?),
         Operation::Observations { id, before } => json!(store.observations(id, before)?),
-        Operation::Inventory { filter, after } => json!(store.inventory(&filter, after.as_deref())?),
-        Operation::Asset { origin, after } => json!(store.asset_inventory(&origin, after.as_deref())?),
-        Operation::EndpointEvidence { location, before } => json!(store.endpoint_evidence(&location, before)?),
+        Operation::Inventory { filter, after } => {
+            json!(store.inventory(&filter, after.as_deref())?)
+        }
+        Operation::Asset { origin, after } => {
+            json!(store.asset_inventory(&origin, after.as_deref())?)
+        }
+        Operation::EndpointEvidence { location, before } => {
+            json!(store.endpoint_evidence(&location, before)?)
+        }
         Operation::Review { query, limit, save } => {
             let id = camio_scan::start_passive_review(&args.db, &query, limit, save)?;
             return wait_for_review(&store, id);
@@ -322,11 +331,19 @@ pub(super) fn run(args: Args) -> Result<()> {
 
 pub(super) fn verify_bundle(file: &Path) -> Result<()> {
     let metadata = file.metadata()?;
-    ensure!(metadata.is_file() && metadata.len() <= MAX_BUNDLE_BYTES, "select an evidence bundle of up to 16 MiB");
+    ensure!(
+        metadata.is_file() && metadata.len() <= MAX_BUNDLE_BYTES,
+        "select an evidence bundle of up to 16 MiB"
+    );
     let mut data = Vec::new();
-    std::fs::File::open(file)?.take(MAX_BUNDLE_BYTES + 1).read_to_end(&mut data)?;
+    std::fs::File::open(file)?
+        .take(MAX_BUNDLE_BYTES + 1)
+        .read_to_end(&mut data)?;
     let bundle = ReviewEvidenceBundle::verified_json(&data)?;
-    println!("{}", json!({"valid": true, "exchanges": bundle.evidence.len(), "unavailable": bundle.manifest.unavailable.len()}));
+    println!(
+        "{}",
+        json!({"valid": true, "exchanges": bundle.evidence.len(), "unavailable": bundle.manifest.unavailable.len()})
+    );
     Ok(())
 }
 
