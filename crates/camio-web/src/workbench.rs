@@ -276,6 +276,7 @@ pub(super) fn dispatch(cfg: &WebConfig, path: &str, args: &Value) -> Option<Resu
             "/api/workflows" => json!({ "workflows": store()?.review_workflows()? }),
             "/api/workflows/save" => {
                 let args = SaveWorkflow::deserialize(args)?;
+                camio_scan::validate_review_plan(&args.plan)?;
                 let mut store = store()?;
                 let workflow = store.save_review_workflow(&args.name, &args.plan)?;
                 json!({ "versions": store.review_workflow_versions(workflow.revision.id)?, "workflow": workflow })
@@ -316,6 +317,7 @@ pub(super) fn dispatch(cfg: &WebConfig, path: &str, args: &Value) -> Option<Resu
                 json!({ "id": id })
             }
             "/api/review/tasks" => json!({ "tasks": store()?.review_tasks()? }),
+            "/api/review/checks" => json!({ "checks": camio_scan::review_checks() }),
             "/api/review/task" => {
                 let args = TaskPage::deserialize(args)?;
                 let offset = bounded_offset(args.offset)?;

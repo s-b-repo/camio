@@ -40,7 +40,8 @@ mod review;
 
 pub use camio_store::MAX_REVIEW_EXCHANGES;
 pub use review::{
-    start_archive_review, start_passive_review, start_review_workflow, ReviewArchiveInput,
+    review_checks, start_archive_review, start_passive_review, start_review_workflow,
+    validate_review_plan, ReviewArchiveInput, ReviewCheck,
 };
 
 pub use checks::{

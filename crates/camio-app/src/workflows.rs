@@ -8,6 +8,7 @@ pub(super) struct WorkflowView {
     saved: Option<ReviewWorkflow>,
     name: String,
     draft: ReviewPlan,
+    available_checks: Vec<camio_scan::ReviewCheck>,
     archive_path: String,
     json: String,
     json_dirty: bool,
@@ -23,6 +24,7 @@ impl Default for WorkflowView {
             saved: None,
             name: String::new(),
             draft,
+            available_checks: camio_scan::review_checks(),
             archive_path: String::new(),
             json,
             json_dirty: false,
@@ -58,7 +60,9 @@ impl WorkflowView {
             && self.name.trim() == saved.revision.name
             && self.draft.query.trim() == saved.plan.query
             && self.draft.limit == saved.plan.limit
-            && self.draft.save == saved.plan.save)
+            && self.draft.save == saved.plan.save
+            && self.draft.schema_version == saved.plan.schema_version
+            && self.draft.check_ids == saved.plan.check_ids)
             .then_some(&saved.revision)
     }
 }
@@ -95,6 +99,10 @@ impl CamioApp {
     }
 
     fn save_workflow(&mut self) {
+        if let Err(error) = camio_scan::validate_review_plan(&self.workflows.draft) {
+            self.out = Output::Error(format!("{error:#}"));
+            return;
+        }
         let result = self.open().and_then(|mut store| {
             let flow = store
                 .save_review_workflow(&self.workflows.name, &self.workflows.draft)
@@ -207,6 +215,7 @@ impl CamioApp {
         {
             self.workflows.sync_json();
         }
+        self.workflow_check_settings(ui);
         ui.label("Capture archive path (optional)");
         ui.horizontal(|ui| {
             ui.add(
@@ -280,7 +289,7 @@ impl CamioApp {
                 if ui.button("Apply JSON to draft").clicked() {
                     let parsed = (|| {
                         let plan: ReviewPlan = serde_json::from_str(&self.workflows.json)?;
-                        plan.compile()?;
+                        camio_scan::validate_review_plan(&plan)?;
                         Ok::<_, anyhow::Error>(plan)
                     })();
                     match parsed {
@@ -300,9 +309,60 @@ impl CamioApp {
         });
     }
 
+    fn workflow_check_settings(&mut self, ui: &mut egui::Ui) {
+        let pane = &mut self.workflows;
+        let all = &pane.available_checks;
+        let count = pane.draft.check_ids.as_ref().map_or(all.len(), Vec::len);
+        let mut changed = false;
+        ui.collapsing(format!("Passive checks · {count} selected"), |ui| {
+            let mut selected = pane
+                .draft
+                .check_ids
+                .clone()
+                .unwrap_or_else(|| all.iter().map(|check| check.id.to_owned()).collect());
+            ui.horizontal(|ui| {
+                if ui.button("Select all").clicked() {
+                    selected = all.iter().map(|check| check.id.to_owned()).collect();
+                    changed = true;
+                }
+                if ui.button("Clear checks").clicked() {
+                    selected.clear();
+                    changed = true;
+                }
+            });
+            for check in all {
+                let mut checked = selected.iter().any(|id| id == check.id);
+                if ui
+                    .checkbox(&mut checked, check.title)
+                    .on_hover_text(check.id)
+                    .changed()
+                {
+                    changed = true;
+                    if checked {
+                        selected.push(check.id.to_owned());
+                    } else {
+                        selected.retain(|id| id != check.id);
+                    }
+                }
+            }
+            if changed {
+                selected.sort();
+                pane.draft.check_ids = (selected.len() != all.len()).then_some(selected);
+                pane.draft.schema_version = if pane.draft.check_ids.is_some() { 2 } else { 1 };
+            }
+        });
+        if changed {
+            pane.sync_json();
+        }
+    }
+
     fn workflow_steps(&self, ui: &mut egui::Ui) {
         let draft = &self.workflows.draft;
         let count = format!("Up to {} exchanges", draft.limit);
+        let configured = draft.check_ids.as_ref().map_or_else(
+            || "All built-in checks".into(),
+            |checks| format!("{} selected", checks.len()),
+        );
         let source = if self.workflows.archive_path.trim().is_empty() {
             "Stored traffic"
         } else {
@@ -318,7 +378,7 @@ impl CamioApp {
                     draft.query.as_str()
                 },
             ),
-            ("Passive checks", "Review captured responses"),
+            ("Passive checks", configured.as_str()),
             (
                 "Findings",
                 if draft.save {

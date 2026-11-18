@@ -267,6 +267,11 @@ a version in **Review workflows**. Edit the fields or apply a schema-versioned
 JSON document. Each task records the version it ran and exposes progress,
 retained results, and cancellation.
 
+Choose a subset of built-in passive checks in the workflow editor when a
+review only needs selected checks. Each saved version records that selection,
+and its run reports include the selected IDs. Use `camio workbench review-checks`
+to list the IDs for a schema version 2 plan's `check_ids` field.
+
 Attach a HAR or Burp items XML capture of up to 4 MiB in **Review workflows**
 to import and review that capture in one run. The task records the capture
 hash, import warnings, and review results. Running the same archive again

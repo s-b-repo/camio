@@ -75,6 +75,8 @@ pub struct ReportRun {
     pub counts: ReviewCounts,
     pub workflow_id: Option<i64>,
     pub workflow_version: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_ids: Option<Vec<String>>,
     pub archive: Option<ReportArchive>,
 }
 
@@ -96,6 +98,14 @@ impl Store {
             !matches!(task.task.state, TaskState::Pending | TaskState::Running),
             "wait for the review to finish before exporting its report"
         );
+        let check_ids = if let Some(version) = task.workflow.as_ref() {
+            self.review_workflow(version.id, Some(version.version))?
+                .context("review workflow version disappeared")?
+                .plan
+                .check_ids
+        } else {
+            None
+        };
         let run = ReportRun {
             id,
             state: task.task.state,
@@ -103,6 +113,7 @@ impl Store {
             counts: task.counts,
             workflow_id: task.workflow.as_ref().map(|version| version.id),
             workflow_version: task.workflow.map(|version| version.version),
+            check_ids,
             archive: task.archive.map(|archive| ReportArchive {
                 format: archive.format,
                 sha256: archive.sha256,
@@ -166,6 +177,9 @@ impl ReportRun {
         ];
         if let Some((id, version)) = self.workflow_id.zip(self.workflow_version) {
             rows.push(("Workflow", format!("#{id} · Version {version}")));
+        }
+        if let Some(checks) = &self.check_ids {
+            rows.push(("Passive checks", checks.join(", ")));
         }
         if let Some(archive) = &self.archive {
             if let Some(imported) = archive.imported {

@@ -89,6 +89,8 @@ enum Operation {
     },
     /// List recent passive review tasks.
     Tasks,
+    /// List available passive check identifiers for saved workflows.
+    ReviewChecks,
     /// Save, inspect, or run a versioned review plan for stored exchanges.
     Workflow {
         #[command(subcommand)]
@@ -261,6 +263,7 @@ pub(super) fn run(args: Args) -> Result<()> {
             return wait_for_review(&store, id);
         }
         Operation::Tasks => json!(store.review_tasks()?),
+        Operation::ReviewChecks => json!(camio_scan::review_checks()),
         Operation::Workflow { command } => match command {
             WorkflowCommand::List => json!(store.review_workflows()?),
             WorkflowCommand::Save { name, file } => {
@@ -279,6 +282,7 @@ pub(super) fn run(args: Args) -> Result<()> {
                 );
                 let plan: ReviewPlan =
                     serde_json::from_slice(&contents).context("invalid review plan document")?;
+                camio_scan::validate_review_plan(&plan)?;
                 json!(store.save_review_workflow(&name, &plan)?)
             }
             WorkflowCommand::Show { id, version } => json!(

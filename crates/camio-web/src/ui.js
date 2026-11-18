@@ -457,10 +457,13 @@ S.workflows = {
     + '<div><label for="workflow-limit">Recent exchanges to examine</label><input id="workflow-limit" type="number" min="1" max="1000" value="200"></div></div>'
     + '<label for="workflow-query">CamioQL filter</label><input id="workflow-query" class="mono" list="query-examples" maxlength="1024" placeholder="Every exchange in the review window">'
     + '<label class="chk"><input type="checkbox" id="workflow-save" checked> Add findings to triage</label>'
+    + '<details><summary id="workflow-check-summary">Passive checks</summary><div class="toolbar">'
+    + '<button class="ghost" data-action="workflows.selectAllChecks">Select all checks</button><button class="ghost" data-action="workflows.clearChecks">Clear checks</button>'
+    + '</div><div class="check-options" id="workflow-check-options"></div></details>'
     + '<label for="workflow-archive">Capture archive (optional)</label><input id="workflow-archive" type="file" accept=".har,.json,.xml,application/json,text/xml,application/xml">'
     + '<p class="statusline" id="workflow-source"></p>'
     + '<ol class="workflow-steps" aria-label="Review steps"><li><strong id="workflow-planned-source">Stored traffic</strong><small id="workflow-planned-limit"></small></li>'
-    + '<li><strong>CamioQL filter</strong><small id="workflow-planned-query"></small></li><li><strong>Passive checks</strong><small>Review captured responses</small></li>'
+    + '<li><strong>CamioQL filter</strong><small id="workflow-planned-query"></small></li><li><strong>Passive checks</strong><small id="workflow-planned-checks">All built-in checks</small></li>'
     + '<li><strong>Findings</strong><small id="workflow-planned-output"></small></li></ol>'
     + '<div class="toolbar"><button class="go" data-action="workflows.save">Save workflow version</button>'
     + '<button class="ghost" id="workflow-run" data-action="workflows.run" disabled>Run saved version</button><button class="ghost" id="workflow-clear-archive" data-action="workflows.clearArchive" hidden>Clear archive</button><span id="workflow-state" class="statusline" role="status"></span></div>'
@@ -468,11 +471,15 @@ S.workflows = {
     + '<div class="toolbar"><button class="ghost" data-action="workflows.applyJson">Apply JSON to draft</button>'
     + '<button class="ghost" data-action="workflows.download">Download plan JSON</button></div></details></div><div id="o_workflows"></div>',
   saved: null,
+  availableChecks: [],
+  checkIds: null,
   jsonDirty: false,
   selectionRequest: 0,
   async enter() {
     try {
-      await this.list();
+      const [, catalog] = await Promise.all([this.list(), api("review/checks", {})]);
+      this.availableChecks = catalog.checks;
+      this.renderChecks();
       this.sync();
     } catch (error) { err("o_workflows", error); }
   },
@@ -499,6 +506,7 @@ S.workflows = {
     this.saved = workflow;
     this.jsonDirty = false;
     const plan = workflow?.plan || {query: "", limit: 200, save: true};
+    this.checkIds = plan.check_ids ?? null;
     $("workflow-name").value = workflow?.name || "";
     $("workflow-query").value = plan.query;
     $("workflow-limit").value = plan.limit;
@@ -510,15 +518,20 @@ S.workflows = {
     else select.value = String(workflow.version);
     select.disabled = !workflow;
     $("workflow-select").value = workflow ? String(workflow.id) : "";
+    this.renderChecks();
     this.sync();
   },
   plan() {
-    return {schema_version: 1, query: v("workflow-query").trim(),
+    const draft = {schema_version: this.checkIds === null ? 1 : 2, query: v("workflow-query").trim(),
       limit: Number(v("workflow-limit")), save: ck("workflow-save")};
+    if (this.checkIds !== null) draft.check_ids = [...this.checkIds].sort();
+    return draft;
   },
   isSaved(plan) {
     return !this.jsonDirty && this.saved?.name === v("workflow-name").trim() && this.saved.plan.query === plan.query
-      && this.saved.plan.limit === plan.limit && this.saved.plan.save === plan.save;
+      && this.saved.plan.limit === plan.limit && this.saved.plan.save === plan.save
+      && this.saved.plan.schema_version === plan.schema_version
+      && JSON.stringify(this.saved.plan.check_ids) === JSON.stringify(plan.check_ids);
   },
   sync() {
     const plan = this.plan();
@@ -529,23 +542,47 @@ S.workflows = {
     $("workflow-clear-archive").hidden = !archive;
     output("workflow-planned-limit", plan.limit > 0 ? "Up to " + plan.limit + " exchanges" : "Choose an exchange limit");
     output("workflow-planned-query", plan.query || "All in review window");
+    const checkCount = this.checkIds?.length ?? this.availableChecks.length;
+    output("workflow-check-summary", "Passive checks · " + checkCount + " selected");
+    output("workflow-planned-checks", this.checkIds === null ? "All built-in checks" : checkCount + " selected");
     output("workflow-planned-output", plan.save ? "Save to triage" : "Keep in task results");
-    output("workflow-state", this.jsonDirty ? "Apply JSON edits to the draft" : saved ? "Saved version " + this.saved.version : "Draft");
+    output("workflow-state", this.jsonDirty ? "Apply JSON edits to the draft" : saved ? "Saved version " + this.saved.version
+      : this.checkIds?.length === 0 ? "Select a passive check" : "Draft");
     output("workflow-run", saved ? "Run version " + this.saved.version + (archive ? " on archive" : "") : "Run saved version");
     $("workflow-run").disabled = !saved;
     if (!this.jsonDirty) $("workflow-json").value = JSON.stringify(plan, null, 2);
   },
+  renderChecks() {
+    out("workflow-check-options", this.availableChecks.map(check => '<label class="chk">'
+      + '<input type="checkbox" data-review-check value="' + esc(check.id) + '"'
+      + (this.checkIds === null || this.checkIds.includes(check.id) ? " checked" : "")
+      + '>' + esc(check.title) + '</label>').join(""));
+  },
+  selectAllChecks() { this.checkIds = null; this.renderChecks(); this.sync(); },
+  clearChecks() { this.checkIds = []; this.renderChecks(); this.sync(); },
+  changeChecks() {
+    const selected = Array.from($("workflow-check-options").querySelectorAll("input:checked"), element => element.value);
+    this.checkIds = selected.length === this.availableChecks.length ? null : selected;
+    this.sync();
+  },
   applyJson() {
     const plan = JSON.parse(v("workflow-json"));
-    if (plan?.schema_version !== 1 || typeof plan.query !== "string" || typeof plan.save !== "boolean"
-      || !Number.isInteger(plan.limit) || plan.limit < 1 || plan.limit > 1000
-      || Object.keys(plan).sort().join(",") !== "limit,query,save,schema_version") {
-      throw new Error("Use a schema version 1 plan with query, limit (1–1000), and save.");
+    const fields = plan?.schema_version === 1 ? "limit,query,save,schema_version" : "check_ids,limit,query,save,schema_version";
+    if (!plan || ![1, 2].includes(plan.schema_version) || typeof plan.query !== "string" || typeof plan.save !== "boolean"
+      || !Number.isInteger(plan.limit) || plan.limit < 1 || plan.limit > 1000 || Object.keys(plan).sort().join(",") !== fields) {
+      throw new Error("Use a version 1 plan or a version 2 plan with check_ids.");
+    }
+    if (plan.schema_version === 2 && (!Array.isArray(plan.check_ids) || !plan.check_ids.length
+      || new Set(plan.check_ids).size !== plan.check_ids.length
+      || !plan.check_ids.every(id => this.availableChecks.some(check => check.id === id)))) {
+      throw new Error("Choose one or more distinct passive check IDs from the catalog.");
     }
     $("workflow-query").value = plan.query;
     $("workflow-limit").value = plan.limit;
     $("workflow-save").checked = plan.save;
+    this.checkIds = plan.check_ids ?? null;
     this.jsonDirty = false;
+    this.renderChecks();
     this.sync();
     out("o_workflows", "");
     announce("JSON plan applied to the draft");
@@ -1109,6 +1146,7 @@ document.addEventListener("change", event => {
   if (event.target.id === "workflow-select") S.workflows.select(v("workflow-select"));
   if (event.target.id === "workflow-version") S.workflows.select(v("workflow-select"), v("workflow-version"));
   if (event.target.id === "workflow-archive") S.workflows.sync();
+  if (event.target.matches("[data-review-check]")) S.workflows.changeChecks();
   if (event.target.id === "reduce-motion") {
     const preference = event.target.checked ? "reduced" : "system";
     document.documentElement.dataset.motion = preference;

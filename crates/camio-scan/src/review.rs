@@ -1,4 +1,4 @@
-use super::default_checks;
+use super::{default_checks, PassiveCheck};
 use anyhow::{ensure, Context, Result};
 use camio_core::{ExchangeId, Query, TaskId};
 use camio_store::{
@@ -10,6 +10,42 @@ use std::thread;
 
 const BATCH: usize = 12;
 const MAX_CANDIDATES_PER_EXCHANGE: usize = 80;
+
+#[derive(serde::Serialize)]
+pub struct ReviewCheck {
+    pub id: &'static str,
+    pub title: &'static str,
+}
+
+pub fn review_checks() -> Vec<ReviewCheck> {
+    default_checks()
+        .iter()
+        .map(|check| ReviewCheck {
+            id: check.id(),
+            title: check.title(),
+        })
+        .collect()
+}
+
+pub fn validate_review_plan(plan: &ReviewPlan) -> Result<()> {
+    plan.compile()?;
+    selected_checks(plan.check_ids.as_deref())?;
+    Ok(())
+}
+
+fn selected_checks(ids: Option<&[String]>) -> Result<Vec<Box<dyn PassiveCheck>>> {
+    let mut checks = default_checks();
+    if let Some(ids) = ids {
+        for id in ids {
+            ensure!(
+                checks.iter().any(|check| check.id() == id),
+                "passive check '{id}' is unavailable"
+            );
+        }
+        checks.retain(|check| ids.iter().any(|id| check.id() == id));
+    }
+    Ok(checks)
+}
 
 /// A capture selected by the operator. URL fields inside it are treated as data.
 pub enum ReviewArchiveInput {
@@ -124,6 +160,17 @@ fn run(
     if !store.start_review(id)? {
         return Ok(());
     }
+    let mut job = store.review_task(id)?.context("review task disappeared")?;
+    let check_ids = if let Some(version) = job.workflow.as_ref() {
+        store
+            .review_workflow(version.id, Some(version.version))?
+            .context("review workflow version disappeared")?
+            .plan
+            .check_ids
+    } else {
+        None
+    };
+    let checks = selected_checks(check_ids.as_deref())?;
     if let Some(input) = archive {
         let data = input.read()?;
         let capture = camio_import::import_bytes(&data).context("importing the capture archive")?;
@@ -136,8 +183,8 @@ fn run(
         )? {
             return Ok(());
         }
+        job = store.review_task(id)?.context("review task disappeared")?;
     }
-    let job = store.review_task(id)?.context("review task disappeared")?;
     let Some(snapshot) = job.snapshot else {
         store.finish_review(id)?;
         return Ok(());
@@ -151,7 +198,6 @@ fn run(
                 .context("archive exchange bounds were not recorded")
         })
         .transpose()?;
-    let checks = default_checks();
     let all = Query::compile("")?;
     let mut before = snapshot.0.checked_add(1).map(ExchangeId);
     let mut counts = ReviewCounts::default();
@@ -340,5 +386,50 @@ mod tests {
         let empty = store.review_task(empty).unwrap().unwrap();
         assert_eq!(empty.counts.examined, 0);
         assert_eq!(empty.archive.unwrap().imported, Some(0));
+    }
+
+    #[test]
+    fn saved_profile_runs_its_selected_checks_after_a_new_version_is_saved() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut headers = HeaderList::new();
+        headers.push("Content-Type", "text/html");
+        let exchange = HttpExchange::new(
+            HttpRequest::get("https://checks.test/files"),
+            Source::Import,
+        )
+        .with_response(HttpResponse {
+            status: 200,
+            reason: None,
+            version: HttpVersion::Http11,
+            headers,
+            body: Body::from_text("<html><title>Index of /files</title></html>"),
+        });
+        store.insert(&exchange).unwrap();
+        let mut plan = ReviewPlan {
+            schema_version: 2,
+            check_ids: Some(vec!["directory-listing".into()]),
+            ..ReviewPlan::new("", 10, false)
+        };
+        validate_review_plan(&plan).unwrap();
+        let profile = store
+            .save_review_workflow("Selected checks", &plan)
+            .unwrap();
+        let version = profile.revision;
+        let (task, query) = store
+            .queue_saved_review(version.id, Some(version.version))
+            .unwrap();
+        store
+            .save_review_workflow("Selected checks", &ReviewPlan::new("", 10, false))
+            .unwrap();
+        run(&mut store, task, &query, None).unwrap();
+        let report = store.review_report(task).unwrap();
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(
+            report.findings[0].rule.as_deref(),
+            Some("directory-listing")
+        );
+        assert_eq!(report.run.unwrap().check_ids, plan.check_ids);
+        plan.check_ids = Some(vec!["unknown-check".into()]);
+        assert!(validate_review_plan(&plan).is_err());
     }
 }

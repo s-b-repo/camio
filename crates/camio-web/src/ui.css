@@ -652,3 +652,6 @@ html[data-motion="reduced"] *, html[data-motion="reduced"] *::before, html[data-
 .inventory-label { color: var(--muted); display: block; margin-top: 3px; }
 .inventory-filter { width: min(100%, 340px); }
 .inventory-location { color: var(--accent-text); overflow-wrap: anywhere; }
+
+.check-options { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 2px 13px; }
+.check-options .chk { margin-block: 4px; }

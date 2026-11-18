@@ -30,6 +30,8 @@ pub struct ReviewPlan {
     pub query: String,
     pub limit: usize,
     pub save: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_ids: Option<Vec<String>>,
 }
 
 impl ReviewPlan {
@@ -39,15 +41,35 @@ impl ReviewPlan {
             query: query.trim().into(),
             limit,
             save,
+            check_ids: None,
         }
     }
 
     pub fn compile(&self) -> Result<Query> {
-        ensure!(
-            self.schema_version == 1,
-            "unsupported review plan schema {}",
-            self.schema_version
-        );
+        match (self.schema_version, &self.check_ids) {
+            (1, None) => {}
+            (2, Some(checks)) => {
+                ensure!(
+                    (1..=128).contains(&checks.len()),
+                    "select at least one passive check"
+                );
+                ensure!(
+                    checks.iter().all(|id| (1..=80).contains(&id.len())
+                        && id.bytes().all(|byte| {
+                            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
+                        })),
+                    "passive check IDs must use lowercase letters, numbers, or hyphens"
+                );
+                let unique: std::collections::BTreeSet<_> = checks.iter().collect();
+                ensure!(
+                    unique.len() == checks.len(),
+                    "passive check IDs must be unique"
+                );
+            }
+            _ => anyhow::bail!(
+                "use schema version 1 for all passive checks or version 2 with check_ids"
+            ),
+        }
         ensure!(
             self.query.len() <= 1024,
             "CamioQL filters support up to 1024 bytes"
@@ -94,7 +116,11 @@ impl Store {
             "enter a workflow name of up to 100 bytes"
         );
         plan.compile()?;
-        let plan = ReviewPlan::new(&plan.query, plan.limit, plan.save);
+        let mut plan = plan.clone();
+        plan.query = plan.query.trim().to_owned();
+        if let Some(checks) = plan.check_ids.as_mut() {
+            checks.sort();
+        }
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
