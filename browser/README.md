@@ -10,6 +10,22 @@ This directory is the **source-level scaffold** for Camio's own browser fork:
   `branding/theme.json`) — black toolbars, light-blue text, `#1e80ff` blue
   buttons/accents, customizable by editing the palette.
 
+## Camoufox source availability (important)
+
+As of **2026-11**, the upstream Camoufox source repo (`github.com/daijro/camoufox`)
+is **unavailable** — the maintainers' GitHub accounts were suspended (appeal
+pending), and only **prebuilt binaries** remain (archived at
+`github.com/jo-inc/camofox-browser/releases`). So the Camoufox **C++ patches can't
+be fetched** right now. Two consequences:
+
+- This fork builds **LibreWolf + Camio branding** (black/blue theme + pref-level
+  stealth). Set `CAMOUFOX_REPO=<a reachable source mirror>` if/when one exists to
+  merge the C++ patches.
+- For Camoufox's **C++-level** stealth today, download a prebuilt Camoufox binary
+  and point Camio at it (`camio launch --install-root …`, or the app's browser
+  binary field) — Camio applies the same `user.js` + black/blue `userChrome.css`
+  to it. See [`../docs/STEALTH.md`](../docs/STEALTH.md).
+
 ## Honest status
 
 This is **tooling + branding**, not a prebuilt binary and not a pre-merged tree.

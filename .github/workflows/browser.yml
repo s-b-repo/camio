@@ -17,6 +17,9 @@ on:
       camoufox_ref:
         description: "Camoufox git ref (for stealth patches)"
         default: "main"
+      camoufox_repo:
+        description: "Camoufox SOURCE repo (upstream is suspended; leave blank to build LibreWolf + branding only)"
+        default: ""
 
 concurrency:
   group: browser-${{ github.ref }}
@@ -54,6 +57,7 @@ jobs:
         env:
           # Build on the larger ephemeral disk mounted at /mnt.
           MOZBUILD_STATE_PATH: /mnt/mozbuild
+          CAMOUFOX_REPO: ${{ inputs.camoufox_repo }}
         run: |
           sudo mkdir -p /mnt/camio-browser-build && sudo chown "$USER" /mnt/camio-browser-build
           ln -s /mnt/camio-browser-build build
@@ -82,3 +86,19 @@ jobs:
           name: camio-browser
           path: out/**
           if-no-files-found: warn
+
+      - name: Verify a browser was actually built
+        run: |
+          # A real build leaves a packaged browser (or at least the binary) under
+          # obj-*/dist. Fail honestly if none exists, so a green check means a
+          # browser — not just "the workflow ran".
+          if find /mnt/camio-browser-build -path '*obj-*/dist/*' \
+                  \( -name 'librewolf' -o -name 'firefox' -o -name '*.tar.*' \
+                     -o -name '*.zip' \) -print -quit 2>/dev/null | grep -q .; then
+            echo "✓ built browser found"
+          else
+            echo "::error::No built browser produced — see the build log / uploaded artifact."
+            echo "Common causes: Camoufox source unavailable (upstream suspended) is fine;"
+            echo "a failed LibreWolf 'make build' is not. Iterate and re-run."
+            exit 1
+          fi

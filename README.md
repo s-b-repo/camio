@@ -227,6 +227,11 @@ Packaging for distributions: a man page (`man/camio.1`), a desktop entry
 (`packaging/camio.desktop`), a Debian packaging skeleton (`debian/`), and a Kali
 submission guide (`docs/KALI_SUBMISSION.md`) ship in the repo.
 
+> 📘 **Full build, feature-flag, debugging, and every-command reference →
+> [`docs/BUILDING.md`](./docs/BUILDING.md).** Covers every per-crate feature,
+> all CLI subcommands and combos, environment variables, LLDB/VS Code
+> configurations, performance profiling, and troubleshooting.
+
 ## Quick start
 
 ```bash

@@ -79,13 +79,30 @@ fi
 check_disk
 mkdir -p "$WORK"
 
+# Fail fast on an unreachable/private repo instead of prompting for a password.
+export GIT_TERMINAL_PROMPT=0
+
 echo "==> fetching LibreWolf ($LIBREWOLF_REF)"
 [ -d "$WORK/librewolf" ] || git clone --depth 1 --branch "$LIBREWOLF_REF" \
   https://codeberg.org/librewolf/source.git "$WORK/librewolf"
 
-echo "==> fetching Camoufox ($CAMOUFOX_REF) for its stealth patches"
-[ -d "$WORK/camoufox" ] || git clone --depth 1 --branch "$CAMOUFOX_REF" \
-  https://github.com/daijro/camoufox.git "$WORK/camoufox"
+# Camoufox source (the Firefox C++ patches): as of 2026-11 the upstream repo
+# (github.com/daijro/camoufox) is UNAVAILABLE — the maintainers' accounts were
+# suspended and only prebuilt binaries remain (jo-inc/camofox-browser/releases).
+# So Camoufox patches are OPTIONAL here: set CAMOUFOX_REPO to a reachable source
+# mirror to merge them; otherwise the fork is LibreWolf + Camio branding
+# (pref-level stealth), and you get Camoufox's C++ stealth by pointing Camio at a
+# prebuilt Camoufox binary instead.
+CAMOUFOX_REPO="${CAMOUFOX_REPO:-}"
+if [ -n "$CAMOUFOX_REPO" ]; then
+  echo "==> fetching Camoufox patches from $CAMOUFOX_REPO ($CAMOUFOX_REF)"
+  [ -d "$WORK/camoufox" ] || git clone --depth 1 --branch "$CAMOUFOX_REF" \
+    "$CAMOUFOX_REPO" "$WORK/camoufox" \
+    || echo "    WARNING: Camoufox clone failed; continuing with LibreWolf + branding only."
+else
+  echo "==> Camoufox source not configured (upstream suspended); building"
+  echo "    LibreWolf + Camio branding only. Set CAMOUFOX_REPO=<mirror> to merge patches."
+fi
 
 if [ "$FULL" -eq 0 ]; then
   cat <<'NOTE'
