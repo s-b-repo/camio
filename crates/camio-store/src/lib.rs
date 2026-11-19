@@ -78,7 +78,7 @@ pub use review::{ReviewCandidate, ReviewCounts, ReviewTask};
 pub use workflow::{ReviewPlan, ReviewWorkflow, WorkflowVersion, MAX_REVIEW_EXCHANGES};
 pub use workspace::{FindingReview, ReviewState, SavedExchange, SavedQuery, WorkspaceSummary};
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 /// Triage lifecycle for a finding (plan §F14). Additive: the `findings` rows are
 /// untouched; a finding with no row here is treated as `open`.
@@ -98,6 +98,17 @@ CREATE TABLE IF NOT EXISTS saved_search (
     query         TEXT NOT NULL,
     created_at_ms INTEGER NOT NULL
 );
+";
+
+/// Organizer labels on exchanges (plan §F18).
+const EXCHANGE_LABEL_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS exchange_label (
+    exchange_id   INTEGER NOT NULL,
+    label         TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (exchange_id, label)
+);
+CREATE INDEX IF NOT EXISTS idx_exchange_label_label ON exchange_label(label);
 ";
 
 /// The embedded store.
@@ -171,6 +182,10 @@ impl Store {
             if version < 6 {
                 tx.execute_batch(SAVED_SEARCH_SCHEMA)
                     .context("creating saved-search schema")?;
+            }
+            if version < 7 {
+                tx.execute_batch(EXCHANGE_LABEL_SCHEMA)
+                    .context("creating exchange-label (organizer) schema")?;
             }
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             tx.commit()?;
@@ -480,6 +495,52 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// Attach a label to an exchange (plan §F18). Idempotent.
+    pub fn add_label(&mut self, id: ExchangeId, label: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO exchange_label (exchange_id, label, created_at_ms)
+             VALUES (?1, ?2, ?3)",
+            params![id.0, label.trim(), now_ms()],
+        )?;
+        Ok(())
+    }
+
+    /// Remove a label from an exchange; returns whether a row was removed.
+    pub fn remove_label(&mut self, id: ExchangeId, label: &str) -> Result<bool> {
+        let n = self.conn.execute(
+            "DELETE FROM exchange_label WHERE exchange_id = ?1 AND label = ?2",
+            params![id.0, label.trim()],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// The labels on one exchange, sorted.
+    pub fn labels_for(&self, id: ExchangeId) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT label FROM exchange_label WHERE exchange_id = ?1 ORDER BY label")?;
+        let rows = stmt.query_map(params![id.0], |r| r.get::<_, String>(0))?;
+        Ok(rows.filter_map(Result::ok).collect())
+    }
+
+    /// Exchange ids carrying `label`, newest first.
+    pub fn exchanges_with_label(&self, label: &str) -> Result<Vec<ExchangeId>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT exchange_id FROM exchange_label WHERE label = ?1 ORDER BY exchange_id DESC",
+        )?;
+        let rows = stmt.query_map(params![label.trim()], |r| r.get::<_, i64>(0))?;
+        Ok(rows.filter_map(Result::ok).map(ExchangeId).collect())
+    }
+
+    /// All labels in use, with how many exchanges carry each, by label.
+    pub fn all_labels(&self) -> Result<Vec<(String, i64)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT label, COUNT(*) FROM exchange_label GROUP BY label ORDER BY label")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        Ok(rows.filter_map(Result::ok).collect())
+    }
+
     /// All findings with their triage status (default `Open`) and note.
     pub fn list_findings_with_status(
         &self,
@@ -778,6 +839,34 @@ mod tests {
             Some("resp.code.eq:200")
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn exchange_labels_roundtrip() {
+        let mut store = Store::open_in_memory().unwrap();
+        let a = store
+            .insert(&exchange("https://a.test/", 200, "x"))
+            .unwrap();
+        let b = store
+            .insert(&exchange("https://b.test/", 200, "y"))
+            .unwrap();
+
+        store.add_label(a, "review").unwrap();
+        store.add_label(a, "auth").unwrap();
+        store.add_label(a, "review").unwrap(); // idempotent
+        store.add_label(b, "auth").unwrap();
+
+        assert_eq!(store.labels_for(a).unwrap(), vec!["auth", "review"]);
+        assert_eq!(store.exchanges_with_label("auth").unwrap().len(), 2);
+        assert_eq!(store.exchanges_with_label("review").unwrap(), vec![a]);
+        assert_eq!(
+            store.all_labels().unwrap(),
+            vec![("auth".to_string(), 2), ("review".to_string(), 1)]
+        );
+
+        assert!(store.remove_label(a, "auth").unwrap());
+        assert!(!store.remove_label(a, "auth").unwrap());
+        assert_eq!(store.labels_for(a).unwrap(), vec!["review"]);
     }
 
     #[test]

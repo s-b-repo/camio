@@ -75,6 +75,8 @@ enum Command {
     Scan(ScanArgs),
     /// Triage stored findings: list them, or set a finding's status (F14).
     Findings(FindingsArgs),
+    /// Organize exchanges with labels: add/remove/list/show (F18).
+    Label(LabelArgs),
     /// Intruder-class fuzzing campaign over §-marked insertion points.
     Fuzz(FuzzArgs),
     /// Enumerate injectable inputs of a request (query/body/cookies/headers/JSON).
@@ -380,6 +382,7 @@ fn main() -> Result<()> {
         Command::Diff(args) => diff_cmd(args),
         Command::Scan(args) => scan_cmd(args),
         Command::Findings(args) => findings_cmd(args),
+        Command::Label(args) => label_cmd(args),
         Command::Fuzz(args) => fuzz_cmd(args),
         Command::Discover(args) => discover_cmd(args),
         Command::Import(args) => import_cmd(args),
@@ -989,6 +992,70 @@ fn findings_cmd(args: FindingsArgs) -> Result<()> {
         eprintln!("{} finding(s).", rows.len());
     }
     Ok(())
+}
+
+#[derive(Parser)]
+struct LabelArgs {
+    #[arg(long, default_value = "camio.db")]
+    db: PathBuf,
+    /// Add the label (--label) to this exchange id.
+    #[arg(long)]
+    add: Option<i64>,
+    /// Remove the label (--label) from this exchange id.
+    #[arg(long)]
+    remove: Option<i64>,
+    /// The label text (with --add/--remove).
+    #[arg(long)]
+    label: Option<String>,
+    /// Show exchange ids carrying this label.
+    #[arg(long)]
+    show: Option<String>,
+    /// List all labels with counts.
+    #[arg(long)]
+    list: bool,
+}
+
+fn label_cmd(args: LabelArgs) -> Result<()> {
+    let mut store =
+        Store::open(&args.db).with_context(|| format!("opening {}", args.db.display()))?;
+
+    if args.list {
+        for (label, count) in store.all_labels()? {
+            println!("  {label:<24} {count}");
+        }
+        return Ok(());
+    }
+    if let Some(label) = &args.show {
+        for id in store.exchanges_with_label(label)? {
+            println!("{}", id.0);
+        }
+        return Ok(());
+    }
+    let label = || {
+        args.label
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("--add/--remove require --label <text>"))
+    };
+    if let Some(id) = args.add {
+        let l = label()?;
+        store.add_label(camio_core::ExchangeId(id), &l)?;
+        println!("labeled #{id} `{l}`");
+        return Ok(());
+    }
+    if let Some(id) = args.remove {
+        let l = label()?;
+        let removed = store.remove_label(camio_core::ExchangeId(id), &l)?;
+        println!(
+            "{}",
+            if removed {
+                format!("removed `{l}` from #{id}")
+            } else {
+                format!("#{id} had no label `{l}`")
+            }
+        );
+        return Ok(());
+    }
+    bail!("nothing to do: use --add/--remove/--show/--list")
 }
 
 #[derive(Parser)]

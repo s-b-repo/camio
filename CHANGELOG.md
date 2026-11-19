@@ -8,6 +8,10 @@ versioning once it reaches 1.0.
 
 ### Added
 
+- **Organizer labels** (`camio-store`, `camio label`, plan §F18): tag exchanges
+  with labels (schema migration **v6→v7**, `exchange_label` table). `camio label
+  --add/--remove/--show/--list`. Store API: `add_label` / `remove_label` /
+  `labels_for` / `exchanges_with_label` / `all_labels`.
 - **Exchange diff** (`camio diff <id1> <id2>`, plan §F09): a unified line diff
   between two stored exchanges' responses (or `--request`), over the existing
   Comparer — e.g. a replay against a baseline.
