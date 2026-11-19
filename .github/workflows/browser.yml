@@ -1,0 +1,84 @@
+name: Build camio-browser (fork)
+
+# Compiling a Firefox-family browser needs ~40 GB disk + hours of CPU — more than
+# a dev laptop (or the default runner) has spare. So we offload it to GitHub:
+# this job frees the runner's disk, installs the toolchain, and runs the fork
+# build. It is MANUAL (workflow_dispatch) and EXPERIMENTAL — merging LibreWolf +
+# Camoufox may need a patch reconciled; iterate here ("live edits" via CI) and
+# re-run. The Camio app itself does not need this — it drives any Firefox-family
+# binary and applies the theme/stealth at launch.
+
+on:
+  workflow_dispatch:
+    inputs:
+      librewolf_ref:
+        description: "LibreWolf source git ref"
+        default: "main"
+      camoufox_ref:
+        description: "Camoufox git ref (for stealth patches)"
+        default: "main"
+
+concurrency:
+  group: browser-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build fork (long, experimental)
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free runner disk space (~30 GB)
+        run: |
+          echo "before:"; df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/.ghcup /opt/hostedtoolcache/CodeQL \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          sudo docker image prune --all --force || true
+          sudo apt-get clean || true
+          echo "after:"; df -h /
+
+      - name: Install build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git python3 python3-pip mercurial curl zip unzip \
+            build-essential clang llvm pkg-config nodejs npm \
+            libgtk-3-dev libdbus-glib-1-dev libasound2-dev \
+            libpulse-dev libx11-xcb-dev m4 nasm
+
+      - name: Build the fork (LibreWolf + Camoufox + Camio branding)
+        working-directory: browser
+        env:
+          # Build on the larger ephemeral disk mounted at /mnt.
+          MOZBUILD_STATE_PATH: /mnt/mozbuild
+        run: |
+          sudo mkdir -p /mnt/camio-browser-build && sudo chown "$USER" /mnt/camio-browser-build
+          ln -s /mnt/camio-browser-build build
+          ./build.sh --full \
+            --librewolf "${{ inputs.librewolf_ref }}" \
+            --camoufox "${{ inputs.camoufox_ref }}" \
+            --jobs "$(nproc)" || echo "::warning::build.sh --full returned non-zero (see logs); uploading whatever was produced"
+
+      - name: Collect artifacts
+        if: always()
+        run: |
+          mkdir -p out
+          # Packaged builds (name/format vary by platform) + any build logs.
+          find /mnt/camio-browser-build -path '*obj-*/dist/*' \
+               \( -name '*.tar.*' -o -name '*.zip' -o -name '*.deb' \) \
+               -exec cp -v {} out/ \; 2>/dev/null || true
+          find /mnt/camio-browser-build -maxdepth 4 -name '*.log' \
+               -exec cp -v {} out/ \; 2>/dev/null || true
+          cp browser/branding/*.css browser/branding/*.json out/ 2>/dev/null || true
+          ls -la out || true
+
+      - name: Upload build output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: camio-browser
+          path: out/**
+          if-no-files-found: warn

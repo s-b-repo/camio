@@ -29,10 +29,23 @@ Firefox uplift. Treat `build.sh` as an automated runbook, not a guarantee.
 
 ## Build
 
+### In the cloud (recommended — "use GitHub to compile")
+
+A dev laptop rarely has ~40 GB spare, so build it on GitHub Actions instead:
+**Actions ▸ "Build camio-browser (fork)" ▸ Run workflow**
+([`.github/workflows/browser.yml`](../.github/workflows/browser.yml)). It frees
+the runner's disk, installs the toolchain, runs `build.sh --full`, and uploads a
+`camio-browser` artifact (or the logs to iterate on). It is **manual** and
+**experimental** — a Firefox uplift may need a Camoufox patch reconciled; fix it
+here and re-run.
+
+### Locally (needs the disk + hours)
+
 ```sh
 # Requires: git, python3, a Firefox build toolchain (mach bootstrap), ~40 GB disk.
-./build.sh            # fetch LibreWolf + Camoufox, apply patches + branding, build
-./build.sh --help     # options (versions, jobs, branding-only)
+./build.sh              # prepare the scaffold (fetch LibreWolf + Camoufox + branding)
+./build.sh --full       # best-effort end-to-end build (LONG)
+./build.sh --help       # options (versions, jobs, branding-only)
 ```
 
 Output: a branded `camio-browser` under `build/` that Camio can launch via its

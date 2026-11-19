@@ -14,11 +14,13 @@ CAMOUFOX_REF="${CAMOUFOX_REF:-main}"
 JOBS="${JOBS:-$(nproc 2>/dev/null || echo 4)}"
 WORK="build"
 BRANDING_ONLY=0
+FULL=0
 
 usage() {
   cat <<USAGE
 Usage: ./build.sh [options]
   --branding-only     Only inject Camio branding into an existing $WORK/ tree
+  --full              Best-effort end-to-end build (LONG; for CI / a big disk)
   --jobs N            Parallel build jobs (default: $JOBS)
   --librewolf REF     LibreWolf git ref (default: $LIBREWOLF_REF)
   --camoufox REF      Camoufox git ref (default: $CAMOUFOX_REF)
@@ -29,6 +31,7 @@ USAGE
 while [ $# -gt 0 ]; do
   case "$1" in
     --branding-only) BRANDING_ONLY=1 ;;
+    --full) FULL=1 ;;
     --jobs) JOBS="$2"; shift ;;
     --librewolf) LIBREWOLF_REF="$2"; shift ;;
     --camoufox) CAMOUFOX_REF="$2"; shift ;;
@@ -84,14 +87,46 @@ echo "==> fetching Camoufox ($CAMOUFOX_REF) for its stealth patches"
 [ -d "$WORK/camoufox" ] || git clone --depth 1 --branch "$CAMOUFOX_REF" \
   https://github.com/daijro/camoufox.git "$WORK/camoufox"
 
-cat <<'NOTE'
-==> NEXT (manual-ish, version-specific):
-    1. Build the LibreWolf source tree per its README (it fetches the matching
-       Firefox source: `make dir && make fetch`).
-    2. Apply Camoufox's patches on top (see camoufox's Makefile / patches/).
-       Conflicts here are expected across Firefox uplifts — reconcile them.
-    3. Re-run `./build.sh --branding-only` to stage the Camio branding.
-    4. Build with `./mach build -j'"$JOBS"'` and package with `./mach package`.
+if [ "$FULL" -eq 0 ]; then
+  cat <<'NOTE'
+==> scaffold prepared. For a full build, re-run with --full (LONG; best-effort),
+    or step through manually:
+    1. cd build/librewolf && make dir && make fetch   # fetch Firefox + LW patches
+    2. apply Camoufox patches to the firefox-* source  # reconcile conflicts
+    3. ../../build.sh --branding-only                  # stage Camio branding
+    4. make build && make package                      # compile + package
 NOTE
+  inject_branding "$WORK/librewolf" || true
+  echo "done: scaffold prepared under $WORK/. See README.md."
+  exit 0
+fi
+
+# ---- --full: best-effort end-to-end build (hours; experimental) -------------
+echo "==> FULL build (long, experimental — expect to reconcile a patch or two)"
+export MOZBUILD_STATE_PATH="${MOZBUILD_STATE_PATH:-$PWD/$WORK/.mozbuild}"
+( cd "$WORK/librewolf" && make dir && make fetch ) \
+  || { echo "LibreWolf fetch failed (check its README targets)"; exit 1; }
+
+ffdir="$(find "$WORK/librewolf" -maxdepth 2 -type d \( -name 'firefox-*' -o -name 'mozilla-*' \) 2>/dev/null | head -1)"
+echo "==> firefox source: ${ffdir:-<not found>}"
+if [ -n "$ffdir" ] && ls "$WORK"/camoufox/patches/*.patch >/dev/null 2>&1; then
+  echo "==> applying Camoufox stealth patches (best-effort; failures are logged)"
+  for p in "$WORK"/camoufox/patches/*.patch; do
+    if ( cd "$ffdir" && patch -p1 --forward --fuzz=3 --no-backup-if-mismatch < "$OLDPWD/$p" ) >/dev/null 2>&1; then
+      echo "    applied $(basename "$p")"
+    else
+      echo "    SKIPPED $(basename "$p") — reconcile for this Firefox version"
+    fi
+  done
+fi
+
 inject_branding "$WORK/librewolf" || true
-echo "done: scaffold prepared under $WORK/. See README.md for the build steps."
+if [ -n "$ffdir" ]; then
+  install -D -m 0644 branding/userChrome.css "$ffdir/browser/branding/camio/userChrome.css" 2>/dev/null || true
+fi
+
+echo "==> bootstrapping + building (this is the multi-hour part)"
+( cd "$WORK/librewolf" && make bootstrap ) || echo "    bootstrap returned non-zero (may already be set up)"
+( cd "$WORK/librewolf" && make build ) || { echo "build failed — see logs"; exit 1; }
+( cd "$WORK/librewolf" && make package ) || echo "    package step non-zero"
+echo "==> done. Artifacts under $WORK/librewolf (look for obj-*/dist/)."
