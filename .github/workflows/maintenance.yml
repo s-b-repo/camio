@@ -55,13 +55,24 @@ jobs:
             echo "nothing to fix — tree is already clean"
             exit 0
           fi
-          BR="automated/clippy-fmt-$(date +%Y%m%d%H%M)"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git switch -c "$BR"
-          git commit -am "chore: automated clippy --fix + cargo fmt"
+          BR="automated/clippy-fmt-$(date +%Y%m%d%H%M)"
+          # Base the branch on the CURRENT default branch and never commit under
+          # .github/ — the default GITHUB_TOKEN cannot create/update workflow
+          # files, so the branch's .github must stay byte-identical to main.
+          git stash push -u -m autofix
+          git fetch --depth=1 origin main
+          git switch -c "$BR" FETCH_HEAD
+          git stash pop
+          git add -A -- ':!.github/**'
+          if git diff --cached --quiet; then
+            echo "only .github/ changed — nothing to PR (the token can't push workflows)"
+            exit 0
+          fi
+          git commit -m "chore: automated clippy --fix + cargo fmt"
           git push -u origin "$BR"
           gh pr create --base main --head "$BR" \
             --title "chore: automated clippy --fix + fmt" \
-            --body "Weekly maintenance run: machine-applied \`cargo clippy --fix\` + \`cargo fmt\`. Review the diff; CI must pass before merge." \
+            --body "Weekly maintenance run: machine-applied \`cargo clippy --fix\` + \`cargo fmt\` (source only; workflow files excluded). Review the diff; CI must pass before merge." \
             || echo "::warning::Could not open the PR. Enable 'Allow GitHub Actions to create and approve pull requests' (Settings ▸ Actions ▸ General). Branch '$BR' is pushed either way."
