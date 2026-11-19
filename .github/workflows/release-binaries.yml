@@ -34,10 +34,20 @@ on:
     #             those never fire a `push: tags` either, and this
     #             workflow would miss every bot-driven tag.
     types: [published, created]
+  workflow_run:
+    # Belt-and-braces — the reusable SemVer "Release" workflow runs on
+    # every push to main and either cuts a tag or decides none is
+    # needed. When it completes, pick up the most recent `vX.Y.Z` tag
+    # (which may be the one it just cut) and build binaries. This
+    # covers the case where the bot creates a release with the default
+    # GITHUB_TOKEN — that event does not fan out to other workflows,
+    # but a `workflow_run: completed` trigger does fire.
+    workflows: ["Release"]
+    types: [completed]
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to build + attach binaries to (e.g. v0.2.3)"
+        description: "Release tag to build + attach binaries to (e.g. v0.3.0)"
         required: true
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+"]
@@ -59,12 +69,46 @@ jobs:
     outputs:
       tag: ${{ steps.r.outputs.tag }}
     steps:
+      - uses: actions/checkout@v4
+        if: github.event_name == 'workflow_run'
+        with:
+          fetch-depth: 0   # need full history for `git describe` of the latest tag
+
       - name: Resolve
         id: r
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
+          # Priority order:
+          #   1. release.tag_name  (release-triggered)
+          #   2. inputs.tag        (manual dispatch)
+          #   3. github.ref_name   (bare tag push)
+          #   4. latest vX.Y.Z tag (workflow_run — the Release workflow
+          #      just finished, so the newest tag is the one we want)
           TAG="${{ github.event.release.tag_name || inputs.tag || github.ref_name }}"
-          [ -n "$TAG" ] || { echo "::error::no tag resolved"; exit 1; }
+          if [ -z "$TAG" ] || [ "$TAG" = "main" ]; then
+            # workflow_run path: ask the API for the latest release/tag.
+            TAG=$(gh release list --limit 20 \
+                    --json tagName,isPrerelease \
+                    --jq '[.[] | select(.tagName|test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))][0].tagName' 2>/dev/null || true)
+            if [ -z "$TAG" ]; then
+              echo "::warning::no vMAJOR.MINOR.PATCH tag found yet — nothing to build"
+              echo "tag=" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
           case "$TAG" in v[0-9]*.[0-9]*.[0-9]*) ;; *) echo "::error::tag '$TAG' is not vMAJOR.MINOR.PATCH"; exit 1 ;; esac
+          # workflow_run gating: only build if the Release run that
+          # triggered us actually succeeded. A "no release needed" run
+          # also lands as success, so this is correct.
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            if [ "${{ github.event.workflow_run.conclusion }}" != "success" ]; then
+              echo "::warning::upstream Release workflow concluded ${{ github.event.workflow_run.conclusion }} — not building"
+              echo "tag=" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "resolved tag: $TAG"
 
@@ -74,6 +118,7 @@ jobs:
   build:
     name: Build ${{ matrix.target.name }}
     needs: resolve
+    if: needs.resolve.outputs.tag != ''
     runs-on: ${{ matrix.target.runner }}
     # Apple-Silicon runners are not always available to every account.
     # macos-aarch64 is marked `continue-on-error: true` via `required: false`
@@ -240,7 +285,7 @@ jobs:
   attach:
     name: Attach to release
     needs: [resolve, build]
-    if: always() && needs.resolve.result == 'success'
+    if: always() && needs.resolve.result == 'success' && needs.resolve.outputs.tag != ''
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
