@@ -231,10 +231,16 @@ jobs:
   # ------------------------------------------------------------------
   # Attach every built archive to the GitHub Release in one step so the
   # release page lists them together.
+  #
+  # `if: always()` + the `success()||failure()` guard mean: if at least
+  # one matrix job produced an artifact (even if a sibling failed or was
+  # cancelled — e.g. missing macos-aarch64 runner), still attach what
+  # we've got. A completely dead matrix skips attach cleanly.
   # ------------------------------------------------------------------
   attach:
     name: Attach to release
     needs: [resolve, build]
+    if: always() && needs.resolve.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -256,8 +262,16 @@ jobs:
           # If the trigger was a bare tag push with no release yet, make one.
           gh release view "$TAG" >/dev/null 2>&1 \
             || gh release create "$TAG" --title "$TAG" --generate-notes
-          # Flatten the download dir and upload every .tar.gz + .sha256.
           cd dist
           ls -la
-          gh release upload "$TAG" *.tar.gz *.tar.gz.sha256 --clobber
-          echo "attached $(ls *.tar.gz | wc -l) archive(s) to release $TAG"
+          # Count artifacts; nothing to upload is not an error (the
+          # matrix may be mid-rollout). Upload only what exists.
+          shopt -s nullglob
+          archives=(*.tar.gz)
+          sums=(*.tar.gz.sha256)
+          if [ ${#archives[@]} -eq 0 ]; then
+            echo "::warning::no archives produced for $TAG — nothing to attach"
+            exit 0
+          fi
+          gh release upload "$TAG" "${archives[@]}" "${sums[@]}" --clobber
+          echo "attached ${#archives[@]} archive(s) to release $TAG"
