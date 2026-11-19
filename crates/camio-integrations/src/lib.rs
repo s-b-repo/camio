@@ -12,7 +12,10 @@
 //! Camio's "bounded, cancellable" contract (plan §4.2) at the process boundary.
 
 pub mod nuclei;
+pub mod registry;
 pub mod subfinder;
+
+pub use registry::{probe_tool, registry, ToolInfo, ToolStatus, KNOWN_TOOLS};
 
 pub use nuclei::{
     nuclei_to_findings, parse_nuclei_jsonl, run_nuclei, NucleiFinding, NucleiOptions,

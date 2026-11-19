@@ -99,6 +99,8 @@ enum Command {
     Nuclei(NucleiArgs),
     /// Enumerate subdomains of a domain with subfinder (external, passive OSINT).
     Subfinder(SubfinderArgs),
+    /// List external-tool integrations and whether each is installed.
+    Integrations,
     /// Review stored traffic, import evidence, and manage the workspace.
     Workbench(workbench::Args),
     /// Verify checksums and evidence references in an exported review bundle.
@@ -365,6 +367,7 @@ fn main() -> Result<()> {
         Command::Oast(args) => oast_cmd(args),
         Command::Nuclei(args) => nuclei_cmd(args),
         Command::Subfinder(args) => subfinder_cmd(args),
+        Command::Integrations => integrations_cmd(),
         Command::Workbench(args) => workbench::run(args),
         Command::VerifyBundle { file } => workbench::verify_bundle(&file),
         Command::Mcp { action } => match action {
@@ -1623,6 +1626,22 @@ fn subfinder_cmd(args: SubfinderArgs) -> Result<()> {
             println!("{h}");
         }
         eprintln!("{} unique subdomain(s).", hosts.len());
+    }
+    Ok(())
+}
+
+fn integrations_cmd() -> Result<()> {
+    println!("External-tool integrations:");
+    for st in camio_integrations::registry() {
+        let status = if st.installed {
+            st.version
+                .as_deref()
+                .map(|v| format!("installed ({v})"))
+                .unwrap_or_else(|| "installed".to_string())
+        } else {
+            "not installed".to_string()
+        };
+        println!("  {:<12} {:<34} {status}", st.name, st.purpose);
     }
     Ok(())
 }
