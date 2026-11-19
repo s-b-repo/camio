@@ -157,6 +157,64 @@ pub struct PassiveReport {
     pub exchanges_scanned: usize,
 }
 
+/// A named selection of passive checks and a severity floor (plan §F13 "scan
+/// profiles"). `include_ids = None` means every check; `exclude_ids` always wins;
+/// findings below `min_severity` are dropped.
+#[derive(Debug, Clone)]
+pub struct ScanProfile {
+    pub include_ids: Option<Vec<String>>,
+    pub exclude_ids: Vec<String>,
+    pub min_severity: Severity,
+}
+
+impl Default for ScanProfile {
+    fn default() -> Self {
+        ScanProfile::all()
+    }
+}
+
+impl ScanProfile {
+    /// Every check, no severity floor.
+    pub fn all() -> Self {
+        ScanProfile {
+            include_ids: None,
+            exclude_ids: Vec::new(),
+            min_severity: Severity::Info,
+        }
+    }
+
+    /// Only the named check ids.
+    pub fn only<I: IntoIterator<Item = String>>(ids: I) -> Self {
+        ScanProfile {
+            include_ids: Some(ids.into_iter().collect()),
+            ..ScanProfile::all()
+        }
+    }
+
+    /// Set the severity floor (findings below it are dropped).
+    pub fn with_min_severity(mut self, min: Severity) -> Self {
+        self.min_severity = min;
+        self
+    }
+
+    fn admits(&self, id: &str) -> bool {
+        let included = self
+            .include_ids
+            .as_ref()
+            .map(|ids| ids.iter().any(|i| i == id))
+            .unwrap_or(true);
+        included && !self.exclude_ids.iter().any(|i| i == id)
+    }
+}
+
+/// The default checks filtered to those a profile admits.
+pub fn checks_for_profile(profile: &ScanProfile) -> Vec<Box<dyn PassiveCheck>> {
+    default_checks()
+        .into_iter()
+        .filter(|c| profile.admits(c.id()))
+        .collect()
+}
+
 /// Run the passive checks across many exchanges and produce a deduplicated,
 /// severity-sorted report.
 ///
@@ -167,13 +225,22 @@ pub struct PassiveReport {
 /// list is sorted most-severe first; findings of equal severity keep their
 /// first-seen order.
 pub fn scan_all(exchanges: &[HttpExchange]) -> PassiveReport {
-    let checks = default_checks();
+    scan_all_with_profile(exchanges, &ScanProfile::all())
+}
+
+/// Like [`scan_all`] but restricted to the checks and severity floor of a
+/// [`ScanProfile`].
+pub fn scan_all_with_profile(exchanges: &[HttpExchange], profile: &ScanProfile) -> PassiveReport {
+    let checks = checks_for_profile(profile);
     let mut agg: Vec<Aggregated> = Vec::new();
 
     for ex in exchanges {
         let host = ex.request.host().unwrap_or_default();
         for check in &checks {
             for finding in check.check(ex) {
+                if finding.severity < profile.min_severity {
+                    continue;
+                }
                 upsert(&mut agg, &host, finding);
             }
         }
@@ -413,5 +480,39 @@ mod tests {
         let json = serde_json::to_string(&a).expect("serialize");
         let back: JsAnalysis = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(a, back);
+    }
+
+    #[test]
+    fn scan_profile_selects_checks() {
+        let total = default_checks().len();
+        let only = ScanProfile::only(["missing-security-headers".to_string()]);
+        assert_eq!(checks_for_profile(&only).len(), 1);
+        let mut excl = ScanProfile::all();
+        excl.exclude_ids = vec!["missing-security-headers".to_string()];
+        assert_eq!(checks_for_profile(&excl).len(), total - 1);
+        // Running the single-check profile reports one check executed.
+        let ex = html_exchange(1, "https://ex.test/", &[]);
+        assert_eq!(
+            scan_all_with_profile(std::slice::from_ref(&ex), &only).checks_run,
+            1
+        );
+    }
+
+    #[test]
+    fn scan_profile_severity_floor_drops_below() {
+        let ex = html_exchange(1, "https://ex.test/", &[]);
+        // A Critical floor drops the (Low/Medium/Info) passive findings.
+        let report = scan_all_with_profile(
+            std::slice::from_ref(&ex),
+            &ScanProfile::all().with_min_severity(Severity::Critical),
+        );
+        assert!(report
+            .findings
+            .iter()
+            .all(|f| f.severity >= Severity::Critical));
+        // Info floor keeps everything the default scan would.
+        let full = scan_all_with_profile(std::slice::from_ref(&ex), &ScanProfile::all());
+        let baseline = scan_all(std::slice::from_ref(&ex));
+        assert_eq!(full.findings.len(), baseline.findings.len());
     }
 }

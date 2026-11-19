@@ -843,14 +843,50 @@ struct ScanArgs {
     save: bool,
     #[arg(long)]
     json: bool,
+    /// Run only these check ids (repeatable). Default: every check.
+    #[arg(long = "only")]
+    only: Vec<String>,
+    /// Exclude these check ids (repeatable).
+    #[arg(long = "exclude")]
+    exclude: Vec<String>,
+    /// Drop findings below this severity: info|low|medium|high|critical.
+    #[arg(long = "min-severity")]
+    min_severity: Option<String>,
+    /// List the available check ids and exit.
+    #[arg(long = "list-checks")]
+    list_checks: bool,
+}
+
+fn parse_severity(s: &str) -> Result<camio_core::Severity> {
+    camio_core::Severity::parse(s).ok_or_else(|| {
+        anyhow::anyhow!("unknown severity `{s}` (use info|low|medium|high|critical)")
+    })
 }
 
 fn scan_cmd(args: ScanArgs) -> Result<()> {
+    if args.list_checks {
+        println!("Passive check ids:");
+        for c in camio_scan::default_checks() {
+            println!("  {:<26} {} ({})", c.id(), c.title(), c.severity().as_str());
+        }
+        return Ok(());
+    }
+
+    let mut profile = if args.only.is_empty() {
+        camio_scan::ScanProfile::all()
+    } else {
+        camio_scan::ScanProfile::only(args.only.clone())
+    };
+    profile.exclude_ids = args.exclude.clone();
+    if let Some(sev) = &args.min_severity {
+        profile.min_severity = parse_severity(sev)?;
+    }
+
     let mut store = open_store(&args.db)?;
     let q =
         Query::compile(args.query.as_deref().unwrap_or("")).map_err(|e| anyhow::anyhow!("{e}"))?;
     let exchanges = store.query_with_bodies(&q, args.limit)?;
-    let report = camio_scan::scan_all(&exchanges);
+    let report = camio_scan::scan_all_with_profile(&exchanges, &profile);
     if args.json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {

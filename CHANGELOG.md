@@ -8,6 +8,11 @@ versioning once it reaches 1.0.
 
 ### Added
 
+- **Scan profiles** (`camio-scan`, plan §F13): `ScanProfile` selects a subset of
+  passive checks by id (`--only`/`--exclude`) and a severity floor
+  (`--min-severity`); `scan_all_with_profile` reuses the same dedup/sort as the
+  full scan. `camio scan --list-checks` prints the available check ids.
+  (`camio_core::Severity` gains `as_str`/`parse`.)
 - **Shared rate limiting** (`camio_core::RateLimiter`, plan §4.3/§F02): a
   per-host (and optional global) token-bucket limiter any send path can share so
   a target is never hammered faster than allowed. Pure, clock-injectable, and
