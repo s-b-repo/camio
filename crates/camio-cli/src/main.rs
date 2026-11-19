@@ -109,6 +109,13 @@ enum Command {
     Workbench(workbench::Args),
     /// Verify checksums and evidence references in an exported review bundle.
     VerifyBundle { file: PathBuf },
+    /// Write a consistent backup of a workspace database to a new file (F01).
+    Backup {
+        /// Destination path (must not already exist).
+        dest: PathBuf,
+        #[arg(long, default_value = "camio.db")]
+        db: PathBuf,
+    },
     /// Local MCP server.
     Mcp {
         #[command(subcommand)]
@@ -388,6 +395,12 @@ fn main() -> Result<()> {
         Command::Integrations => integrations_cmd(),
         Command::Workbench(args) => workbench::run(args),
         Command::VerifyBundle { file } => workbench::verify_bundle(&file),
+        Command::Backup { dest, db } => {
+            let store = open_store(&db)?;
+            store.backup_to(&dest)?;
+            println!("backed up {} → {}", db.display(), dest.display());
+            Ok(())
+        }
         Command::Mcp { action } => match action {
             McpCmd::Serve(args) => mcp_serve_cmd(args),
         },

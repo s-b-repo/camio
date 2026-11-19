@@ -8,6 +8,11 @@ versioning once it reaches 1.0.
 
 ### Added
 
+- **Workspace backup** (`camio backup <dest>`, plan §F01): a consistent compacted
+  copy of a workspace database (SQLite `VACUUM INTO`, WAL-safe, refuses to
+  overwrite) — verified reopenable with history and saved searches intact.
+- **More MCP coverage** (plan §F21): `findings_set_status` (triage a finding via
+  MCP) and `saved_searches` (list stored CamioQL searches).
 - **Saved searches** (`camio-store`, `camio query`, plan §F07): name and store a
   CamioQL query (`--save <name>`), run one (`--saved <name>`), list
   (`--list-saved`), or delete (`--delete-saved <name>`) — in a new `saved_search`

@@ -18,11 +18,11 @@
 use camio_automate::{AttackType, Campaign, PayloadSet};
 use camio_convert::Transform;
 use camio_core::{
-    ActionClass, FingerprintProfile, HttpExchange, HttpRequest, Policy, PolicyOutcome, Scope,
-    SiteMap, Source, TaskId,
+    ActionClass, FindingId, FingerprintProfile, HttpExchange, HttpRequest, Policy, PolicyOutcome,
+    Scope, SiteMap, Source, TaskId,
 };
 use camio_request::{DryRunEngine, FingerprintSpec, RequestEngine};
-use camio_store::{ReviewTask, Store};
+use camio_store::{FindingStatus, ReviewTask, Store};
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 
@@ -190,6 +190,8 @@ impl McpServer {
             "oast_new_token" => self.tool_oast_new_token(),
             "oast_interactions" => self.tool_oast_interactions(&args),
             "subfinder_enum" => self.tool_subfinder(&args),
+            "findings_set_status" => self.tool_findings_set_status(&args),
+            "saved_searches" => self.tool_saved_searches(),
             other => Err(format!("unknown tool: {other}")),
         };
         match result {
@@ -240,6 +242,35 @@ impl McpServer {
         let store = self.store.as_ref().ok_or("no store configured")?;
         let findings = store.list_findings().map_err(|e| e.to_string())?;
         Ok(serde_json::to_value(findings).unwrap_or(json!([])))
+    }
+
+    /// Set a finding's triage status (plan §F14).
+    fn tool_findings_set_status(&mut self, args: &Value) -> Result<Value, String> {
+        let id = args
+            .get("finding_id")
+            .and_then(serde_json::Value::as_i64)
+            .ok_or("missing `finding_id`")?;
+        let status = args
+            .get("status")
+            .and_then(|s| s.as_str())
+            .and_then(FindingStatus::parse)
+            .ok_or("`status` must be open|confirmed|false_positive|fixed|ignored")?;
+        let note = args.get("note").and_then(|n| n.as_str());
+        let store = self.store.as_mut().ok_or("no store configured")?;
+        store
+            .set_finding_status(FindingId(id), status, note)
+            .map_err(|e| e.to_string())?;
+        Ok(json!({ "finding_id": id, "status": status.as_str() }))
+    }
+
+    /// List saved CamioQL searches (plan §F07).
+    fn tool_saved_searches(&self) -> Result<Value, String> {
+        let store = self.store.as_ref().ok_or("no store configured")?;
+        let items = store.list_saved_searches().map_err(|e| e.to_string())?;
+        Ok(json!(items
+            .iter()
+            .map(|(name, query)| json!({ "name": name, "query": query }))
+            .collect::<Vec<_>>()))
     }
 
     /// Lazily start a loopback OAST collector so `oast_*` tools share one.
@@ -1179,6 +1210,24 @@ fn tool_defs() -> Value {
                 },
                 "required": ["domain"]
             }
+        },
+        {
+            "name": "findings_set_status",
+            "description": "Triage a stored finding: set its lifecycle status (open|confirmed|false_positive|fixed|ignored) with an optional note.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "finding_id": { "type": "integer" },
+                    "status": { "type": "string" },
+                    "note": { "type": "string" }
+                },
+                "required": ["finding_id", "status"]
+            }
+        },
+        {
+            "name": "saved_searches",
+            "description": "List saved CamioQL searches (name + query) stored in the workspace.",
+            "inputSchema": { "type": "object", "properties": {} }
         },
         {
             "name": "review_start",

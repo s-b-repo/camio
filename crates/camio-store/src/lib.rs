@@ -755,6 +755,32 @@ mod tests {
     }
 
     #[test]
+    fn backup_produces_a_reopenable_copy() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .insert(&exchange("https://b.test/", 200, "x"))
+            .unwrap();
+        store.save_search("q", "resp.code.eq:200").unwrap();
+
+        let dir = std::env::temp_dir().join(format!("camio-bk-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let dest = dir.join("backup.db");
+        let _ = std::fs::remove_file(&dest);
+        store.backup_to(&dest).unwrap();
+        assert!(dest.exists());
+        // Refusing to overwrite an existing file.
+        assert!(store.backup_to(&dest).is_err());
+
+        let reopened = Store::open(&dest).unwrap();
+        assert_eq!(reopened.count().unwrap(), 1);
+        assert_eq!(
+            reopened.saved_search("q").unwrap().as_deref(),
+            Some("resp.code.eq:200")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn saved_searches_roundtrip() {
         let mut store = Store::open_in_memory().unwrap();
         assert!(store.saved_search("5xx").unwrap().is_none());
