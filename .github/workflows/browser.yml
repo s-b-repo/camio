@@ -30,6 +30,8 @@ jobs:
     name: Build fork (long, experimental)
     runs-on: ubuntu-latest
     timeout-minutes: 350
+    permissions:
+      contents: write   # create the browser-v* release + upload the assets
     steps:
       - uses: actions/checkout@v4
 
@@ -95,10 +97,11 @@ jobs:
         if: always()
         run: |
           mkdir -p out
-          # build.sh rebrands to camio-browser-*.tar.xz; also keep the raw
-          # librewolf-*.tar.xz and sweep obj-*/dist for any other packaged output.
+          # build.sh rebrands to camio-browser-*.tar.xz and a .deb; also keep the
+          # raw librewolf-*.tar.xz and sweep obj-*/dist for any other output.
           find /mnt/camio-browser-build -maxdepth 2 \
-               \( -name 'camio-browser-*.tar.*' -o -name 'librewolf-*.tar.*' \) \
+               \( -name 'camio-browser-*.tar.*' -o -name 'camio-browser_*_amd64.deb' \
+                  -o -name 'librewolf-*.tar.*' \) \
                -exec cp -v {} out/ \; 2>/dev/null || true
           find /mnt/camio-browser-build -path '*obj-*/dist/*' \
                \( -name '*.tar.*' -o -name '*.zip' -o -name '*.deb' \) \
@@ -133,4 +136,61 @@ jobs:
             echo "Common causes: Camoufox source unavailable (upstream suspended) is fine;"
             echo "a failed LibreWolf 'make build' is not. Iterate and re-run."
             exit 1
+          fi
+
+      - name: Publish a browser release (notes generated from the build)
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd out
+          TARBALL="$(ls camio-browser-*.tar.xz 2>/dev/null | head -1)"
+          DEB="$(ls camio-browser_*_amd64.deb 2>/dev/null | head -1)"
+          if [ -z "$TARBALL" ]; then echo "no camio-browser tarball; skipping release"; exit 0; fi
+          VER="$(printf '%s' "$TARBALL" | sed -E 's/camio-browser-([0-9][^.]*\.[^.]*\.[^-]*-[0-9]+)\..*/\1/')"
+          [ -n "$VER" ] || VER="$(date +%Y%m%d)"
+          TAG="browser-v${VER}"
+          {
+            echo "# Camio Browser ${VER}"
+            echo
+            echo "A fingerprint-hardened **LibreWolf ${VER}** fork — themed black/blue and"
+            echo "stealth-preconfigured — compiled from source in CI (\`.github/workflows/browser.yml\`)."
+            echo
+            echo "## Downloads"
+            echo
+            echo "| File | Size | SHA-256 |"
+            echo "|------|------|---------|"
+            for f in "$TARBALL" "$DEB"; do
+              [ -n "$f" ] && [ -f "$f" ] && \
+                printf '| `%s` | %s | `%s` |\n' "$f" "$(du -h "$f" | cut -f1)" "$(sha256sum "$f" | cut -d' ' -f1)"
+            done
+            echo
+            echo "## Install"
+            echo
+            echo '```sh'
+            echo "sudo apt install ./${DEB:-camio-browser_*.deb}   # or: sudo dpkg -i ${DEB:-*.deb} && sudo apt -f install"
+            echo "camio-browser                                    # launches themed + hardened"
+            echo '```'
+            echo
+            echo "Or extract the tarball and run \`./camio-browser/librewolf\`."
+            echo
+            echo "## What's baked in"
+            echo
+            echo "- Black/blue \`userChrome.css\` chrome, with \`lockPref\` enabling it"
+            echo "- Extra hardening prefs (battery / netinfo / gamepad / beacon / DNS-prefetch / predictor off)"
+            echo "- \`.desktop\` entry + icon (installed by the \`.deb\`); \`/usr/bin/camio-browser\` on PATH"
+            echo "- Camoufox's C++ patches are **not** included (upstream suspended) — point Camio at a"
+            echo "  prebuilt Camoufox binary for the C++ stealth layer; Camio themes/fingerprints it at launch."
+            echo
+            echo "_Built from commit \`${GITHUB_SHA}\` on $(date -u +%Y-%m-%d)._"
+          } > notes.md
+          ASSETS=""
+          [ -n "$TARBALL" ] && [ -f "$TARBALL" ] && ASSETS="$ASSETS $TARBALL"
+          [ -n "$DEB" ] && [ -f "$DEB" ] && ASSETS="$ASSETS $DEB"
+          echo "release $TAG with assets:$ASSETS"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --notes-file notes.md --title "Camio Browser ${VER}"
+            [ -n "$ASSETS" ] && gh release upload "$TAG" $ASSETS --clobber
+          else
+            gh release create "$TAG" $ASSETS --title "Camio Browser ${VER}" --notes-file notes.md
           fi

@@ -18,9 +18,16 @@ use camio_core::FingerprintProfile;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Candidate Firefox-family binary names, in preference order (LibreWolf first,
-/// per the operator's choice of a LibreWolf browser).
-pub const CANDIDATES: &[&str] = &["librewolf", "camoufox", "camoufox-bin", "firefox"];
+/// Candidate Firefox-family binary names, in preference order. Camio's own fork
+/// (`camio-browser`, installed from the `.deb` to `/usr/bin/camio-browser`) wins
+/// when present, then LibreWolf, then Camoufox, then stock Firefox.
+pub const CANDIDATES: &[&str] = &[
+    "camio-browser",
+    "librewolf",
+    "camoufox",
+    "camoufox-bin",
+    "firefox",
+];
 
 /// Resolve the browser binary: an explicit path if given and present, else the
 /// first candidate found on `PATH`, else a vendored Camoufox under the engine

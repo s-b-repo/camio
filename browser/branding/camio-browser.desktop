@@ -1,0 +1,14 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Camio Browser
+GenericName=Web Browser
+Comment=Fingerprint-hardened LibreWolf fork, themed for Camio
+Exec=camio-browser %u
+Icon=camio-browser
+Terminal=false
+StartupNotify=true
+StartupWMClass=librewolf
+Categories=Network;WebBrowser;Security;
+MimeType=text/html;text/xml;application/xhtml+xml;application/xml;x-scheme-handler/http;x-scheme-handler/https;
+Keywords=camio;browser;librewolf;privacy;antidetect;fingerprint;

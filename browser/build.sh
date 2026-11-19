@@ -227,4 +227,57 @@ CAMIOCFG
   fi
   rm -rf camio-pkg
 fi
-echo "==> done. Look for camio-browser-*.tar.xz (and librewolf-*.tar.xz) in $PWD."
+
+# ---- Build a Debian package (needs dpkg-deb) --------------------------------
+# Installs the fork to /opt/camio-browser, a /usr/bin/camio-browser launcher,
+# the .desktop entry, and icons — so `camio-browser` lands on PATH (which the
+# Camio app's launcher now prefers) and shows up in the applications menu.
+if [ -n "${camio_tar:-}" ] && [ -f "$camio_tar" ] && command -v dpkg-deb >/dev/null 2>&1; then
+  debver="$(printf '%s' "$pkg" | sed -E 's/^librewolf-([0-9][^.]*\.[^.]*\.[^-]*-[0-9]+)\..*/\1/')"
+  [ -n "$debver" ] || debver="$(date +%Y%m%d)"
+  deb="camio-browser_${debver}_amd64"
+  echo "==> building $deb.deb"
+  rm -rf "$deb"
+  mkdir -p "$deb/DEBIAN" "$deb/opt" "$deb/usr/bin" \
+    "$deb/usr/share/applications" \
+    "$deb/usr/share/icons/hicolor/scalable/apps" \
+    "$deb/usr/share/icons/hicolor/128x128/apps"
+  tar -xf "$camio_tar" -C "$deb/opt"   # -> opt/camio-browser/
+  printf '#!/bin/sh\nexec /opt/camio-browser/librewolf "$@"\n' > "$deb/usr/bin/camio-browser"
+  chmod 0755 "$deb/usr/bin/camio-browser"
+  install -m 0644 "$ROOT/branding/camio-browser.desktop" \
+    "$deb/usr/share/applications/camio-browser.desktop"
+  install -m 0644 "$ROOT/branding/camio-browser.svg" \
+    "$deb/usr/share/icons/hicolor/scalable/apps/camio-browser.svg"
+  cp "$deb/opt/camio-browser/browser/chrome/icons/default/default128.png" \
+     "$deb/usr/share/icons/hicolor/128x128/apps/camio-browser.png" 2>/dev/null || true
+  isize="$(du -sk "$deb/opt" | cut -f1)"
+  cat > "$deb/DEBIAN/control" <<CTRL
+Package: camio-browser
+Version: ${debver}
+Architecture: amd64
+Maintainer: Camio Project <noreply@users.noreply.github.com>
+Installed-Size: ${isize}
+Depends: libgtk-3-0, libdbus-glib-1-2, libx11-6, libxcb1
+Section: web
+Priority: optional
+Description: Camio Browser - fingerprint-hardened LibreWolf fork
+ A black/blue themed, stealth-preconfigured Firefox-family browser used by the
+ Camio security workbench. Built from LibreWolf with Camio branding and extra
+ hardening baked in. Camoufox's C++ patches are not included while upstream is
+ suspended; point Camio at a prebuilt Camoufox binary for the C++ stealth layer.
+CTRL
+  cat > "$deb/DEBIAN/postinst" <<'POST'
+#!/bin/sh
+set -e
+command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database -q /usr/share/applications || true
+command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -q -f /usr/share/icons/hicolor || true
+exit 0
+POST
+  chmod 0755 "$deb/DEBIAN/postinst"
+  dpkg-deb --root-owner-group --build "$deb" "${deb}.deb" \
+    && echo "    wrote ${deb}.deb"
+  rm -rf "$deb"
+fi
+
+echo "==> done. Look in $PWD for camio-browser-*.tar.xz, camio-browser_*_amd64.deb (and librewolf-*.tar.xz)."

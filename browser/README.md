@@ -54,18 +54,29 @@ the runner's disk, adds swap, installs the toolchain, runs `build.sh --full`, an
 uploads the `camio-browser` artifact.
 
 This **builds end-to-end in ~1h35m** on a stock `ubuntu-latest` runner and
-produces **`camio-browser-<version>.en-US.linux-x86_64.tar.xz`** (~103 MB) — a
-rebranded LibreWolf with the black/blue theme and extra hardening **baked in**
-(see "What's baked in" below); the raw `librewolf-*.tar.xz` is kept too. Two
-things make it fit a 16 GB / 4-core runner: a **16 GB swapfile** and
+produces **`camio-browser-<version>.en-US.linux-x86_64.tar.xz`** (~103 MB) plus a
+**`camio-browser_<version>_amd64.deb`** — a rebranded LibreWolf with the
+black/blue theme and extra hardening **baked in** (see "What's baked in" below).
+It then **publishes a `browser-v<version>` GitHub release** with both files and
+auto-generated notes (sizes + SHA-256 + install steps). The raw
+`librewolf-*.tar.xz` is kept too. Two things make it fit a 16 GB / 4-core runner:
+a **16 GB swapfile** and
 **`--disable-debug-symbols`** — Firefox's `dom/bindings` / `dom/canvas` TUs OOM
 the runner otherwise. Download from the run's **Artifacts**, or:
 
 ```sh
-gh run download <run-id> -n camio-browser   # grabs the .tar.xz
-tar xf camio-browser-*.tar.xz               # extracts ./camio-browser/
-./camio-browser/librewolf                   # launch
+# Easiest: install the .deb from the browser-v<version> release
+sudo apt install ./camio-browser_*_amd64.deb   # adds /usr/bin/camio-browser + menu entry
+camio-browser
+
+# Or the portable tarball
+gh run download <run-id> -n camio-browser      # grabs the .tar.xz / .deb
+tar xf camio-browser-*.tar.xz && ./camio-browser/librewolf
 ```
+
+The `.deb` installs to `/opt/camio-browser`, puts a `camio-browser` launcher on
+PATH (which the Camio app's own browser launcher now prefers), and registers a
+`.desktop` entry + icon so it shows up as a real app.
 
 ### What's baked in
 
