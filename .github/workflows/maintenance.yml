@@ -45,6 +45,10 @@ jobs:
           cargo clippy --workspace --all-targets --all-features \
             --fix --allow-dirty --allow-staged || true
           cargo fmt --all
+          # Discard lockfile churn: `cargo` regenerates Cargo.lock to match the
+          # release bot's version bumps. That is not a lint/format fix and belongs
+          # to the release flow, not here — so only genuine source fixes open a PR.
+          git checkout -- Cargo.lock 2>/dev/null || true
 
       - name: Open a PR if anything changed
         env:
