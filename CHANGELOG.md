@@ -8,6 +8,10 @@ versioning once it reaches 1.0.
 
 ### Added
 
+- **SBOM** (plan §F26): `scripts/gen-sbom.sh` generates a dependency + license
+  inventory (`docs/SBOM.md`, 574 packages) from `cargo metadata`; the Security CI
+  workflow regenerates it and uploads it as an artifact each run. Licenses stay
+  audited across all shipped platforms by cargo-deny.
 - **Organizer labels** (`camio-store`, `camio label`, plan §F18): tag exchanges
   with labels (schema migration **v6→v7**, `exchange_label` table). `camio label
   --add/--remove/--show/--list`. Store API: `add_label` / `remove_label` /

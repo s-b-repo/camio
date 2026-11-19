@@ -38,3 +38,19 @@ jobs:
           command: check
           # Uses deny.toml at the repo root (advisories, licenses, bans, sources).
           arguments: --locked --all-features
+
+  sbom:
+    name: SBOM (dependency + license inventory)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+      - name: Generate SBOM
+        run: ./scripts/gen-sbom.sh
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: camio-sbom
+          path: docs/SBOM.md
