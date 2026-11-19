@@ -21,23 +21,32 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # The SemVer release bot bumps `[workspace.package].version` in
+      # Cargo.toml without touching Cargo.lock, so every post-bump
+      # commit arrives with a stale lockfile. Re-sync the lock before
+      # the audit — this is a pure version-row refresh, no dependency
+      # upgrades, so the check below is still against the committed
+      # graph.
+      - name: Sync Cargo.lock to workspace version
+        run: cargo update --workspace --offline || cargo update --workspace
+
       # cargo-deny runs `cargo metadata`, which resolves the ENTIRE dependency
       # graph in Cargo.lock — including the macOS/Windows-only crates that
       # egui/eframe pull in (accesskit/objc/windows-sys/…) and that a Linux build
       # never compiles. If those manifests are missing, metadata fails.
       #
-      # `cargo fetch --locked` downloads the whole locked graph for every target
-      # (verified: it is what makes `cargo metadata --offline` succeed), so the
-      # audit below resolves deterministically regardless of host platform.
+      # `cargo fetch` (unlocked, so the lockfile sync above can take effect)
+      # downloads the whole graph for every target so metadata resolves
+      # deterministically regardless of host platform.
       - name: Fetch full dependency graph (all targets)
-        run: cargo fetch --locked
+        run: cargo fetch
 
       - name: cargo-deny
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
           # Uses deny.toml at the repo root (advisories, licenses, bans, sources).
-          arguments: --locked --all-features
+          arguments: --all-features
 
   sbom:
     name: SBOM (dependency + license inventory)
