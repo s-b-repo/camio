@@ -97,14 +97,29 @@ const DEFAULT_TOOLS: &[ToolSpec] = &[
         aliases: &["scope", "check_scope"],
         action_class: ActionClass::Read,
         summary: "Report the scope decision for a URL",
-        keywords: &["scope", "decision", "check", "url", "authorised", "authorized"],
+        keywords: &[
+            "scope",
+            "decision",
+            "check",
+            "url",
+            "authorised",
+            "authorized",
+        ],
     },
     ToolSpec {
         name: "convert",
         aliases: &["decoder", "encode", "decode", "transform"],
         action_class: ActionClass::Read,
         summary: "Encode / decode / hash a value through a Convert pipeline",
-        keywords: &["convert", "encode", "decode", "hash", "base64", "url", "transform"],
+        keywords: &[
+            "convert",
+            "encode",
+            "decode",
+            "hash",
+            "base64",
+            "url",
+            "transform",
+        ],
     },
     ToolSpec {
         name: "findings_list",
@@ -435,7 +450,8 @@ fn score_tool(tool: &ToolSpec, normalized: &str, tokens: &[String]) -> (f32, Str
     } else {
         // A single-token phrase that exact-matches the name or an alias
         // counts as full coverage even if `keyword_hits` is 0.
-        if (reasons.contains(&"exact-name") || reasons.contains(&"alias-exact")) && tokens.len() == 1
+        if (reasons.contains(&"exact-name") || reasons.contains(&"alias-exact"))
+            && tokens.len() == 1
         {
             1.0
         } else {
@@ -472,7 +488,11 @@ fn normalize(s: &str) -> String {
 }
 
 fn tokens(normalized: &str) -> Vec<String> {
-    normalized.split(' ').filter(|t| !t.is_empty()).map(|s| s.to_string()).collect()
+    normalized
+        .split(' ')
+        .filter(|t| !t.is_empty())
+        .map(|s| s.to_string())
+        .collect()
 }
 
 fn tokens_of(normalized: &str) -> Vec<String> {
@@ -592,7 +612,10 @@ mod tests {
         // The ask the user gave as an example. Camio has no port-scanner
         // registered, so the resolver must NOT hallucinate one — it
         // refuses, with a reason.
-        let out = resolve("perform port scan", &[ActionClass::Read, ActionClass::Active]);
+        let out = resolve(
+            "perform port scan",
+            &[ActionClass::Read, ActionClass::Active],
+        );
         match out {
             ToolResolution::Refused(r) => assert!(r.to_lowercase().contains("no tool")),
             // Acceptable alt: Suggest with a very-low-score near-miss.
@@ -602,7 +625,10 @@ mod tests {
                 }
             }
             ToolResolution::AutoApply(a) => {
-                panic!("must not auto-apply for ambiguous phrase, got {:?}", a.tool.name)
+                panic!(
+                    "must not auto-apply for ambiguous phrase, got {:?}",
+                    a.tool.name
+                )
             }
         }
     }

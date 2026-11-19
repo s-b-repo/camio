@@ -230,10 +230,7 @@ impl Extractor {
     }
 }
 
-fn traverse_json_path<'a>(
-    v: &'a serde_json::Value,
-    path: &str,
-) -> Option<&'a serde_json::Value> {
+fn traverse_json_path<'a>(v: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
     let mut cur = v;
     for segment in path.split('.') {
         let seg = segment.trim();
@@ -302,7 +299,10 @@ impl fmt::Display for ChainError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ChainError::UnresolvedVariable(name) => {
-                write!(f, "unresolved chain variable `{name}` — define it before this step runs")
+                write!(
+                    f,
+                    "unresolved chain variable `{name}` — define it before this step runs"
+                )
             }
             ChainError::MissingPayloads(label) => {
                 write!(f, "step `{label}` declared payloads but the set is empty")
@@ -560,9 +560,8 @@ mod tests {
     #[test]
     fn materialize_fans_out_per_payload() {
         let set = PayloadSet::new("x", vec!["a".into(), "b".into(), "c".into()]);
-        let chain = Chain::new().push(
-            ChainStep::new("fuzz", req("https://x.test/?q=${payload}")).with_payloads(set),
-        );
+        let chain = Chain::new()
+            .push(ChainStep::new("fuzz", req("https://x.test/?q=${payload}")).with_payloads(set));
         let out = materialize(&chain, &ChainState::new()).unwrap();
         assert_eq!(out.len(), 3);
         assert_eq!(out[0].request.url, "https://x.test/?q=a");
@@ -582,7 +581,8 @@ mod tests {
     #[test]
     fn extractor_cookie_pulls_named_cookie() {
         let mut resp = resp_with_body("");
-        resp.headers.push("Set-Cookie", "sess=abc123; Path=/; HttpOnly");
+        resp.headers
+            .push("Set-Cookie", "sess=abc123; Path=/; HttpOnly");
         let ex = HttpExchange::new(req("https://x.test/"), Source::Scanner).with_response(resp);
         let got = Extractor::Cookie {
             name: "sess".into(),
@@ -632,9 +632,15 @@ mod tests {
 
     #[test]
     fn var_names_from_extractors() {
-        let x = Extractor::Cookie { name: "sess".into(), var: "session".into() };
+        let x = Extractor::Cookie {
+            name: "sess".into(),
+            var: "session".into(),
+        };
         assert_eq!(x.var_name(), "session");
-        let y = Extractor::Header { name: "X".into(), var: "h".into() };
+        let y = Extractor::Header {
+            name: "X".into(),
+            var: "h".into(),
+        };
         assert_eq!(y.var_name(), "h");
     }
 
@@ -669,28 +675,38 @@ mod tests {
         let resp = resp_with_body(r#"{"user":{"id":42,"name":"a"},"items":[{"id":1},{"id":2}]}"#);
         let ex = HttpExchange::new(req("https://x.test/"), Source::Scanner).with_response(resp);
         assert_eq!(
-            Extractor::JsonPath { path: "user.id".into(), var: "v".into() }
-                .apply(&ex)
-                .as_deref(),
+            Extractor::JsonPath {
+                path: "user.id".into(),
+                var: "v".into()
+            }
+            .apply(&ex)
+            .as_deref(),
             Some("42")
         );
         assert_eq!(
-            Extractor::JsonPath { path: "user.name".into(), var: "v".into() }
-                .apply(&ex)
-                .as_deref(),
+            Extractor::JsonPath {
+                path: "user.name".into(),
+                var: "v".into()
+            }
+            .apply(&ex)
+            .as_deref(),
             Some("a")
         );
         assert_eq!(
-            Extractor::JsonPath { path: "items.1.id".into(), var: "v".into() }
-                .apply(&ex)
-                .as_deref(),
+            Extractor::JsonPath {
+                path: "items.1.id".into(),
+                var: "v".into()
+            }
+            .apply(&ex)
+            .as_deref(),
             Some("2")
         );
-        assert!(
-            Extractor::JsonPath { path: "nope.nothing".into(), var: "v".into() }
-                .apply(&ex)
-                .is_none()
-        );
+        assert!(Extractor::JsonPath {
+            path: "nope.nothing".into(),
+            var: "v".into()
+        }
+        .apply(&ex)
+        .is_none());
     }
 
     #[test]
@@ -754,16 +770,21 @@ mod tests {
 
     #[test]
     fn validate_catches_unknown_reference() {
-        let chain = Chain::new()
-            .push(ChainStep::new("one", req("https://x.test/?t=${missing}")));
+        let chain = Chain::new().push(ChainStep::new("one", req("https://x.test/?t=${missing}")));
         let errs = validate(&chain).unwrap_err();
-        assert!(errs.iter().any(|e| matches!(e, ChainError::UnresolvedVariable(s) if s.contains("missing"))));
+        assert!(errs
+            .iter()
+            .any(|e| matches!(e, ChainError::UnresolvedVariable(s) if s.contains("missing"))));
     }
 
     #[test]
     fn validate_accepts_extracted_variable() {
-        let step1 = ChainStep::new("login", req("https://x.test/login"))
-            .with_extractor(Extractor::Cookie { name: "sess".into(), var: "session".into() });
+        let step1 = ChainStep::new("login", req("https://x.test/login")).with_extractor(
+            Extractor::Cookie {
+                name: "sess".into(),
+                var: "session".into(),
+            },
+        );
         let step2 = ChainStep::new("hit", req("https://x.test/?s=${session}"));
         let chain = Chain::new().push(step1).push(step2);
         validate(&chain).unwrap();
@@ -771,10 +792,11 @@ mod tests {
 
     #[test]
     fn validate_flags_payload_ref_without_set() {
-        let chain = Chain::new()
-            .push(ChainStep::new("fuzz", req("https://x.test/?q=${payload}")));
+        let chain = Chain::new().push(ChainStep::new("fuzz", req("https://x.test/?q=${payload}")));
         let errs = validate(&chain).unwrap_err();
-        assert!(errs.iter().any(|e| matches!(e, ChainError::MissingPayloads(_))));
+        assert!(errs
+            .iter()
+            .any(|e| matches!(e, ChainError::MissingPayloads(_))));
     }
 
     #[test]
@@ -783,6 +805,8 @@ mod tests {
             .push(ChainStep::new("x", req("https://x.test/a")))
             .push(ChainStep::new("x", req("https://x.test/b")));
         let errs = validate(&chain).unwrap_err();
-        assert!(errs.iter().any(|e| matches!(e, ChainError::UnresolvedVariable(s) if s.contains("duplicate"))));
+        assert!(errs
+            .iter()
+            .any(|e| matches!(e, ChainError::UnresolvedVariable(s) if s.contains("duplicate"))));
     }
 }

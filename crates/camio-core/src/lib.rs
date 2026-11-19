@@ -16,6 +16,7 @@
 pub mod ai_guard;
 pub mod ai_tools;
 pub mod camioql;
+pub mod cvss;
 pub mod fingerprint;
 pub mod matchreplace;
 pub mod model;
@@ -29,13 +30,6 @@ pub use fingerprint::{
     RefererPolicy, ScreenSize, WebRtcMode, WebglMode, ALIGNED_FIREFOX_MAJOR,
 };
 
-pub use camioql::{Query, QueryTarget};
-pub use matchreplace::{Find, MatchReplaceRule, RuleSet, Target as MatchTarget};
-pub use model::{
-    Body, Confidence, ExchangeId, Finding, FindingId, Header, HeaderList, HttpExchange,
-    HttpRequest, HttpResponse, HttpVersion, Project, ProjectId, ScopeDecision, Severity, Source,
-    Target, Task, TaskId, TaskState, Timings,
-};
 pub use ai_guard::{
     action_allowed, authorize_findings, bind_session, bind_session_with_integrity,
     default_integrity_paths, integrity_manifest_hash, target_authorized,
@@ -45,6 +39,14 @@ pub use ai_guard::{
 pub use ai_tools::{
     default_catalog, resolve_tool_call, ResolveRequest, ToolCatalog, ToolResolution, ToolSpec,
     ToolSuggestion,
+};
+pub use camioql::{Query, QueryTarget};
+pub use cvss::{Cvss, CvssError};
+pub use matchreplace::{Find, MatchReplaceRule, RuleSet, Target as MatchTarget};
+pub use model::{
+    Body, Confidence, ExchangeId, Finding, FindingId, Header, HeaderList, HttpExchange,
+    HttpRequest, HttpResponse, HttpVersion, Project, ProjectId, ScopeDecision, Severity, Source,
+    Target, Task, TaskId, TaskState, Timings,
 };
 pub use policy::{ActionClass, Policy, PolicyOutcome};
 pub use rate::RateLimiter;

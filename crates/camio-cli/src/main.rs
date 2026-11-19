@@ -1672,9 +1672,7 @@ fn payloads_cmd(args: PayloadsArgs) -> Result<()> {
                 println!(
                     "note: payloads/DB/base/ not found — the database isn't shipped with this build."
                 );
-                println!(
-                    "      set CAMIO_PAYLOADS_DIR or run from the workspace root to use it."
-                );
+                println!("      set CAMIO_PAYLOADS_DIR or run from the workspace root to use it.");
             }
         }
         Some(name) => {
@@ -1837,9 +1835,22 @@ fn encode_cmd(args: EncodeArgs) -> Result<()> {
     if args.list_contexts {
         println!("Known input contexts and their compatible encodings:");
         let contexts = [
-            "url-path", "url-query", "form", "json", "json-number", "xml", "xml-attr",
-            "header", "cookie", "html", "html-attr", "html-script", "html-style", "graphql",
-            "multipart", "raw",
+            "url-path",
+            "url-query",
+            "form",
+            "json",
+            "json-number",
+            "xml",
+            "xml-attr",
+            "header",
+            "cookie",
+            "html",
+            "html-attr",
+            "html-script",
+            "html-style",
+            "graphql",
+            "multipart",
+            "raw",
         ];
         for name in contexts {
             if let Some(ctx) = camio_automate::InputContext::from_name(name) {
@@ -1868,8 +1879,8 @@ fn encode_cmd(args: EncodeArgs) -> Result<()> {
     } else {
         let p = PathBuf::from(payloads_spec);
         if p.exists() {
-            let text = std::fs::read_to_string(&p)
-                .with_context(|| format!("reading {}", p.display()))?;
+            let text =
+                std::fs::read_to_string(&p).with_context(|| format!("reading {}", p.display()))?;
             camio_automate::PayloadSet::from_lines(payloads_spec, &text)
         } else {
             bail!(
@@ -1927,8 +1938,7 @@ fn encode_cmd(args: EncodeArgs) -> Result<()> {
                 body.push_str(&format_line(e));
                 body.push('\n');
             }
-            std::fs::write(path, body)
-                .with_context(|| format!("writing {}", path.display()))?;
+            std::fs::write(path, body).with_context(|| format!("writing {}", path.display()))?;
             eprintln!(
                 "wrote {} encoded payload(s) from `{}` to {}",
                 expanded.len(),
@@ -1941,10 +1951,7 @@ fn encode_cmd(args: EncodeArgs) -> Result<()> {
                 "encode `{}`: {} payload(s), encodings=[{}]",
                 set.name,
                 expanded.len(),
-                encs.iter()
-                    .map(|e| e.name())
-                    .collect::<Vec<_>>()
-                    .join(",")
+                encs.iter().map(|e| e.name()).collect::<Vec<_>>().join(",")
             );
             for e in &expanded {
                 println!("{}", format_line(e));
@@ -1956,10 +1963,7 @@ fn encode_cmd(args: EncodeArgs) -> Result<()> {
 
 /// Resolve `spec` to a `PayloadSet`, trying (in order): a `db:<cat>` reference,
 /// a plain category name in the DB, and the small built-in packs.
-fn resolve_pack(
-    spec: &str,
-    db: &camio_automate::PayloadDb,
-) -> Option<camio_automate::PayloadSet> {
+fn resolve_pack(spec: &str, db: &camio_automate::PayloadDb) -> Option<camio_automate::PayloadSet> {
     if let Some(rest) = spec.strip_prefix("db:") {
         return db.categories.get(rest).cloned();
     }
@@ -2840,8 +2844,12 @@ fn save_key(dir: &std::path::Path, session_id: &str, key_bytes: &[u8; 32]) -> Re
 
 fn load_key(dir: &std::path::Path, session_id: &str) -> Result<camio_core::SessionKey> {
     let path = dir.join(format!("{session_id}.key"));
-    let text = std::fs::read_to_string(&path)
-        .with_context(|| format!("reading {} (did you `camio ai bind` first?)", path.display()))?;
+    let text = std::fs::read_to_string(&path).with_context(|| {
+        format!(
+            "reading {} (did you `camio ai bind` first?)",
+            path.display()
+        )
+    })?;
     let bytes = hex_decode(text.trim())
         .map_err(|_| anyhow::anyhow!("invalid hex in {}", path.display()))?;
     if bytes.len() != 32 {
@@ -2946,7 +2954,9 @@ fn ai_bind(args: AiBindArgs) -> Result<()> {
             expires,
             &key,
         )
-        .with_context(|| "bind_session_with_integrity failed (malformed target or unreadable lock path?)")?
+        .with_context(|| {
+            "bind_session_with_integrity failed (malformed target or unreadable lock path?)"
+        })?
     } else {
         camio_core::bind_session(&session_id, &rules, &args.targets, &allowed, expires, &key)
             .with_context(|| "bind_session failed (malformed target?)")?
@@ -3088,7 +3098,10 @@ fn ai_authorize_chain(args: AiAuthorizeChainArgs) -> Result<()> {
                 steps.len()
             );
             for s in &steps {
-                println!("  [{}] {} {}", s.step_label, s.request.method, s.request.url);
+                println!(
+                    "  [{}] {} {}",
+                    s.step_label, s.request.method, s.request.url
+                );
             }
             Ok(())
         }

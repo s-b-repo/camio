@@ -233,7 +233,11 @@ mod tests {
     fn load_from_dir_reads_each_txt_file() {
         let dir = tmpdir();
         let mut f = std::fs::File::create(dir.path().join("xss.txt")).unwrap();
-        writeln!(f, "# category: xss\n<script>alert(1)</script>\n<img src=x onerror=alert(1)>").unwrap();
+        writeln!(
+            f,
+            "# category: xss\n<script>alert(1)</script>\n<img src=x onerror=alert(1)>"
+        )
+        .unwrap();
         let mut g = std::fs::File::create(dir.path().join("sqli.txt")).unwrap();
         writeln!(g, "# category: sqli\n' OR '1'='1\n'; DROP TABLE users--").unwrap();
 
@@ -279,7 +283,10 @@ mod tests {
         )
         .unwrap();
         let db = load_from_dir(dir.path()).unwrap();
-        let hits = scan_for_signatures(&db, "<script>alert(1)</script> and <img src=x onerror=alert(1)>");
+        let hits = scan_for_signatures(
+            &db,
+            "<script>alert(1)</script> and <img src=x onerror=alert(1)>",
+        );
         assert_eq!(hits.len(), 1, "same category deduplicated");
         assert_eq!(hits[0].category, "xss");
     }

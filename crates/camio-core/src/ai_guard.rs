@@ -216,10 +216,16 @@ impl fmt::Display for AiGuardError {
                 "AI-guard: binding expired at {expires_at_ms} ms (now {now_ms} ms)"
             ),
             AiGuardError::TargetNotAuthorized(url) => {
-                write!(f, "AI-guard: target `{url}` is not in this session's authorized set")
+                write!(
+                    f,
+                    "AI-guard: target `{url}` is not in this session's authorized set"
+                )
             }
             AiGuardError::ActionNotAllowed(a) => {
-                write!(f, "AI-guard: action class `{a}` was not granted to this session")
+                write!(
+                    f,
+                    "AI-guard: action class `{a}` was not granted to this session"
+                )
             }
             AiGuardError::MalformedUrl(u) => write!(f, "AI-guard: malformed URL `{u}`"),
             AiGuardError::BadHex(s) => write!(f, "AI-guard: invalid hex `{s}`"),
@@ -364,7 +370,8 @@ pub fn verify_binding(binding: &SessionBinding, key: &SessionKey) -> Result<(), 
         integrity_hash: binding.integrity_hash.clone(),
     };
     let fresh = sign_unsigned(&unsigned, key);
-    let claimed = hex_decode(&binding.tag).map_err(|_| AiGuardError::BadHex(binding.tag.clone()))?;
+    let claimed =
+        hex_decode(&binding.tag).map_err(|_| AiGuardError::BadHex(binding.tag.clone()))?;
     if ct_eq(&fresh, &claimed) {
         Ok(())
     } else {
@@ -731,8 +738,8 @@ fn collect_dir(
     dir: &std::path::Path,
     out: &mut Vec<(String, String)>,
 ) -> Result<(), AiGuardError> {
-    let rd = std::fs::read_dir(dir)
-        .map_err(|e| AiGuardError::Io(format!("{}: {e}", dir.display())))?;
+    let rd =
+        std::fs::read_dir(dir).map_err(|e| AiGuardError::Io(format!("{}: {e}", dir.display())))?;
     for entry in rd {
         let entry = entry.map_err(|e| AiGuardError::Io(format!("{}: {e}", dir.display())))?;
         let p = entry.path();
@@ -811,7 +818,7 @@ pub fn default_integrity_paths() -> Vec<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{ExchangeId, Finding, FindingId, Severity, Confidence};
+    use crate::model::{Confidence, ExchangeId, Finding, FindingId, Severity};
 
     fn key() -> SessionKey {
         SessionKey::from_bytes([1u8; 32])

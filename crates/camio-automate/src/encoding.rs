@@ -190,8 +190,13 @@ impl Encoding {
                 url_encode(&url_encode(&url_encode(value, false), false), false)
             }
             Encoding::HtmlEntity => html_entity_escape(value),
-            Encoding::HtmlEntityNumeric => value.chars().map(|c| format!("&#{};", c as u32)).collect(),
-            Encoding::HtmlEntityHex => value.chars().map(|c| format!("&#x{:x};", c as u32)).collect(),
+            Encoding::HtmlEntityNumeric => {
+                value.chars().map(|c| format!("&#{};", c as u32)).collect()
+            }
+            Encoding::HtmlEntityHex => value
+                .chars()
+                .map(|c| format!("&#x{:x};", c as u32))
+                .collect(),
             Encoding::Base64 => base64_encode(value.as_bytes(), false),
             Encoding::Base64Url => base64_encode(value.as_bytes(), true),
             Encoding::Hex => value.bytes().map(|b| format!("{b:02x}")).collect(),
@@ -206,9 +211,7 @@ impl Encoding {
             Encoding::LowerCase => value.to_lowercase(),
             Encoding::NullPrefix => format!("\\0{value}"),
             Encoding::NullSuffix => format!("{value}%00"),
-            Encoding::OverlongSlash => value
-                .replace('/', "%c0%af")
-                .replace('.', "%c0%ae"),
+            Encoding::OverlongSlash => value.replace('/', "%c0%af").replace('.', "%c0%ae"),
             Encoding::Base32 => base32_encode(value.as_bytes()),
             Encoding::Rot13 => rot13(value),
             Encoding::OctalEscape => octal_escape(value),
@@ -323,32 +326,86 @@ pub fn compatible_encodings(ctx: InputContext) -> Vec<Encoding> {
     use Encoding::*;
     match ctx {
         InputContext::UrlPath | InputContext::UrlQuery | InputContext::FormUrlencoded => vec![
-            Raw, UrlEncoded, UrlEncodedDouble, UrlEncodedTriple, MixedCase, OverlongSlash,
-            NullSuffix, NullPrefix, Hex, Base32,
+            Raw,
+            UrlEncoded,
+            UrlEncodedDouble,
+            UrlEncodedTriple,
+            MixedCase,
+            OverlongSlash,
+            NullSuffix,
+            NullPrefix,
+            Hex,
+            Base32,
         ],
         InputContext::JsonString | InputContext::GraphqlString => vec![
-            Raw, JsonStringEscape, UnicodeEscape, BackslashX, Base64, Base64Url, Base32, Hex,
+            Raw,
+            JsonStringEscape,
+            UnicodeEscape,
+            BackslashX,
+            Base64,
+            Base64Url,
+            Base32,
+            Hex,
         ],
         InputContext::JsonNumber => vec![Raw, Hex],
         InputContext::XmlText => vec![
-            Raw, XmlEntity, HtmlEntityNumeric, HtmlEntityHex, Base64, Base32, Hex, Utf16BeHex,
+            Raw,
+            XmlEntity,
+            HtmlEntityNumeric,
+            HtmlEntityHex,
+            Base64,
+            Base32,
+            Hex,
+            Utf16BeHex,
         ],
         InputContext::XmlAttribute => vec![
-            Raw, XmlEntity, HtmlEntityNumeric, HtmlEntityHex, UrlEncoded, Base64,
+            Raw,
+            XmlEntity,
+            HtmlEntityNumeric,
+            HtmlEntityHex,
+            UrlEncoded,
+            Base64,
         ],
         InputContext::HttpHeaderValue | InputContext::HttpCookie => vec![
-            Raw, UrlEncoded, UrlEncodedDouble, Hex, Base64, Base64Url, Base32, Rot13, MixedCase,
+            Raw,
+            UrlEncoded,
+            UrlEncodedDouble,
+            Hex,
+            Base64,
+            Base64Url,
+            Base32,
+            Rot13,
+            MixedCase,
         ],
         InputContext::HtmlBody => vec![
-            Raw, HtmlEntity, HtmlEntityNumeric, HtmlEntityHex, MixedCase, UnicodeEscape, UrlEncoded,
+            Raw,
+            HtmlEntity,
+            HtmlEntityNumeric,
+            HtmlEntityHex,
+            MixedCase,
+            UnicodeEscape,
+            UrlEncoded,
             Utf7,
         ],
         InputContext::HtmlAttribute => vec![
-            Raw, HtmlEntity, HtmlEntityNumeric, HtmlEntityHex, UrlEncoded, UnicodeEscape, MixedCase,
+            Raw,
+            HtmlEntity,
+            HtmlEntityNumeric,
+            HtmlEntityHex,
+            UrlEncoded,
+            UnicodeEscape,
+            MixedCase,
         ],
         InputContext::HtmlScript => vec![
-            Raw, JsStringEscape, UnicodeEscape, HtmlEntity, HtmlEntityNumeric, CharCodeAt,
-            BackslashX, OctalEscape, Base64,
+            Raw,
+            JsStringEscape,
+            UnicodeEscape,
+            HtmlEntity,
+            HtmlEntityNumeric,
+            CharCodeAt,
+            BackslashX,
+            OctalEscape,
+            Base64,
         ],
         InputContext::HtmlStyle => vec![Raw, HtmlEntity, UrlEncoded, UnicodeEscape],
         InputContext::Multipart => vec![Raw, UrlEncoded, Base64, Base32, Hex],
@@ -403,7 +460,10 @@ pub fn expand_with_encodings(set: &PayloadSet, encodings: &[Encoding]) -> Vec<En
             }
             let key = (body.clone(), enc);
             if seen.insert(key) {
-                out.push(EncodedPayload { body, encoding: enc });
+                out.push(EncodedPayload {
+                    body,
+                    encoding: enc,
+                });
             }
         }
     }
@@ -467,10 +527,8 @@ fn xml_entity_escape(value: &str) -> String {
 }
 
 fn base64_encode(bytes: &[u8], url_safe: bool) -> String {
-    const STD: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    const URL: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const STD: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const URL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let table = if url_safe { URL } else { STD };
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     let mut i = 0;
@@ -740,10 +798,7 @@ mod tests {
     fn url_encode_escapes_specials() {
         assert_eq!(Encoding::UrlEncoded.apply("a b"), "a%20b");
         assert_eq!(Encoding::UrlEncoded.apply("a&b=c"), "a%26b%3Dc");
-        assert_eq!(
-            Encoding::UrlEncoded.apply("<script>"),
-            "%3Cscript%3E"
-        );
+        assert_eq!(Encoding::UrlEncoded.apply("<script>"), "%3Cscript%3E");
     }
 
     #[test]
@@ -853,7 +908,9 @@ mod tests {
     fn expand_for_context_produces_raw_plus_variants() {
         let s = set("xss", &["<x>"]);
         let out = expand_for_context(&s, InputContext::HtmlBody);
-        assert!(out.iter().any(|p| p.encoding == Encoding::Raw && p.body == "<x>"));
+        assert!(out
+            .iter()
+            .any(|p| p.encoding == Encoding::Raw && p.body == "<x>"));
         assert!(out.iter().any(|p| p.encoding == Encoding::HtmlEntity));
         // Raw always first for each payload.
         assert_eq!(out[0].encoding, Encoding::Raw);
@@ -954,7 +1011,10 @@ mod tests {
 
     #[test]
     fn char_code_at_emits_js_call() {
-        assert_eq!(Encoding::CharCodeAt.apply("AB"), "String.fromCharCode(65,66)");
+        assert_eq!(
+            Encoding::CharCodeAt.apply("AB"),
+            "String.fromCharCode(65,66)"
+        );
     }
 
     #[test]

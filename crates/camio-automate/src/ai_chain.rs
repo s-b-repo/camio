@@ -129,8 +129,14 @@ mod tests {
     fn authorized_chain_is_returned_in_full() {
         let b = binding_for(&["https://example.com"]);
         let chain = Chain::new()
-            .push(ChainStep::new("one", HttpRequest::get("https://example.com/a")))
-            .push(ChainStep::new("two", HttpRequest::get("https://example.com/b")));
+            .push(ChainStep::new(
+                "one",
+                HttpRequest::get("https://example.com/a"),
+            ))
+            .push(ChainStep::new(
+                "two",
+                HttpRequest::get("https://example.com/b"),
+            ));
         let steps = authorize_chain_steps(&chain, &ChainState::new(), &b, &key()).unwrap();
         assert_eq!(steps.len(), 2);
     }
@@ -139,8 +145,14 @@ mod tests {
     fn unauthorized_host_refuses_the_whole_chain() {
         let b = binding_for(&["https://example.com"]);
         let chain = Chain::new()
-            .push(ChainStep::new("one", HttpRequest::get("https://example.com/a")))
-            .push(ChainStep::new("two", HttpRequest::get("https://evil.test/b")));
+            .push(ChainStep::new(
+                "one",
+                HttpRequest::get("https://example.com/a"),
+            ))
+            .push(ChainStep::new(
+                "two",
+                HttpRequest::get("https://evil.test/b"),
+            ));
         let err = authorize_chain_steps(&chain, &ChainState::new(), &b, &key()).unwrap_err();
         assert!(matches!(
             err,
@@ -178,10 +190,7 @@ mod tests {
         // The AI might try to feed a rogue value into the state and hope
         // the substitution is unchecked. The authorize call must catch it.
         state.insert("next".into(), "https://evil.test/".into());
-        let chain = Chain::new().push(ChainStep::new(
-            "two",
-            HttpRequest::get("${next}"),
-        ));
+        let chain = Chain::new().push(ChainStep::new("two", HttpRequest::get("${next}")));
         let err = authorize_chain_steps(&chain, &state, &b, &key()).unwrap_err();
         assert!(matches!(
             err,
@@ -197,7 +206,10 @@ mod tests {
                 .with_payloads(PayloadSet::new("empty", vec![])),
         );
         let err = authorize_chain_steps(&chain, &ChainState::new(), &b, &key()).unwrap_err();
-        assert!(matches!(err, AiChainError::Chain(ChainError::MissingPayloads(_))));
+        assert!(matches!(
+            err,
+            AiChainError::Chain(ChainError::MissingPayloads(_))
+        ));
     }
 
     #[test]
@@ -206,11 +218,12 @@ mod tests {
         // relies on them to populate ChainState for later steps.
         let b = binding_for(&["https://example.com"]);
         let chain = Chain::new().push(
-            ChainStep::new("one", HttpRequest::get("https://example.com/login"))
-                .with_extractor(Extractor::Cookie {
+            ChainStep::new("one", HttpRequest::get("https://example.com/login")).with_extractor(
+                Extractor::Cookie {
                     name: "sess".into(),
                     var: "session".into(),
-                }),
+                },
+            ),
         );
         let steps = authorize_chain_steps(&chain, &ChainState::new(), &b, &key()).unwrap();
         assert_eq!(steps.len(), 1);

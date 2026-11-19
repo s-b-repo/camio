@@ -32,7 +32,12 @@ pub enum ComboMode {
 /// `separator`, capped to `limit` entries.
 ///
 /// Returns `None` if `sets` is empty or `limit == 0`.
-pub fn combo(sets: &[PayloadSet], mode: ComboMode, separator: &str, limit: usize) -> Option<PayloadSet> {
+pub fn combo(
+    sets: &[PayloadSet],
+    mode: ComboMode,
+    separator: &str,
+    limit: usize,
+) -> Option<PayloadSet> {
     if sets.is_empty() || limit == 0 {
         return None;
     }
