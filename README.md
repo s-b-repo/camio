@@ -9,6 +9,10 @@ and UX of Caido, the depth of Burp, and testing traffic that doesn't stand out
 *because of the tool*. Built in Rust around the [Camoufox](https://github.com/daijro/camoufox)
 anti-detect Firefox engine. See [`plan.md`](./plan.md) for the full product plan.
 
+**📚 Documentation hub → [`docs/INDEX.md`](./docs/INDEX.md)** — install, the full
+[feature reference](./docs/FEATURES.md), [architecture](./docs/ARCHITECTURE.md),
+[configuration](./docs/CONFIGURATION.md), and security.
+
 > Status: **workbench core + manual/automated testing toolchain**. The engine
 > supervisor, fingerprint policy, matched request engine, query language, storage,
 > scope/policy engine and MCP server are now joined by a passive **scanner**,
@@ -209,8 +213,27 @@ plan.md            Full product plan
 
 ## Install
 
-Build from source (recent stable Rust; the first build compiles BoringSSL and
-bundled SQLite, a few minutes):
+### Quick install — prebuilt binaries
+
+Linux/macOS (x86_64 or aarch64); installs the `camio` CLI and `camio-app` GUI to
+`~/.local/bin` (or `/usr/local/bin` when writable):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/s-b-repo/camio/main/scripts/install.sh | sh
+```
+
+Pin a release with `CAMIO_VERSION=vX.Y.Z` or a location with `CAMIO_BIN_DIR=…`;
+the script verifies the published SHA-256. For the **themed browser fork**,
+install the `.deb` from the matching `browser-v*` release:
+
+```sh
+sudo apt install ./camio-browser_*_amd64.deb && camio-browser
+```
+
+### Build from source
+
+Recent stable Rust; the first build compiles BoringSSL and bundled SQLite (a few
+minutes):
 
 ```bash
 # Debian / Kali / Ubuntu build deps for the native app + matched engine:
