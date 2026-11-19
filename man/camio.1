@@ -87,6 +87,12 @@ in-scope exchange and stores findings; out-of-scope traffic is recorded but neve
 tested. When intercepting, the upstream request is re-sent through the
 fingerprint-matched engine, so the target sees the matched fingerprint.
 .TP
+.B oast
+Run the self-hosted OAST collector (a local Burp-Collaborator analog). Mints
+correlation tokens and records out-of-band callbacks (SSRF, blind XXE, webhooks,
+DNS-style host exfil), correlating each hit to its token. \fB\-\-tokens N\fR
+prints sample callback URLs instead of serving.
+.TP
 .B app
 Launch the native desktop workbench (egui). Every capability in one window, with
 customizable themes, a plugin system, and an "Open in browser" launcher.

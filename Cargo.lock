@@ -944,6 +944,7 @@ dependencies = [
  "camio-engine",
  "camio-import",
  "camio-mcp",
+ "camio-oast",
  "camio-proxy",
  "camio-request",
  "camio-scan",
@@ -1015,6 +1016,15 @@ dependencies = [
  "camio-store",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "camio-oast"
+version = "0.0.1"
+dependencies = [
+ "camio-core",
+ "httparse",
+ "sha2 0.10.9",
 ]
 
 [[package]]

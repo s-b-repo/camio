@@ -23,6 +23,7 @@ camio-sequencer.workspace = true
 camio-active.workspace = true
 camio-ai.workspace = true
 camio-proxy = { workspace = true, features = ["engine"] }
+camio-oast.workspace = true
 camio-web.workspace = true
 camio-app.workspace = true
 camio-mcp.workspace = true

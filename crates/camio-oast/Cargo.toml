@@ -1,0 +1,15 @@
+[package]
+name = "camio-oast"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Camio's self-hosted OAST collector: a local-first analog of Burp Collaborator that records out-of-band interactions and correlates them to injection tokens (plan §F15)."
+
+[dependencies]
+camio-core.workspace = true
+httparse.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+camio-core.workspace = true

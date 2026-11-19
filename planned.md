@@ -63,7 +63,7 @@ Track each capability as `planned`, `in progress`, `partial`, `verified`, or `bl
 | F12 | Visual workflows plus versioned text representation, validation and execution | Planned | P1 | M5 |
 | F13 | Passive/active scanner profiles, sessions, exclusions, reproducible evidence | Partial | P1 | M4–M6 |
 | F14 | Findings triage, cross-run/tool correlation, notes, retest, reports | Partial | P1 | M3–M5 |
-| F15 | Self-hosted OAST collection, interaction correlation and retention | Planned | P2 | M6–M7 |
+| F15 | Self-hosted OAST collection, interaction correlation and retention | Partial | P2 | M6–M7 |
 | F16 | Integration registry, httpx, Nuclei, Rustploit, compatibility fixtures | Planned | P1 | M3–M5 |
 | F17 | Convert, Comparer, JWT, Sequencer sampling/reporting, reusable transforms | Partial | P2 | M2, M6 |
 | F18 | Organizer/Library: saved exchanges, labels, notes, packs, profiles, extensions | Partial | P2 | M2, M6 |
@@ -340,7 +340,7 @@ Keep settings/help in secondary navigation and a persistent task/status area. Su
 
 ### OAST, extensions, and specialist tools — F15, F20, F22–F23
 
-- [ ] Implement self-hosted OAST configuration, correlation IDs, DNS/HTTP interaction records, polling tasks, retention, and evidence linking. External providers are explicit optional connectors.
+- [~] Self-hosted OAST. **Delivered (`camio-oast`, `camio oast`):** an HTTP collector that mints opaque correlation tokens, records inbound interactions (method/target/host/source/headers/body), and correlates each to its token via path (`/<token>`) or leftmost host label (`<token>.<base>`); verified end-to-end. **Still to do:** a DNS responder for pure-DNS exfil, durable storage + retention, polling/evidence-linking into findings, and wiring tokens into the active scanner so blind-injection probes auto-correlate.
 - [ ] Version the extension SDK and manifest permissions for transforms, checks, actions, and panels. Enforce filesystem/network/task limits rather than relying on process separation.
 - [ ] Make plugin discovery errors visible and add timeouts, cancellation, output limits, integrity checks, explicit update handling, and examples.
 - [~] External-client MITM proxy as a separate opt-in transport. **Delivered (`camio-proxy`, `camio proxy`):** scope/policy-gated HTTP/HTTPS proxy; a persisted operator-trusted CA (`--export-ca`, key `0600`) that mints per-host leaves on demand; in-flight Match & Replace (request + response) and capture to the store as `source=proxy`; a blind-relay path that keeps the browser's own TLS fingerprint-true for non-intercepted HTTPS and a `--tls-intercept` path that re-sends the decrypted request through the fingerprint-matched engine (honestly tagged fingerprint-changing); and a UI-agnostic intercept queue (`QueueInterceptor`) for pause/edit/drop. **WebSocket (delivered):** a plain `ws://` upgrade is scope-gated, recorded as metadata, and raw-relayed to the origin (verified end-to-end); `wss://` is preserved by blind-relay, and under `--tls-intercept` a WebSocket is refused with a clear 501 rather than broken. **Still to do:** CA removal/rotation UX, upstream (chained) proxy support, HTTP/2 interception and WebSocket *frame* decoding/editing, the background-task controls from §4.2 (the proxy currently serves thread-per-connection and blocks the CLI foreground), and a native-app/web transport-change status surface.

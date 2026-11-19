@@ -92,6 +92,12 @@ problem, and measures fingerprint parity rather than claiming undetectability.
   tested). Available from the CLI (`camio proxy`) and a **Proxy** surface in the
   native app (Start/Stop, TLS toggle, auto-scan, CA export, live capture table,
   and **interactive intercept** — hold a request, edit it, Forward or Drop).
+- **Self-hosted OAST collector** (`camio-oast`, `camio oast`): a local-first,
+  free analog of Burp's paid cloud Collaborator. It mints correlation tokens,
+  records out-of-band callbacks (SSRF, blind XXE, webhooks, DNS-style host
+  exfil), and ties each hit back to the token you planted — path-style
+  (`/<token>`) or DNS-style (`<token>.<base>`). Runs on infrastructure you
+  control; it sees callbacks that can reach the address you bind.
 - **Passive scanner** (`camio-scan`): seventeen passive checks over captured
   history — security headers, insecure cookies, banner/version disclosure,
   directory listing, verbose errors, reflected input, CORS misconfig, secrets in
@@ -184,6 +190,7 @@ crates/
   camio-active/    Opt-in active scanner (reflected XSS, error SQLi, open redirect)
   camio-ai/        Optional OpenAI-compatible assistant (BYO key)
   camio-proxy/     Intercepting HTTP/HTTPS proxy (scope-gated, TLS MITM, intercept queue)
+  camio-oast/      Self-hosted OAST collector (out-of-band callback correlation)
   camio-app/       Native desktop workbench (egui/eframe)
   camio-web/       Local loopback web UI (serves every capability)
   camio-mcp/       Local MCP server (stdio JSON-RPC)
@@ -286,6 +293,10 @@ cargo run -p camio-cli -- proxy --export-ca camio-ca.pem
 cargo run -p camio-cli -- proxy --tls-intercept --db camio.db \
   --scope-include 'host.eq:"target.example.com"' \
   --rewrite 'resp-header=Content-Security-Policy|*|'   # strip a response header in-flight
+
+# Self-hosted OAST: run a collector for blind callbacks, or print sample URLs.
+cargo run -p camio-cli -- oast --listen 0.0.0.0:8888 --base oast.your-host.tld:8888
+cargo run -p camio-cli -- oast --tokens 3     # print correlation tokens + callback URLs
 
 # Launch the native desktop app — every capability in one window
 cargo run -p camio-cli -- app

@@ -8,6 +8,14 @@ versioning once it reaches 1.0.
 
 ### Added
 
+- **Self-hosted OAST collector** (`camio-oast`, `camio oast`): a local-first
+  analog of Burp's (paid, cloud) Collaborator. A small HTTP listener mints
+  hard-to-guess correlation tokens, records every out-of-band callback (SSRF,
+  blind XXE, webhook, DNS-style host exfil), and correlates each hit back to the
+  token you planted — path-style (`/<token>`) or DNS-style (`<token>.<base>`).
+  Interactions are kept in memory and exposed for live logging / polling;
+  `camio oast` logs them, `camio oast --tokens N` prints sample callback URLs.
+  Honest scope: it only sees callbacks that can reach the address you bind.
 - **Intercepting HTTP/HTTPS proxy** (`camio-proxy`, `camio proxy`): a Burp-style
   proxy a browser points at. Each request is scope-decided and policy-gated
   through the shared `Scope`/`Policy` path (out-of-scope and SSRF-guarded targets

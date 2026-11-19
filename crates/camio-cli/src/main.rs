@@ -93,6 +93,8 @@ enum Command {
     Ui(UiArgs),
     /// Run the intercepting HTTP/HTTPS proxy (scope-gated capture + Match & Replace).
     Proxy(proxy::ProxyArgs),
+    /// Self-hosted OAST collector (a local Burp-Collaborator analog for blind callbacks).
+    Oast(OastArgs),
     /// Review stored traffic, import evidence, and manage the workspace.
     Workbench(workbench::Args),
     /// Verify checksums and evidence references in an exported review bundle.
@@ -356,6 +358,7 @@ fn main() -> Result<()> {
         Command::App(args) => app_cmd(args),
         Command::Ui(args) => ui_cmd(args),
         Command::Proxy(args) => proxy::run(args),
+        Command::Oast(args) => oast_cmd(args),
         Command::Workbench(args) => workbench::run(args),
         Command::VerifyBundle { file } => workbench::verify_bundle(&file),
         Command::Mcp { action } => match action {
@@ -1393,6 +1396,71 @@ fn truncate(s: &str, max: usize) -> String {
         let t: String = s.chars().take(max.saturating_sub(1)).collect();
         format!("{t}…")
     }
+}
+
+// ===========================================================================
+// OAST collector (self-hosted out-of-band interaction server)
+// ===========================================================================
+
+#[derive(Parser)]
+struct OastArgs {
+    /// Address to listen on for out-of-band callbacks.
+    #[arg(long, default_value = "127.0.0.1:8888")]
+    listen: String,
+    /// Authority (host:port) embedded in callback URLs. Defaults to the listen
+    /// address; set this to an address the target can actually reach.
+    #[arg(long)]
+    base: Option<String>,
+    /// Print N sample correlation tokens + callback URLs and exit (no server).
+    #[arg(long)]
+    tokens: Option<usize>,
+}
+
+fn oast_cmd(args: OastArgs) -> Result<()> {
+    let base = args.base.clone().unwrap_or_else(|| args.listen.clone());
+    let collector = camio_oast::Collector::new(base.clone());
+
+    if let Some(n) = args.tokens {
+        for _ in 0..n.max(1) {
+            let t = collector.new_token();
+            println!(
+                "{}    (dns: {})",
+                collector.callback_url(&t),
+                collector.dns_callback_url(&t)
+            );
+        }
+        return Ok(());
+    }
+
+    let listener = std::net::TcpListener::bind(&args.listen)
+        .with_context(|| format!("binding {}", args.listen))?;
+    let local = listener.local_addr().context("reading local address")?;
+    let sample = collector.new_token();
+
+    eprintln!("Camio OAST collector listening on {local}");
+    eprintln!("  callback base   : http://{base}/");
+    eprintln!("  sample token    : {sample}");
+    eprintln!("  sample callback : {}", collector.callback_url(&sample));
+    eprintln!(
+        "Plant a token-bearing callback URL in a payload (SSRF/XXE/blind injection);\n\
+         interactions that reach this address are logged below. Press Ctrl-C to stop."
+    );
+
+    let server = camio_oast::OastServer::new(collector).on_interaction(|i| {
+        let token = i
+            .token
+            .as_ref()
+            .map(|t| format!("  token={t}"))
+            .unwrap_or_default();
+        eprintln!(
+            "  [#{}] {} {} from {}{token}",
+            i.id, i.method, i.target, i.source
+        );
+    });
+    server
+        .serve_with_listener(listener)
+        .context("serving OAST collector")?;
+    Ok(())
 }
 
 // ===========================================================================
