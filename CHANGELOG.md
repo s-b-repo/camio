@@ -8,6 +8,12 @@ versioning once it reaches 1.0.
 
 ### Added
 
+- **OS personas** (`camio_core::BrowserOs`, `--os windows|macos|linux`, plan §6):
+  Camoufox/`camofox-browser`-style OS selection — `camio fingerprint show --os`
+  and `camio launch --os` present a consistent UA / `navigator.platform` / WebGL
+  persona for the chosen OS. Plus extra Camoufox-aligned stealth prefs under RFP
+  (disable Battery / Geolocation / Network-Information / Gamepad APIs, DNS
+  prefetch/predictor/beacon, `WEBGL_debug_renderer_info`).
 - **SBOM** (plan §F26): `scripts/gen-sbom.sh` generates a dependency + license
   inventory (`docs/SBOM.md`, 574 packages) from `cargo metadata`; the Security CI
   workflow regenerates it and uploads it as an artifact each run. Licenses stay

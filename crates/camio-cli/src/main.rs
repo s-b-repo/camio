@@ -151,6 +151,9 @@ enum FpCmd {
         preset: Preset,
         #[arg(long, value_enum, default_value_t = Format::UserJs)]
         format: Format,
+        /// OS persona to present: windows|macos|linux (default windows).
+        #[arg(long)]
+        os: Option<String>,
     },
     /// Show the matched request engine's fingerprint spec derived from the profile.
     Spec {
@@ -173,6 +176,9 @@ struct LaunchArgs {
     profile: PathBuf,
     #[arg(long, value_enum, default_value_t = Preset::Balanced)]
     preset: Preset,
+    /// OS persona to present: windows|macos|linux (default windows).
+    #[arg(long)]
+    os: Option<String>,
     /// Authorized target URL to open.
     #[arg(long)]
     url: Option<String>,
@@ -326,16 +332,39 @@ enum Format {
 }
 
 pub(crate) fn profile_for(preset: Preset) -> FingerprintProfile {
+    profile_for_os(preset, None)
+}
+
+/// Build a profile for a preset, optionally presenting a specific OS persona
+/// (Camoufox/camofox-browser's `CAMOFOX_OS`). The persona's UA / platform / WebGL
+/// are kept internally consistent for that OS.
+pub(crate) fn profile_for_os(
+    preset: Preset,
+    os: Option<camio_core::BrowserOs>,
+) -> FingerprintProfile {
+    let os = os.unwrap_or(camio_core::BrowserOs::Windows);
     let mut p = FingerprintProfile::new(
         format!(
-            "win-firefox-{}-{}",
+            "{}-firefox-{}-{}",
+            os.as_str(),
             camio_core::ALIGNED_FIREFOX_MAJOR,
             preset.label()
         ),
         engine::PINNED_VERSION,
     );
     p.policy = preset.policy();
+    p.persona = camio_core::Persona::for_os(os);
     p
+}
+
+/// Parse an optional `--os` value into a [`BrowserOs`].
+pub(crate) fn parse_os(os: &Option<String>) -> Result<Option<camio_core::BrowserOs>> {
+    match os {
+        None => Ok(None),
+        Some(s) => camio_core::BrowserOs::parse(s)
+            .map(Some)
+            .ok_or_else(|| anyhow::anyhow!("unknown --os `{s}` (use windows|macos|linux)")),
+    }
 }
 
 /// Build a [`Scope`] from CLI include/exclude CamioQL rules.
@@ -453,8 +482,8 @@ fn engine_cmd(action: EngineCmd) -> Result<()> {
 
 fn fingerprint_cmd(action: FpCmd) -> Result<()> {
     match action {
-        FpCmd::Show { preset, format } => {
-            let profile = profile_for(preset);
+        FpCmd::Show { preset, format, os } => {
+            let profile = profile_for_os(preset, parse_os(&os)?);
             match format {
                 Format::UserJs => print!("{}", profile.to_user_js()),
                 Format::Camoufox => {
@@ -478,7 +507,7 @@ fn fingerprint_cmd(action: FpCmd) -> Result<()> {
 
 fn launch_cmd(args: LaunchArgs) -> Result<()> {
     let cam = Camoufox::find(&args.install_root)?;
-    let profile = profile_for(args.preset);
+    let profile = profile_for_os(args.preset, parse_os(&args.os)?);
     let opts = LaunchOptions {
         url: args.url.clone(),
         headless: args.headless,
