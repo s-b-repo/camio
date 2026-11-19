@@ -50,7 +50,9 @@ problem, and measures fingerprint parity rather than claiming undetectability.
   locate, launch — no Node.js/Playwright server.
 - **Fingerprint policy** (`camio-core`): a [Chameleon](https://github.com/sereneblue/chameleon)-inspired
   anti-detection policy rendered to Firefox `about:config` prefs **and** Camoufox
-  engine-level overrides.
+  engine-level overrides, with consistent **OS personas** (`--os
+  windows|macos|linux`). See [`docs/STEALTH.md`](./docs/STEALTH.md) for the full
+  Camoufox-feature coverage map and the honest pref-level vs C++-level limits.
 - **Matched request engine** (`camio-request`): tool traffic (Replay/Automate/
   Scanner/MCP) is sent through a **BoringSSL-based impersonating client**
   ([`wreq`](https://crates.io/crates/wreq), the maintained successor to `rquest`)
