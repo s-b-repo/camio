@@ -1495,6 +1495,17 @@ struct ActiveArgs {
     save: bool,
     #[arg(long)]
     json: bool,
+    /// Also run OAST-driven blind-SSRF detection: start a collector listening on
+    /// this address and inject correlated callback URLs into each input.
+    #[arg(long)]
+    oast_listen: Option<String>,
+    /// Authority (host:port) embedded in OAST callback URLs. Defaults to the
+    /// --oast-listen address; set this to an address the target can reach.
+    #[arg(long)]
+    oast_base: Option<String>,
+    /// Milliseconds to wait after each SSRF probe for the out-of-band callback.
+    #[arg(long, default_value_t = 1500)]
+    oast_settle_ms: u64,
 }
 
 fn activescan_cmd(args: ActiveArgs) -> Result<()> {
@@ -1514,9 +1525,14 @@ fn activescan_cmd(args: ActiveArgs) -> Result<()> {
         PolicyOutcome::NeedsConfirmation(reason) => {
             println!("{reason}.");
             println!(
-                "Would actively probe {} (scope {}) for reflected XSS, error-based SQLi and open redirect.",
+                "Would actively probe {} (scope {}) for reflected XSS, error-based SQLi and open redirect{}.",
                 args.url,
-                decision.as_str()
+                decision.as_str(),
+                if args.oast_listen.is_some() {
+                    ", plus OAST-driven blind SSRF"
+                } else {
+                    ""
+                }
             );
             println!("Re-run with --confirm to execute (authorized targets only).");
             return Ok(());
@@ -1535,27 +1551,54 @@ fn activescan_cmd(args: ActiveArgs) -> Result<()> {
     );
 
     // The sender is the one place scope is re-enforced on every probe (plan §16).
-    let findings = {
-        let send = |req: HttpRequest| -> Option<HttpExchange> {
-            if !scope
-                .decide(&HttpExchange::new(req.clone(), Source::Scanner))
-                .is_sendable()
-            {
-                return None;
+    let send = |req: HttpRequest| -> Option<HttpExchange> {
+        if !scope
+            .decide(&HttpExchange::new(req.clone(), Source::Scanner))
+            .is_sendable()
+        {
+            return None;
+        }
+        match eng.send(req, Source::Scanner) {
+            Ok(ex) => {
+                let _ = store.borrow_mut().insert(&ex);
+                Some(ex)
             }
-            match eng.send(req, Source::Scanner) {
-                Ok(ex) => {
-                    let _ = store.borrow_mut().insert(&ex);
-                    Some(ex)
-                }
-                Err(e) => {
-                    eprintln!("probe send failed: {e}");
-                    None
-                }
+            Err(e) => {
+                eprintln!("probe send failed: {e}");
+                None
             }
-        };
-        camio_active::run_active(&base, &send)
+        }
     };
+    let mut findings = camio_active::run_active(&base, &send);
+
+    // Optional OAST-driven blind-SSRF detection with a live collector.
+    if let Some(oast_listen) = &args.oast_listen {
+        let listener = std::net::TcpListener::bind(oast_listen)
+            .with_context(|| format!("binding OAST collector on {oast_listen}"))?;
+        let local = listener.local_addr().context("reading OAST address")?;
+        let base_auth = args.oast_base.clone().unwrap_or_else(|| local.to_string());
+        let collector = camio_oast::Collector::new(base_auth.clone());
+        let handle = camio_oast::OastServer::new(collector.clone())
+            .on_interaction(|i| {
+                eprintln!(
+                    "  OAST callback: {} {} from {}",
+                    i.method, i.target, i.source
+                );
+            })
+            .spawn(listener)
+            .context("starting OAST collector")?;
+        eprintln!(
+            "OAST collector on {local} (callback base http://{base_auth}/) — probing inputs for blind SSRF…"
+        );
+        let ssrf = camio_active::run_oast_ssrf(
+            &base,
+            &send,
+            &collector,
+            std::time::Duration::from_millis(args.oast_settle_ms),
+        );
+        findings.extend(ssrf);
+        handle.stop_and_join();
+    }
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&findings)?);

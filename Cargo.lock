@@ -881,6 +881,7 @@ version = "0.0.1"
 dependencies = [
  "camio-automate",
  "camio-core",
+ "camio-oast",
  "regex",
  "serde",
  "serde_json",

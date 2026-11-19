@@ -16,6 +16,12 @@ versioning once it reaches 1.0.
   Interactions are kept in memory and exposed for live logging / polling;
   `camio oast` logs them, `camio oast --tokens N` prints sample callback URLs.
   Honest scope: it only sees callbacks that can reach the address you bind.
+- **OAST-driven blind-SSRF detection** (`camio-active::run_oast_ssrf`): injects a
+  correlated OAST callback URL into each discovered input, sends the probe
+  through the scope/policy-gated engine, and reports a High/Firm finding when the
+  target calls back — catching SSRF that leaves no trace in the response. Wired
+  into `camio activescan --oast-listen <addr>` (with `--oast-base` and
+  `--oast-settle-ms`), which starts a live collector for the run.
 - **Intercepting HTTP/HTTPS proxy** (`camio-proxy`, `camio proxy`): a Burp-style
   proxy a browser points at. Each request is scope-decided and policy-gated
   through the shared `Scope`/`Policy` path (out-of-scope and SSRF-guarded targets

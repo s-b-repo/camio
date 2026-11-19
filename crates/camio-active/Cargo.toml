@@ -10,6 +10,7 @@ description = "Opt-in active security checks (reflected XSS, error-based SQLi, o
 [dependencies]
 camio-core.workspace = true
 camio-automate.workspace = true
+camio-oast.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
