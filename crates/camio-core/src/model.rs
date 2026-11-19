@@ -533,6 +533,84 @@ pub struct Finding {
     pub created_at_ms: i64,
 }
 
+impl Finding {
+    /// Rank this finding from a CVSS v3.1 vector: parse it, set
+    /// [`Finding::severity`] from the base score, and append the vector + score
+    /// to [`Finding::detail`] so the rating is auditable. Returns the numeric
+    /// base score, or [`CvssError`](crate::cvss::CvssError) for an invalid vector.
+    pub fn apply_cvss(&mut self, vector: &str) -> Result<f64, crate::cvss::CvssError> {
+        let cvss = crate::cvss::Cvss::parse(vector)?;
+        self.severity = cvss.severity;
+        // Record the provenance of the severity (once).
+        if !self.detail.contains("CVSS:3.") {
+            if !self.detail.is_empty() {
+                self.detail.push_str("\n\n");
+            }
+            self.detail.push_str(&format!(
+                "{} = {:.1} ({})",
+                cvss.vector,
+                cvss.base_score,
+                cvss.severity.as_str()
+            ));
+        }
+        Ok(cvss.base_score)
+    }
+
+    /// Builder form of [`Finding::apply_cvss`] that leaves the severity unchanged
+    /// if `vector` is not a valid CVSS string (ergonomic during construction).
+    #[must_use]
+    pub fn with_cvss(mut self, vector: &str) -> Self {
+        let _ = self.apply_cvss(vector);
+        self
+    }
+}
+
+#[cfg(test)]
+mod finding_cvss_tests {
+    use super::*;
+
+    fn sample() -> Finding {
+        Finding {
+            id: FindingId(1),
+            title: "SQL injection".into(),
+            severity: Severity::Info,
+            confidence: Confidence::Tentative,
+            detail: "parameter id".into(),
+            evidence: vec![],
+            created_at_ms: 0,
+        }
+    }
+
+    #[test]
+    fn apply_cvss_sets_severity_and_records_score() {
+        let mut f = sample();
+        let score = f
+            .apply_cvss("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H")
+            .unwrap();
+        assert!((score - 9.8).abs() < 1e-9);
+        assert_eq!(f.severity, Severity::Critical);
+        assert!(f.detail.contains("9.8"));
+        assert!(f.detail.contains("parameter id")); // original detail preserved
+    }
+
+    #[test]
+    fn with_cvss_ignores_a_bad_vector() {
+        let f = sample().with_cvss("not-a-vector");
+        assert_eq!(f.severity, Severity::Info); // unchanged
+    }
+
+    #[test]
+    fn apply_cvss_does_not_duplicate_the_note() {
+        let mut f = sample();
+        f.apply_cvss("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N")
+            .unwrap();
+        let once = f.detail.clone();
+        f.apply_cvss("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N")
+            .unwrap();
+        assert_eq!(f.detail, once, "the vector note must not be appended twice");
+    }
+}
+
 /// Lifecycle state of a long-running task (plan §11: "Long tasks return IDs with
 /// status/cancel/results").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
