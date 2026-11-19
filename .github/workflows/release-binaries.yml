@@ -28,11 +28,16 @@ name: Release binaries
 
 on:
   release:
-    types: [published]
+    # `published` covers manual releases cut with a PAT.
+    # `created`   covers releases cut server-side by the SemVer release
+    #             workflow using the default GITHUB_TOKEN — otherwise
+    #             those never fire a `push: tags` either, and this
+    #             workflow would miss every bot-driven tag.
+    types: [published, created]
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to build + attach binaries to (e.g. v0.1.11)"
+        description: "Release tag to build + attach binaries to (e.g. v0.2.3)"
         required: true
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+"]
@@ -70,6 +75,12 @@ jobs:
     name: Build ${{ matrix.target.name }}
     needs: resolve
     runs-on: ${{ matrix.target.runner }}
+    # Apple-Silicon runners are not always available to every account.
+    # macos-aarch64 is marked `continue-on-error: true` via `required: false`
+    # so a missing runner doesn't block the release — the three required
+    # targets still publish. `fail-fast: false` keeps independent failures
+    # from killing sibling jobs.
+    continue-on-error: ${{ matrix.target.required == false }}
     strategy:
       fail-fast: false
       matrix:
@@ -78,31 +89,51 @@ jobs:
             runner: ubuntu-latest
             triple: x86_64-unknown-linux-gnu
             cross: false
+            required: true
           - name: linux-aarch64
             runner: ubuntu-latest
             triple: aarch64-unknown-linux-gnu
-            cross: true
+            # Native cross with apt-installed gcc-aarch64-linux-gnu +
+            # explicit linker env; drops the `cross`-docker approach
+            # which repeatedly fails to produce a working BoringSSL
+            # build for us.
+            cross: false
+            apt_cross: true
+            required: true
           - name: macos-x86_64
             runner: macos-13
             triple: x86_64-apple-darwin
             cross: false
+            required: true
           - name: macos-aarch64
             runner: macos-14
             triple: aarch64-apple-darwin
             cross: false
+            required: false
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.resolve.outputs.tag }}
 
       # ------- platform system dependencies -------
-      - name: Install Linux build deps
-        if: runner.os == 'Linux' && matrix.target.cross == false
+      - name: Install Linux build deps (native x86_64 — includes GUI deps)
+        if: matrix.target.name == 'linux-x86_64'
         run: |
           sudo apt-get update -o Acquire::Retries=5
           sudo apt-get install -y --no-install-recommends \
             libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
             libxkbcommon-dev libwayland-dev cmake clang pkg-config
+
+      - name: Install Linux build deps (aarch64 cross-compiler via apt)
+        if: matrix.target.name == 'linux-aarch64'
+        run: |
+          sudo apt-get update -o Acquire::Retries=5
+          # The Rust toolchain brings libstd for the target; we only need
+          # the C cross-compiler + cmake so BoringSSL can link, and
+          # pkg-config for rusqlite's bundled SQLite.
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+            cmake clang pkg-config
 
       # ------- Rust toolchain + target -------
       - uses: dtolnay/rust-toolchain@stable
@@ -113,33 +144,32 @@ jobs:
         with:
           key: release-${{ matrix.target.triple }}
 
-      # ------- `cross` for linux-aarch64 so we don't need an arm runner -------
-      - name: Install cross
-        if: matrix.target.cross == true
-        run: cargo install cross --locked --version 0.2.5
-
-      # ------- native build -------
-      - name: Compile (native)
-        if: matrix.target.cross == false
+      # ------- Build -------
+      - name: Compile
         env:
-          # Help eframe/egui find X11/Wayland on Linux; no-op on macOS.
+          # Help eframe/egui find system libs on Linux; no-op on macOS.
           PKG_CONFIG_ALLOW_SYSTEM_LIBS: "1"
-        run: >
-          cargo build
-          --workspace --release --all-features --bins
-          --target ${{ matrix.target.triple }}
-
-      # ------- cross-compiled build (linux-aarch64) -------
-      # The egui app depends on Xorg/Wayland dev headers that are tricky
-      # under `cross`; we build only the CLI + MCP server + web UI for
-      # aarch64, which is what most headless users want.
-      - name: Compile (cross — CLI only)
-        if: matrix.target.cross == true
-        run: >
-          cross build
-          --release --all-features
-          -p camio-cli -p camio-mcp -p camio-web
-          --target ${{ matrix.target.triple }}
+          # Teach cargo/cc which C toolchain to use for the aarch64 target.
+          # These env vars are harmless on other targets because they're
+          # key'd by triple.
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
+          AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
+        run: |
+          if [ "${{ matrix.target.name }}" = "linux-aarch64" ]; then
+            # egui/winit need system X11/Wayland headers for the target
+            # architecture that aren't trivially available in an apt-based
+            # cross-compile. Ship CLI + MCP + web UI for aarch64; users who
+            # want the GUI build it natively from source on their aarch64
+            # box (documented in docs/BUILDING.md).
+            cargo build --release --all-features \
+              -p camio-cli -p camio-mcp -p camio-web \
+              --target ${{ matrix.target.triple }}
+          else
+            cargo build --workspace --release --all-features --bins \
+              --target ${{ matrix.target.triple }}
+          fi
 
       # ------- stage archive directory -------
       - name: Stage
