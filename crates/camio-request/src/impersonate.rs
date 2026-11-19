@@ -96,8 +96,16 @@ impl ImpersonatingEngine {
         &self,
         req: HttpRequest,
         source: Source,
+        prepare: bool,
     ) -> Result<HttpExchange, RequestError> {
-        let prepared = prepare_request(req, &self.spec);
+        // `prepare` synthesizes/reorders browser-like headers for tool traffic.
+        // A faithful (proxy) send skips it so captured browser headers go out
+        // exactly as received — the matched TLS/HTTP-2 fingerprint is unchanged.
+        let prepared = if prepare {
+            prepare_request(req, &self.spec)
+        } else {
+            req
+        };
 
         let method = Method::from_bytes(prepared.method.as_bytes())
             .map_err(|e| RequestError::Transport(format!("invalid method: {e}")))?;
@@ -193,7 +201,17 @@ impl RequestEngine for ImpersonatingEngine {
 
     fn send(&self, req: HttpRequest, source: Source) -> Result<HttpExchange, RequestError> {
         // Bridge the async client into Camio's synchronous call sites.
-        self.rt.block_on(self.send_async(req, source))
+        self.rt
+            .block_on(self.send_async(req, source, /*prepare*/ true))
+    }
+
+    fn send_faithful(
+        &self,
+        req: HttpRequest,
+        source: Source,
+    ) -> Result<HttpExchange, RequestError> {
+        self.rt
+            .block_on(self.send_async(req, source, /*prepare*/ false))
     }
 }
 

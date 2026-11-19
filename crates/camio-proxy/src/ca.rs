@@ -172,17 +172,25 @@ impl CertAuthority {
         params.is_ca = IsCa::NoCa;
         params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
         params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        // ~90-day leaf validity, like a modern public cert — not a telltale window.
+        let (not_before, not_after) = validity_window(90);
+        params.not_before = not_before;
+        params.not_after = not_after;
         let leaf = params.signed_by(&leaf_key, &self.issuer)?;
 
         let cert_der: CertificateDer<'static> = leaf.der().clone();
         let key_der: PrivateKeyDer<'static> =
             PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(leaf_key.serialize_der()));
 
-        let cfg = ServerConfig::builder_with_provider(self.provider.clone())
+        let mut cfg = ServerConfig::builder_with_provider(self.provider.clone())
             .with_safe_default_protocol_versions()
             .map_err(CaError::Tls)?
             .with_no_client_auth()
             .with_single_cert(vec![cert_der], key_der)?;
+        // Advertise HTTP/1.1 explicitly: the proxy reads HTTP/1.1 inside the
+        // tunnel, and the real HTTP/2 fingerprint is reproduced by the matched
+        // engine toward the target.
+        cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
         Ok(cfg)
     }
 }
@@ -201,7 +209,22 @@ fn ca_params(common_name: &str) -> Result<CertificateParams, rcgen::Error> {
         KeyUsagePurpose::CrlSign,
         KeyUsagePurpose::DigitalSignature,
     ];
+    // A realistic root-CA validity window (~10 years), not rcgen's default
+    // 1975→4096 — which would flag the cert as a test/MITM root to any inspector.
+    let (not_before, not_after) = validity_window(3650);
+    params.not_before = not_before;
+    params.not_after = not_after;
     Ok(params)
+}
+
+/// A validity window of `[now - 1 day, now + days]`, so a minted certificate
+/// looks like an ordinary modern cert rather than carrying a telltale window.
+fn validity_window(days: i64) -> (time::OffsetDateTime, time::OffsetDateTime) {
+    let now = time::OffsetDateTime::now_utc();
+    (
+        now - time::Duration::days(1),
+        now + time::Duration::days(days),
+    )
 }
 
 /// Write a private key file with `0600` permissions on Unix.

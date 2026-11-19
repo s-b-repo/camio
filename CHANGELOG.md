@@ -40,10 +40,16 @@ versioning once it reaches 1.0.
   `status-reason`.
   - **Hard to fingerprint:** when intercepting, the upstream request is
     re-originated through the fingerprint-matched engine, so the *target* sees the
-    matched JA3/JA4/H2 fingerprint, not a tool tell. Proxy-generated replies carry
-    no identifying header, and the intercept CA's name is neutral by default
-    (`Internal Root CA`) and operator-settable (`--ca-name`) so an inspected
-    certificate chain doesn't announce the proxy.
+    matched JA3/JA4/H2 fingerprint, not a tool tell. The intercepted request is
+    now forwarded **verbatim** — new `RequestEngine::send_faithful` skips the
+    browser-header synthesis/reordering that tool traffic uses, so a captured
+    request's exact header set and order go out unchanged (indistinguishable at
+    the header layer from the browser's own). Proxy-generated replies carry no
+    identifying header; the intercept CA's name is neutral by default
+    (`Internal Root CA`) and operator-settable (`--ca-name`); minted
+    certificates use **realistic validity windows** (CA ~10y, leaf ~90d) instead
+    of rcgen's telltale 1975→4096 default; and the TLS server advertises
+    `http/1.1` via ALPN.
   - **Scope-aware automation:** `--auto-scan` runs the passive scanner on every
     **in-scope** captured exchange and stores its findings as traffic flows;
     out-of-scope traffic is still recorded but never scanned or attacked.

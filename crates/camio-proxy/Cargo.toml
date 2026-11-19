@@ -11,7 +11,7 @@ description = "Camio's intercepting HTTP/HTTPS proxy: scope-gated capture, match
 # traffic can be inspected) is on by default. Build with `--no-default-features`
 # for a pure HTTP proxy + blind HTTPS CONNECT tunnel with no server TLS stack.
 default = ["tls-intercept"]
-tls-intercept = ["dep:rustls", "dep:rcgen"]
+tls-intercept = ["dep:rustls", "dep:rcgen", "dep:time"]
 # A ready-made `Forwarder` backed by Camio's fingerprint-matched request engine.
 # Off by default so pure-injection embedders don't pull the engine; the CLI and
 # native app enable it.
@@ -22,6 +22,7 @@ camio-core.workspace = true
 httparse.workspace = true
 rustls = { workspace = true, optional = true }
 rcgen = { workspace = true, optional = true, features = ["pem", "crypto", "aws_lc_rs", "x509-parser"] }
+time = { workspace = true, optional = true }
 camio-request = { workspace = true, optional = true, features = ["impersonate"] }
 
 [dev-dependencies]

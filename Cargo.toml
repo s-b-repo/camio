@@ -64,6 +64,9 @@ httparse = "1.9"
 # operator — never a hidden second client stack.
 rustls = "0.23"
 rcgen = "0.14"
+# Realistic certificate validity windows for the TLS-intercept CA/leaf (so a
+# minted cert doesn't carry rcgen's default 1975→4096 window, a MITM tell).
+time = { version = "0.3", default-features = false, features = ["std"] }
 # Reused by camio-ai for OpenAI-compatible API calls (NVIDIA NIM, OpenAI,
 # Ollama, …) — the same BoringSSL client the matched engine uses, so no second
 # TLS stack is added.

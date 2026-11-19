@@ -57,8 +57,13 @@ impl EngineForwarder {
                     }
                 };
                 for job in rx {
+                    // Faithful send: the request is the browser's own, so its
+                    // headers go out verbatim (no synthesis/reorder) — the
+                    // intercepted request is indistinguishable at the header layer
+                    // from the browser's, while the matched transport supplies the
+                    // real TLS/HTTP-2 fingerprint.
                     let res = engine
-                        .send(job.req, Source::Proxy)
+                        .send_faithful(job.req, Source::Proxy)
                         .map_err(|e| ForwardError(e.to_string()));
                     let _ = job.reply.send(res);
                 }

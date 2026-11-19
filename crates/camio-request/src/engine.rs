@@ -60,6 +60,26 @@ pub trait RequestEngine {
     /// Send the request and return the exchange, with `fingerprint_used` and
     /// `source` populated.
     fn send(&self, req: HttpRequest, source: Source) -> Result<HttpExchange, RequestError>;
+
+    /// Send a request whose headers are already authentic, **without** the
+    /// browser-header synthesis and reordering [`prepare_request`] applies.
+    ///
+    /// Tool-originated traffic (Replay/Automate/Scanner) starts from a bare
+    /// request and relies on [`send`](Self::send) to synthesize a browser-like
+    /// header set. The intercepting proxy is the opposite case: it already holds
+    /// the browser's exact request — the same bytes the browser would have put on
+    /// the wire — so re-synthesizing or reordering those headers can only *add* a
+    /// mismatch a target could fingerprint. This path forwards them verbatim (the
+    /// matched transport still supplies the real TLS/JA3/JA4/HTTP-2 fingerprint),
+    /// so an intercepted request is indistinguishable at the header layer from the
+    /// browser's own. The default delegates to [`send`](Self::send).
+    fn send_faithful(
+        &self,
+        req: HttpRequest,
+        source: Source,
+    ) -> Result<HttpExchange, RequestError> {
+        self.send(req, source)
+    }
 }
 
 /// Compute the value of the `Host` header for a request URL, including the port
@@ -176,6 +196,21 @@ impl RequestEngine for DryRunEngine {
         ex.fingerprint_used = Some(self.spec.profile_name.clone());
         Ok(ex)
     }
+
+    fn send_faithful(
+        &self,
+        req: HttpRequest,
+        source: Source,
+    ) -> Result<HttpExchange, RequestError> {
+        if req.parsed_url().is_none() {
+            return Err(RequestError::InvalidUrl(req.url.clone()));
+        }
+        // Verbatim: no prepare_request, so the captured header set and order are
+        // preserved exactly.
+        let mut ex = HttpExchange::new(req, source);
+        ex.fingerprint_used = Some(self.spec.profile_name.clone());
+        Ok(ex)
+    }
 }
 
 #[cfg(test)]
@@ -204,6 +239,42 @@ mod tests {
             names,
             vec!["Host", "User-Agent", "Accept-Encoding", "X-Extra"]
         );
+    }
+
+    #[test]
+    fn faithful_send_preserves_browser_headers_verbatim() {
+        use camio_core::{HttpRequest, Source};
+        let eng = DryRunEngine::new(spec());
+        let mut req = HttpRequest::get("https://example.com/");
+        // The browser's own request: authentic order, no canonicalization.
+        req.headers.push("Accept", "text/html");
+        req.headers.push("X-Browser-Specific", "1");
+        req.headers.push("Host", "example.com");
+        req.headers.push("User-Agent", "RealBrowser/1.0");
+
+        let faithful = eng.send_faithful(req.clone(), Source::Proxy).unwrap();
+        let names: Vec<&str> = faithful
+            .request
+            .headers
+            .iter()
+            .map(|h| h.name.as_str())
+            .collect();
+        // Verbatim: no reordering, no synthesized defaults.
+        assert_eq!(
+            names,
+            vec!["Accept", "X-Browser-Specific", "Host", "User-Agent"]
+        );
+
+        // The normal (tool) send canonicalizes/augments — so faithful differs.
+        let prepared = eng.send(req, Source::Proxy).unwrap();
+        let pnames: Vec<&str> = prepared
+            .request
+            .headers
+            .iter()
+            .map(|h| h.name.as_str())
+            .collect();
+        assert_eq!(pnames.first(), Some(&"Host"), "spec order puts Host first");
+        assert_ne!(pnames, names, "tool send should reorder/augment");
     }
 
     #[test]
