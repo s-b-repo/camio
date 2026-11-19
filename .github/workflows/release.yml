@@ -88,10 +88,20 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           v="${{ steps.ver.outputs.next_version }}"
+          prev="${{ steps.ver.outputs.prev }}"
           if git rev-parse "$v" >/dev/null 2>&1; then
             echo "::error::tag $v already exists"; exit 1
           fi
+          # Build notes from the commits (works for direct-to-main repos, unlike
+          # GitHub's PR-only --generate-notes).
+          python3 scripts/release-notes.py "$prev" > notes.md
+          if [ "$prev" != "none" ] && [ -n "$prev" ]; then
+            {
+              echo
+              echo "**Full Changelog**: ${{ github.server_url }}/${{ github.repository }}/compare/${prev}...${v}"
+            } >> notes.md
+          fi
           git tag -a "$v" -m "$v"
           git push origin "refs/tags/$v"
-          gh release create "$v" --title "$v" --generate-notes --latest --verify-tag
+          gh release create "$v" --title "$v" --notes-file notes.md --latest --verify-tag
           echo "Released $v"
