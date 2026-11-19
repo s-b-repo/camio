@@ -103,6 +103,93 @@ impl Default for Persona {
     }
 }
 
+/// The operating system a persona presents, mirroring Camoufox /
+/// `camofox-browser`'s `CAMOFOX_OS`. The UA, `navigator.platform`, and WebGL
+/// renderer must all agree — a Windows UA with a macOS platform is itself a tell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserOs {
+    Windows,
+    Macos,
+    Linux,
+}
+
+impl BrowserOs {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BrowserOs::Windows => "windows",
+            BrowserOs::Macos => "macos",
+            BrowserOs::Linux => "linux",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "windows" | "win" | "win32" | "win64" => Some(BrowserOs::Windows),
+            "macos" | "mac" | "osx" | "darwin" | "macintel" => Some(BrowserOs::Macos),
+            "linux" => Some(BrowserOs::Linux),
+            _ => None,
+        }
+    }
+}
+
+impl Persona {
+    /// A persona consistent with `os` (UA / `navigator.platform` / WebGL agree),
+    /// keeping the common locale/timezone/screen defaults.
+    pub fn for_os(os: BrowserOs) -> Self {
+        match os {
+            BrowserOs::Windows => Persona::windows(),
+            BrowserOs::Macos => Persona::macos(),
+            BrowserOs::Linux => Persona::linux(),
+        }
+    }
+
+    /// The default common Windows 10 + Firefox persona.
+    pub fn windows() -> Self {
+        Persona::default()
+    }
+
+    /// A common macOS (Apple Silicon) + Firefox persona.
+    pub fn macos() -> Self {
+        let v = ALIGNED_FIREFOX_MAJOR;
+        Persona {
+            user_agent: format!(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:{v}.0) Gecko/20100101 Firefox/{v}.0"
+            ),
+            platform: "MacIntel".to_string(),
+            webgl_vendor: "Google Inc. (Apple)".to_string(),
+            webgl_renderer:
+                "ANGLE (Apple, ANGLE Metal Renderer: Apple M1, Unspecified Version)".to_string(),
+            ..Persona::default()
+        }
+    }
+
+    /// A common Linux + Firefox persona (Mesa/Intel GPU strings).
+    pub fn linux() -> Self {
+        let v = ALIGNED_FIREFOX_MAJOR;
+        Persona {
+            user_agent: format!(
+                "Mozilla/5.0 (X11; Linux x86_64; rv:{v}.0) Gecko/20100101 Firefox/{v}.0"
+            ),
+            platform: "Linux x86_64".to_string(),
+            webgl_vendor: "Mesa".to_string(),
+            webgl_renderer: "Mesa Intel(R) UHD Graphics (CML GT2)".to_string(),
+            ..Persona::default()
+        }
+    }
+
+    /// The OS this persona presents, inferred from `platform`.
+    pub fn os(&self) -> BrowserOs {
+        if self.platform.starts_with("Win") {
+            BrowserOs::Windows
+        } else if self.platform.starts_with("Mac") {
+            BrowserOs::Macos
+        } else {
+            BrowserOs::Linux
+        }
+    }
+}
+
 /// How WebRTC should be handled. WebRTC can leak the real local/public IP even
 /// behind a proxy, so it is a classic de-anonymisation vector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -445,6 +532,25 @@ impl FingerprintProfile {
             );
         }
 
+        // --- Extra anti-fingerprinting surface (Camoufox-aligned) ------------
+        // When fingerprint resistance is on, close vectors RFP does not fully
+        // cover and that match what the Camoufox engine patches below: the
+        // Battery, Geolocation, Network Information and Gamepad APIs, plus
+        // speculative network activity that can deanonymize.
+        if p.resist_fingerprinting {
+            set("dom.battery.enabled", PrefValue::Bool(false));
+            set("geo.enabled", PrefValue::Bool(false));
+            set("geo.provider.network.url", PrefValue::Str(String::new()));
+            set("dom.netinfo.enabled", PrefValue::Bool(false));
+            set("dom.gamepad.enabled", PrefValue::Bool(false));
+            set("beacon.enabled", PrefValue::Bool(false));
+            set("network.dns.disablePrefetch", PrefValue::Bool(true));
+            set("network.predictor.enabled", PrefValue::Bool(false));
+            // Don't expose the real GPU via WEBGL_debug_renderer_info even when
+            // WebGL itself stays enabled.
+            set("webgl.enable-debug-renderer-info", PrefValue::Bool(false));
+        }
+
         prefs
     }
 
@@ -568,6 +674,35 @@ mod tests {
         assert!(has("media.peerconnection.ice.default_address_only"));
         // Balanced keeps webdriver hidden (we drive it programmatically).
         assert!(has("dom.webdriver.enabled"));
+    }
+
+    #[test]
+    fn os_personas_are_internally_consistent() {
+        let mac = Persona::macos();
+        assert_eq!(mac.platform, "MacIntel");
+        assert!(mac.user_agent.contains("Mac OS X"));
+        assert_eq!(mac.os(), BrowserOs::Macos);
+
+        let lin = Persona::for_os(BrowserOs::Linux);
+        assert_eq!(lin.platform, "Linux x86_64");
+        assert!(lin.user_agent.contains("X11; Linux"));
+        assert_eq!(lin.os(), BrowserOs::Linux);
+
+        assert_eq!(Persona::windows().os(), BrowserOs::Windows);
+        assert_eq!(BrowserOs::parse("mac"), Some(BrowserOs::Macos));
+        assert_eq!(BrowserOs::parse("nope"), None);
+    }
+
+    #[test]
+    fn hardened_prefs_close_extra_fingerprint_vectors() {
+        let mut prof = FingerprintProfile::new("t", "158.0.1-beta.41");
+        prof.policy = FingerprintPolicy::hardened();
+        let prefs = prof.to_prefs();
+        let has = |k: &str| prefs.iter().any(|(key, _)| key == k);
+        assert!(has("dom.battery.enabled"));
+        assert!(has("geo.enabled"));
+        assert!(has("dom.netinfo.enabled"));
+        assert!(has("webgl.enable-debug-renderer-info"));
     }
 
     #[test]

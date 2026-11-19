@@ -23,8 +23,8 @@ pub mod scope;
 pub mod sitemap;
 
 pub use fingerprint::{
-    FingerprintPolicy, FingerprintProfile, MediaDeviceMode, Persona, PrefValue, RefererPolicy,
-    ScreenSize, WebRtcMode, WebglMode, ALIGNED_FIREFOX_MAJOR,
+    BrowserOs, FingerprintPolicy, FingerprintProfile, MediaDeviceMode, Persona, PrefValue,
+    RefererPolicy, ScreenSize, WebRtcMode, WebglMode, ALIGNED_FIREFOX_MAJOR,
 };
 
 pub use camioql::{Query, QueryTarget};
