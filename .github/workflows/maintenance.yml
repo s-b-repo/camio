@@ -1,0 +1,67 @@
+name: Maintenance (auto-fix)
+
+# Automated bug-fixing. On a weekly schedule (and on demand) apply the safe,
+# machine-applicable fixes — `cargo clippy --fix` and `cargo fmt` — and open a PR
+# with the result. Nothing lands on main directly; CI runs on the PR and a human
+# merges. This keeps lint/format drift from accumulating into review noise.
+on:
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: maintenance-autofix
+  cancel-in-progress: true
+
+jobs:
+  autofix:
+    name: clippy --fix + fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same native deps as CI so the whole workspace (incl. the egui app) builds.
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -o Acquire::Retries=5
+          sudo apt-get install -y --no-install-recommends \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libwayland-dev cmake clang pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Apply machine-applicable fixes
+        run: |
+          # clippy --fix exits non-zero when warnings remain after fixing; that is
+          # fine — we only care about the diff it produced.
+          cargo clippy --workspace --all-targets --all-features \
+            --fix --allow-dirty --allow-staged || true
+          cargo fmt --all
+
+      - name: Open a PR if anything changed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo "nothing to fix — tree is already clean"
+            exit 0
+          fi
+          BR="automated/clippy-fmt-$(date +%Y%m%d%H%M)"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$BR"
+          git commit -am "chore: automated clippy --fix + cargo fmt"
+          git push -u origin "$BR"
+          gh pr create --base main --head "$BR" \
+            --title "chore: automated clippy --fix + fmt" \
+            --body "Weekly maintenance run: machine-applied \`cargo clippy --fix\` + \`cargo fmt\`. Review the diff; CI must pass before merge." \
+            || echo "::warning::Could not open the PR. Enable 'Allow GitHub Actions to create and approve pull requests' (Settings ▸ Actions ▸ General). Branch '$BR' is pushed either way."
