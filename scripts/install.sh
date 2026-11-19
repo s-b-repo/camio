@@ -28,9 +28,11 @@ have tar || die "tar is required"
 if have curl; then
   dl() { curl -fsSL "$1"; }
   dlo() { curl -fsSL -o "$1" "$2"; }
+  probe() { curl -fsIL -o /dev/null "$1"; }
 elif have wget; then
   dl() { wget -qO- "$1"; }
   dlo() { wget -qO "$1" "$2"; }
+  probe() { wget -q --spider "$1"; }
 else
   die "need curl or wget"
 fi
@@ -51,11 +53,20 @@ esac
 TARGET="${os_t}-${arch_t}"
 
 # ---- resolve the version ----------------------------------------------------
+# Honour CAMIO_VERSION; otherwise pick the newest release that actually publishes
+# a build for this target — a version-bump bot can create releases faster than
+# the binaries are attached, so "latest" may not have assets yet.
 if [ -z "$VERSION" ]; then
-  say "resolving the latest release"
-  VERSION="$(dl "https://api.github.com/repos/$REPO/releases/latest" \
-    | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name"[^"]*"([^"]+)".*/\1/')"
-  [ -n "$VERSION" ] || die "could not resolve the latest release; set CAMIO_VERSION"
+  say "finding the newest release with a $TARGET build"
+  tags="$(dl "https://api.github.com/repos/$REPO/releases?per_page=30" \
+    | grep '"tag_name":' | sed -E 's/.*"tag_name"[^"]*"([^"]+)".*/\1/')"
+  for t in $tags; do
+    if probe "https://github.com/$REPO/releases/download/$t/camio-${t}-${TARGET}.tar.gz"; then
+      VERSION="$t"
+      break
+    fi
+  done
+  [ -n "$VERSION" ] || die "no published $TARGET build yet — build from source (see the README)"
 fi
 say "installing Camio $VERSION ($TARGET)"
 
