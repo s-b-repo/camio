@@ -29,6 +29,7 @@ camio-active.workspace = true
 camio-ai.workspace = true
 camio-proxy = { workspace = true, features = ["engine"] }
 camio-integrations.workspace = true
+camio-tasks.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true

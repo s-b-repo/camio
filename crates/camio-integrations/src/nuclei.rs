@@ -197,6 +197,16 @@ pub fn run_nuclei(
     targets: &[String],
     opts: &NucleiOptions,
 ) -> Result<Vec<NucleiFinding>, IntegrationError> {
+    run_nuclei_cancellable(targets, opts, || false)
+}
+
+/// Like [`run_nuclei`] but also kills the process when `should_cancel()` returns
+/// `true`, so a background task's cancellation actually stops the scan.
+pub fn run_nuclei_cancellable<C: Fn() -> bool>(
+    targets: &[String],
+    opts: &NucleiOptions,
+    should_cancel: C,
+) -> Result<Vec<NucleiFinding>, IntegrationError> {
     let mut cmd = Command::new("nuclei");
     cmd.args([
         "-silent",
@@ -263,7 +273,7 @@ pub fn run_nuclei(
         match child.try_wait() {
             Ok(Some(_)) => break,
             Ok(None) => {
-                if start.elapsed() > opts.timeout {
+                if start.elapsed() > opts.timeout || should_cancel() {
                     let _ = child.kill();
                     break;
                 }

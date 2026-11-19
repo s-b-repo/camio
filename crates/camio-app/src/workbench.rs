@@ -829,6 +829,54 @@ impl CamioApp {
     }
 
     pub(super) fn tasks_ui(&mut self, ui: &mut egui::Ui) {
+        // Live background tasks (F03): external tool runs, etc.
+        let tasks = self.tasks.list();
+        if !tasks.is_empty() {
+            ui.heading("Background tasks");
+            let mut cancel: Option<camio_core::TaskId> = None;
+            let mut clear = false;
+            egui::ScrollArea::vertical()
+                .id_salt("bg-tasks")
+                .max_height(180.0)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    for t in &tasks {
+                        ui.horizontal(|ui| {
+                            ui.monospace(format!("#{}", t.id.0));
+                            ui.label(&t.kind);
+                            ui.label(
+                                egui::RichText::new(t.state.as_str())
+                                    .color(task_state_color(t.state)),
+                            );
+                            if let Some(f) = t.fraction() {
+                                ui.add(egui::ProgressBar::new(f).desired_width(90.0));
+                            }
+                            let line = t
+                                .result
+                                .as_deref()
+                                .or(t.error.as_deref())
+                                .unwrap_or(&t.message);
+                            if !line.is_empty() {
+                                ui.label(egui::RichText::new(line).weak());
+                            }
+                            if !t.is_terminal() && ui.small_button("Cancel").clicked() {
+                                cancel = Some(t.id);
+                            }
+                        });
+                    }
+                });
+            if ui.small_button("Clear finished").clicked() {
+                clear = true;
+            }
+            if let Some(id) = cancel {
+                self.tasks.cancel(id);
+            }
+            if clear {
+                self.tasks.clear_finished();
+            }
+            ui.separator();
+        }
+
         ui.heading("Review tasks");
         ui.horizontal_wrapped(|ui| {
             if ui.button("New passive review").clicked() {
@@ -1188,36 +1236,28 @@ impl CamioApp {
     }
 
     pub(super) fn integrations_ui(&mut self, ui: &mut egui::Ui) {
-        // Run Nuclei (external) directly, on a background thread.
+        // Run Nuclei (external) as a tracked background task.
         ui.heading("Run Nuclei (external)");
-        let running = self.nuclei_pending.is_some();
         ui.horizontal(|ui| {
             ui.label("Target URL");
-            ui.add_enabled(
-                !running,
+            ui.add(
                 egui::TextEdit::singleline(&mut self.nuclei_url)
                     .hint_text("https://authorized-target")
                     .desired_width(260.0),
             );
             if ui
                 .add_enabled(
-                    !running && !self.nuclei_url.trim().is_empty(),
+                    !self.nuclei_url.trim().is_empty(),
                     egui::Button::new("▶ Run Nuclei"),
                 )
                 .clicked()
             {
-                self.start_nuclei(ui.ctx());
-            }
-            if running {
-                ui.spinner();
-                ui.label("scanning…");
-                ui.ctx()
-                    .request_repaint_after(std::time::Duration::from_millis(400));
+                self.start_nuclei();
             }
         });
         ui.label(
             egui::RichText::new(
-                "Scope-gated; normalized findings are saved to this workspace. Requires nuclei on PATH.",
+                "Runs as a background task (see Tasks) with Cancel; scope-gated, saved to this workspace. Requires nuclei on PATH.",
             )
             .weak()
             .size(11.0),
@@ -1757,4 +1797,15 @@ pub(super) fn local_input(path: &str, contents: &str) -> Result<Vec<u8>, String>
 
 fn message(error: impl ToString) -> String {
     error.to_string()
+}
+
+fn task_state_color(state: camio_core::TaskState) -> egui::Color32 {
+    use camio_core::TaskState;
+    match state {
+        TaskState::Completed => egui::Color32::from_rgb(120, 200, 120),
+        TaskState::Failed | TaskState::Interrupted => egui::Color32::from_rgb(230, 120, 120),
+        TaskState::Cancelled => egui::Color32::from_rgb(200, 180, 120),
+        TaskState::Running => egui::Color32::from_rgb(120, 170, 240),
+        TaskState::Pending | TaskState::Paused => egui::Color32::GRAY,
+    }
 }

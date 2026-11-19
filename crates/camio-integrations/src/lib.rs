@@ -18,7 +18,8 @@ pub mod subfinder;
 pub use registry::{probe_tool, registry, ToolInfo, ToolStatus, KNOWN_TOOLS};
 
 pub use nuclei::{
-    nuclei_to_findings, parse_nuclei_jsonl, run_nuclei, NucleiFinding, NucleiOptions,
+    nuclei_to_findings, parse_nuclei_jsonl, run_nuclei, run_nuclei_cancellable, NucleiFinding,
+    NucleiOptions,
 };
 pub use subfinder::{
     parse_subfinder_jsonl, run_subfinder, unique_hosts, Subdomain, SubfinderOptions,

@@ -916,6 +916,7 @@ dependencies = [
  "camio-scan",
  "camio-sequencer",
  "camio-store",
+ "camio-tasks",
  "eframe",
  "egui",
  "image",
@@ -1096,6 +1097,13 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "url",
+]
+
+[[package]]
+name = "camio-tasks"
+version = "0.0.1"
+dependencies = [
+ "camio-core",
 ]
 
 [[package]]

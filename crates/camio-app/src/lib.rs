@@ -211,9 +211,10 @@ struct CamioApp {
     // analyze-js / active-scan
     js_blob: String,
     active_save: bool,
-    // nuclei (external) runner, on a background thread
+    // nuclei (external) runner, as a tracked background task
     nuclei_url: String,
-    nuclei_pending: Option<mpsc::Receiver<Result<usize, String>>>,
+    // background-task runtime (F03): long ops run here with progress + cancel
+    tasks: camio_tasks::TaskManager,
     // intercepting proxy (runs on a background thread via a stoppable handle)
     proxy_listen: String,
     proxy_tls: bool,
@@ -306,7 +307,7 @@ impl CamioApp {
             js_blob: String::new(),
             active_save: true,
             nuclei_url: String::new(),
-            nuclei_pending: None,
+            tasks: camio_tasks::TaskManager::new(),
             proxy_listen: "127.0.0.1:8080".to_string(),
             proxy_tls: false,
             proxy_auto_scan: true,
@@ -1783,9 +1784,10 @@ impl CamioApp {
         }
     }
 
-    /// Run Nuclei (external) on a background thread against an in-scope target,
-    /// saving the normalized findings to the workspace store.
-    fn start_nuclei(&mut self, ctx: &egui::Context) {
+    /// Run Nuclei (external) as a tracked background task against an in-scope
+    /// target, saving the normalized findings to the workspace store. The task
+    /// shows up (with progress message + Cancel) on the Tasks surface.
+    fn start_nuclei(&mut self) {
         let url = self.nuclei_url.trim().to_string();
         if url.is_empty() {
             return;
@@ -1802,55 +1804,30 @@ impl CamioApp {
             return;
         }
         let db = self.cfg.db.clone();
-        let (tx, rx) = mpsc::channel();
-        self.nuclei_pending = Some(rx);
-        let ctx = ctx.clone();
-        std::thread::spawn(move || {
+        let id = self.tasks.spawn("nuclei", move |ctx| {
+            ctx.set_message(format!("scanning {url}"));
             let opts = camio_integrations::NucleiOptions {
                 timeout: std::time::Duration::from_secs(300),
                 ..Default::default()
             };
-            let res = match camio_integrations::run_nuclei(std::slice::from_ref(&url), &opts) {
-                Ok(raw) => {
-                    let findings = camio_integrations::nuclei_to_findings(&raw);
-                    match Store::open(&db) {
-                        Ok(mut store) => store
-                            .insert_findings(&findings)
-                            .map(|_| findings.len())
-                            .map_err(|e| e.to_string()),
-                        Err(e) => Err(e.to_string()),
-                    }
-                }
-                Err(camio_integrations::IntegrationError::NotInstalled(_)) => {
-                    Err("nuclei is not installed or not on PATH".to_string())
-                }
-                Err(e) => Err(e.to_string()),
-            };
-            let _ = tx.send(res);
-            ctx.request_repaint();
+            let raw = camio_integrations::run_nuclei_cancellable(
+                std::slice::from_ref(&url),
+                &opts,
+                || ctx.is_cancelled(),
+            )
+            .map_err(|e| e.to_string())?;
+            let findings = camio_integrations::nuclei_to_findings(&raw);
+            let n = findings.len();
+            let mut store = Store::open(&db).map_err(|e| e.to_string())?;
+            store
+                .insert_findings(&findings)
+                .map_err(|e| e.to_string())?;
+            Ok(format!("{n} finding(s) saved to {}", db.display()))
         });
-    }
-
-    fn poll_nuclei(&mut self, ctx: &egui::Context) {
-        if let Some(rx) = &self.nuclei_pending {
-            match rx.try_recv() {
-                Ok(res) => {
-                    self.out = match res {
-                        Ok(n) => Output::Text(format!(
-                            "Nuclei finished: {n} finding(s) saved to {}",
-                            self.cfg.db.display()
-                        )),
-                        Err(e) => Output::Error(format!("Nuclei: {e}")),
-                    };
-                    self.nuclei_pending = None;
-                }
-                Err(mpsc::TryRecvError::Empty) => ctx.request_repaint(),
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    self.out = Output::Error("Nuclei run failed (worker thread ended)".into());
-                    self.nuclei_pending = None;
-                }
-            }
-        }
+        self.out = Output::Text(format!(
+            "Started Nuclei as task #{} — see the Tasks surface for progress.",
+            id.0
+        ));
     }
 
     fn browser_surface(&mut self, ui: &mut egui::Ui) {
@@ -2179,7 +2156,10 @@ impl eframe::App for CamioApp {
         self.theme.apply(ctx);
         self.sync_bg(ctx);
         self.poll_ai(ctx);
-        self.poll_nuclei(ctx);
+        // Keep the UI live while any background task runs.
+        if self.tasks.list().iter().any(|t| !t.is_terminal()) {
+            ctx.request_repaint_after(std::time::Duration::from_millis(400));
+        }
 
         self.poll_archive();
 

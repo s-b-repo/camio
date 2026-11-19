@@ -8,6 +8,15 @@ versioning once it reaches 1.0.
 
 ### Added
 
+- **Background-task runtime** (`camio-tasks`, plan §4.2/§F03): a thread-backed
+  `TaskManager` that returns a task ID immediately and tracks each job's state
+  (`camio_core::TaskState`), progress, status message, and distinct terminal
+  outcome (completed / failed / cancelled) with cooperative cancellation via a
+  `TaskContext`. The native app now runs **Nuclei as a tracked task** —
+  `run_nuclei_cancellable` kills the process on cancel — shown on the Tasks
+  surface with live progress and a Cancel button. (`TaskState` gains
+  `as_str`/`is_terminal`/`Display`.) Honest scope: in-process only; cross-restart
+  persistence/reconciliation builds on these records next.
 - **External-tool integrations** (`camio-integrations`): the start of the
   integration layer (plan §F16), with a **subfinder** adapter too — passive
   subdomain enumeration (`camio subfinder <domain>`) normalized to a deduplicated

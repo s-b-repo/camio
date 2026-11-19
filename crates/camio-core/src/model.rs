@@ -523,6 +523,37 @@ pub enum TaskState {
     Interrupted,
 }
 
+impl TaskState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TaskState::Pending => "pending",
+            TaskState::Running => "running",
+            TaskState::Paused => "paused",
+            TaskState::Completed => "completed",
+            TaskState::Cancelled => "cancelled",
+            TaskState::Failed => "failed",
+            TaskState::Interrupted => "interrupted",
+        }
+    }
+
+    /// Whether this is a terminal state (no further transitions).
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            TaskState::Completed
+                | TaskState::Cancelled
+                | TaskState::Failed
+                | TaskState::Interrupted
+        )
+    }
+}
+
+impl std::fmt::Display for TaskState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// A bounded, cancellable unit of automated work (crawl, campaign, scan).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Task {

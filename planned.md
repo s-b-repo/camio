@@ -51,7 +51,7 @@ Track each capability as `planned`, `in progress`, `partial`, `verified`, or `bl
 |---|---|---|---|---|
 | F01 | Projects, targets, settings, workspace persistence, backups, schema migrations | Partial | P0 | M0–M1 |
 | F02 | Shared scope, destination validation, action policy, approvals, rates, budgets, audit | Partial | P0 | M1 |
-| F03 | Durable background jobs, progress, cancellation, checkpoints, restart recovery | Planned | P0 | M1 |
+| F03 | Durable background jobs, progress, cancellation, checkpoints, restart recovery | Partial | P0 | M1 |
 | F04 | Managed browser lifecycle, isolated named profiles, snapshots, encrypted exports | Partial | P1 | M2, M6 |
 | F05 | Browser-native capture, request/response pause/edit/continue/drop/replay | Planned | P1 | M2 |
 | F06 | Measured fingerprint parity, profile versioning, truthful transport status | Partial | P0 | M0, M2 |

@@ -1,0 +1,13 @@
+[package]
+name = "camio-tasks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Camio's background-task runtime: a thread-backed task manager with states, progress, cooperative cancellation, and results (plan §4.2/§F03)."
+
+[dependencies]
+camio-core.workspace = true
+
+[dev-dependencies]
+camio-core.workspace = true
