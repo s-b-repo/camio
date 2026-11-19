@@ -78,7 +78,7 @@ pub use review::{ReviewCandidate, ReviewCounts, ReviewTask};
 pub use workflow::{ReviewPlan, ReviewWorkflow, WorkflowVersion, MAX_REVIEW_EXCHANGES};
 pub use workspace::{FindingReview, ReviewState, SavedExchange, SavedQuery, WorkspaceSummary};
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 /// Triage lifecycle for a finding (plan §F14). Additive: the `findings` rows are
 /// untouched; a finding with no row here is treated as `open`.
@@ -88,6 +88,15 @@ CREATE TABLE IF NOT EXISTS finding_status (
     status        TEXT NOT NULL,
     note          TEXT,
     updated_at_ms INTEGER NOT NULL
+);
+";
+
+/// Saved CamioQL searches (plan §F07).
+const SAVED_SEARCH_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS saved_search (
+    name          TEXT PRIMARY KEY,
+    query         TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL
 );
 ";
 
@@ -158,6 +167,10 @@ impl Store {
             if version < 5 {
                 tx.execute_batch(FINDING_STATUS_SCHEMA)
                     .context("creating finding-status (triage) schema")?;
+            }
+            if version < 6 {
+                tx.execute_batch(SAVED_SEARCH_SCHEMA)
+                    .context("creating saved-search schema")?;
             }
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             tx.commit()?;
@@ -422,6 +435,49 @@ impl Store {
             )
             .optional()?;
         Ok(row.map(|(s, n)| (FindingStatus::parse(&s).unwrap_or(FindingStatus::Open), n)))
+    }
+
+    /// Save (or overwrite) a named CamioQL search (plan §F07).
+    pub fn save_search(&mut self, name: &str, query: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO saved_search (name, query, created_at_ms) VALUES (?1, ?2, ?3)
+             ON CONFLICT(name) DO UPDATE SET query = excluded.query",
+            params![name, query, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    /// The CamioQL text of a saved search, if it exists.
+    pub fn saved_search(&self, name: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT query FROM saved_search WHERE name = ?1",
+                params![name],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?)
+    }
+
+    /// All saved searches as `(name, query)`, by name.
+    pub fn list_saved_searches(&self) -> Result<Vec<(String, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT name, query FROM saved_search ORDER BY name")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Delete a saved search; returns whether a row was removed.
+    pub fn delete_saved_search(&mut self, name: &str) -> Result<bool> {
+        let n = self
+            .conn
+            .execute("DELETE FROM saved_search WHERE name = ?1", params![name])?;
+        Ok(n > 0)
     }
 
     /// All findings with their triage status (default `Open`) and note.
@@ -696,6 +752,30 @@ mod tests {
         let (s2, note2) = store.finding_status(id).unwrap().unwrap();
         assert_eq!(s2, FindingStatus::FalsePositive);
         assert!(note2.is_none());
+    }
+
+    #[test]
+    fn saved_searches_roundtrip() {
+        let mut store = Store::open_in_memory().unwrap();
+        assert!(store.saved_search("5xx").unwrap().is_none());
+        store.save_search("5xx", "resp.code.gte:500").unwrap();
+        store.save_search("api", "req.host.cont:\"api\"").unwrap();
+        assert_eq!(
+            store.saved_search("5xx").unwrap().as_deref(),
+            Some("resp.code.gte:500")
+        );
+        // Overwrite.
+        store.save_search("5xx", "resp.code.gte:599").unwrap();
+        assert_eq!(
+            store.saved_search("5xx").unwrap().as_deref(),
+            Some("resp.code.gte:599")
+        );
+        let all = store.list_saved_searches().unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].0, "5xx"); // sorted by name
+        assert!(store.delete_saved_search("api").unwrap());
+        assert!(!store.delete_saved_search("api").unwrap());
+        assert_eq!(store.list_saved_searches().unwrap().len(), 1);
     }
 
     #[test]

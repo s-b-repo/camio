@@ -8,6 +8,11 @@ versioning once it reaches 1.0.
 
 ### Added
 
+- **Saved searches** (`camio-store`, `camio query`, plan §F07): name and store a
+  CamioQL query (`--save <name>`), run one (`--saved <name>`), list
+  (`--list-saved`), or delete (`--delete-saved <name>`) — in a new `saved_search`
+  table (schema migration **v5→v6**). Store API: `save_search` / `saved_search` /
+  `list_saved_searches` / `delete_saved_search`.
 - **Findings triage** (`camio-store`, `camio findings`, plan §F14): a finding
   lifecycle status (`open`/`confirmed`/`false_positive`/`fixed`/`ignored`) + note,
   in a new additive `finding_status` table (schema migration **v4→v5**). `camio

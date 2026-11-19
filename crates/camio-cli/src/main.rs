@@ -216,7 +216,7 @@ struct SendArgs {
 #[derive(Parser)]
 struct QueryArgs {
     /// CamioQL query, e.g. 'resp.code.gte:500 AND req.host.cont:"example"'.
-    query: String,
+    query: Option<String>,
     #[arg(long, default_value = "camio.db")]
     db: PathBuf,
     #[arg(long, default_value_t = 50)]
@@ -224,6 +224,18 @@ struct QueryArgs {
     /// Print full exchanges as JSON instead of a summary table.
     #[arg(long)]
     json: bool,
+    /// Save the given query under this name (plan §F07), then run it.
+    #[arg(long)]
+    save: Option<String>,
+    /// Run a previously saved query by name.
+    #[arg(long)]
+    saved: Option<String>,
+    /// List saved searches and exit.
+    #[arg(long)]
+    list_saved: bool,
+    /// Delete a saved search by name and exit.
+    #[arg(long)]
+    delete_saved: Option<String>,
 }
 
 #[derive(Parser)]
@@ -605,8 +617,44 @@ fn open_store(db: &PathBuf) -> Result<Store> {
 }
 
 fn query_cmd(args: QueryArgs) -> Result<()> {
-    let store = open_store(&args.db)?;
-    let query = Query::compile(&args.query).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let mut store = open_store(&args.db)?;
+
+    if args.list_saved {
+        for (name, q) in store.list_saved_searches()? {
+            println!("  {name:<20} {q}");
+        }
+        return Ok(());
+    }
+    if let Some(name) = &args.delete_saved {
+        let removed = store.delete_saved_search(name)?;
+        println!(
+            "{}",
+            if removed {
+                format!("deleted saved search `{name}`")
+            } else {
+                format!("no saved search named `{name}`")
+            }
+        );
+        return Ok(());
+    }
+
+    // Resolve the query text: a saved search, or the positional query.
+    let query_text = if let Some(name) = &args.saved {
+        store
+            .saved_search(name)?
+            .ok_or_else(|| anyhow::anyhow!("no saved search named `{name}`"))?
+    } else {
+        args.query
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("provide a CamioQL query, or --saved <name>"))?
+    };
+
+    if let Some(name) = &args.save {
+        store.save_search(name, &query_text)?;
+        eprintln!("saved search `{name}` = {query_text}");
+    }
+
+    let query = Query::compile(&query_text).map_err(|e| anyhow::anyhow!("{e}"))?;
     let results = store.query(&query, args.limit)?;
     print_exchange_list(&results, args.json)
 }
