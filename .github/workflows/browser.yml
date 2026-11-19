@@ -45,12 +45,21 @@ jobs:
 
       - name: Install build prerequisites
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            git python3 python3-pip mercurial curl zip unzip \
-            build-essential clang llvm pkg-config nodejs npm \
-            libgtk-3-dev libdbus-glib-1-dev libasound2-dev \
-            libpulse-dev libx11-xcb-dev m4 nasm
+          # Node is already on the runner and `./mach bootstrap` installs the
+          # rest of Firefox's toolchain — so do NOT pull `npm` from apt (its huge
+          # node-* dependency tree is what flaked on security.ubuntu.com before).
+          # Retry transient mirror hiccups rather than failing the whole build.
+          sudo apt-get update -o Acquire::Retries=5
+          for attempt in 1 2 3; do
+            sudo apt-get install -y --no-install-recommends \
+              -o Acquire::Retries=5 --fix-missing \
+              git python3 python3-pip mercurial curl zip unzip \
+              build-essential clang llvm pkg-config \
+              libgtk-3-dev libdbus-glib-1-dev libasound2-dev \
+              libpulse-dev libx11-xcb-dev m4 nasm && break
+            echo "apt attempt $attempt failed; retrying after a pause"; sleep 20
+          done
+          node --version && python3 --version
 
       - name: Build the fork (LibreWolf + Camoufox + Camio branding)
         working-directory: browser
