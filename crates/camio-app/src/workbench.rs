@@ -1188,6 +1188,42 @@ impl CamioApp {
     }
 
     pub(super) fn integrations_ui(&mut self, ui: &mut egui::Ui) {
+        // Run Nuclei (external) directly, on a background thread.
+        ui.heading("Run Nuclei (external)");
+        let running = self.nuclei_pending.is_some();
+        ui.horizontal(|ui| {
+            ui.label("Target URL");
+            ui.add_enabled(
+                !running,
+                egui::TextEdit::singleline(&mut self.nuclei_url)
+                    .hint_text("https://authorized-target")
+                    .desired_width(260.0),
+            );
+            if ui
+                .add_enabled(
+                    !running && !self.nuclei_url.trim().is_empty(),
+                    egui::Button::new("▶ Run Nuclei"),
+                )
+                .clicked()
+            {
+                self.start_nuclei(ui.ctx());
+            }
+            if running {
+                ui.spinner();
+                ui.label("scanning…");
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(400));
+            }
+        });
+        ui.label(
+            egui::RichText::new(
+                "Scope-gated; normalized findings are saved to this workspace. Requires nuclei on PATH.",
+            )
+            .weak()
+            .size(11.0),
+        );
+        ui.separator();
+
         ui.heading("Integration evidence");
         ui.label("Import existing httpx or Nuclei JSONL. Other reports can be stored as raw text.");
         egui::ComboBox::from_id_salt("artifact-format")

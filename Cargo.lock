@@ -910,6 +910,7 @@ dependencies = [
  "camio-core",
  "camio-engine",
  "camio-import",
+ "camio-integrations",
  "camio-proxy",
  "camio-request",
  "camio-scan",

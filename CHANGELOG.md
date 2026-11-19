@@ -16,7 +16,8 @@ versioning once it reaches 1.0.
   the detail; no fabricated exchange evidence). The parser is pure and
   fixture-tested; `camio nuclei <url>` is scope- and policy-gated (active,
   `--confirm`) and can `--save` findings. A missing binary is reported, never a
-  crash.
+  crash. The native app's **Integrations** surface can also run Nuclei on a
+  background thread (scope-gated) and save the normalized findings.
 - **Self-hosted OAST collector** (`camio-oast`, `camio oast`): a local-first
   analog of Burp's (paid, cloud) Collaborator. A small HTTP listener mints
   hard-to-guess correlation tokens, records every out-of-band callback (SSRF,

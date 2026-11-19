@@ -211,6 +211,9 @@ struct CamioApp {
     // analyze-js / active-scan
     js_blob: String,
     active_save: bool,
+    // nuclei (external) runner, on a background thread
+    nuclei_url: String,
+    nuclei_pending: Option<mpsc::Receiver<Result<usize, String>>>,
     // intercepting proxy (runs on a background thread via a stoppable handle)
     proxy_listen: String,
     proxy_tls: bool,
@@ -302,6 +305,8 @@ impl CamioApp {
             ai_pending: None,
             js_blob: String::new(),
             active_save: true,
+            nuclei_url: String::new(),
+            nuclei_pending: None,
             proxy_listen: "127.0.0.1:8080".to_string(),
             proxy_tls: false,
             proxy_auto_scan: true,
@@ -1778,6 +1783,76 @@ impl CamioApp {
         }
     }
 
+    /// Run Nuclei (external) on a background thread against an in-scope target,
+    /// saving the normalized findings to the workspace store.
+    fn start_nuclei(&mut self, ctx: &egui::Context) {
+        let url = self.nuclei_url.trim().to_string();
+        if url.is_empty() {
+            return;
+        }
+        let decision = self
+            .cfg
+            .scope
+            .decide(&HttpExchange::new(HttpRequest::get(&url), Source::Scanner));
+        if !decision.is_sendable() {
+            self.out = Output::Error(format!(
+                "target is {} — only in-scope targets may be scanned",
+                decision.as_str()
+            ));
+            return;
+        }
+        let db = self.cfg.db.clone();
+        let (tx, rx) = mpsc::channel();
+        self.nuclei_pending = Some(rx);
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let opts = camio_integrations::NucleiOptions {
+                timeout: std::time::Duration::from_secs(300),
+                ..Default::default()
+            };
+            let res = match camio_integrations::run_nuclei(std::slice::from_ref(&url), &opts) {
+                Ok(raw) => {
+                    let findings = camio_integrations::nuclei_to_findings(&raw);
+                    match Store::open(&db) {
+                        Ok(mut store) => store
+                            .insert_findings(&findings)
+                            .map(|_| findings.len())
+                            .map_err(|e| e.to_string()),
+                        Err(e) => Err(e.to_string()),
+                    }
+                }
+                Err(camio_integrations::IntegrationError::NotInstalled(_)) => {
+                    Err("nuclei is not installed or not on PATH".to_string())
+                }
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = tx.send(res);
+            ctx.request_repaint();
+        });
+    }
+
+    fn poll_nuclei(&mut self, ctx: &egui::Context) {
+        if let Some(rx) = &self.nuclei_pending {
+            match rx.try_recv() {
+                Ok(res) => {
+                    self.out = match res {
+                        Ok(n) => Output::Text(format!(
+                            "Nuclei finished: {n} finding(s) saved to {}",
+                            self.cfg.db.display()
+                        )),
+                        Err(e) => Output::Error(format!("Nuclei: {e}")),
+                    };
+                    self.nuclei_pending = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => ctx.request_repaint(),
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.out = Output::Error("Nuclei run failed (worker thread ended)".into());
+                    self.nuclei_pending = None;
+                }
+            }
+        }
+    }
+
     fn browser_surface(&mut self, ui: &mut egui::Ui) {
         ui.heading("Open in managed browser");
         ui.label("Launches a LibreWolf / Camoufox (Firefox-fork) browser with Camio's fingerprint profile applied, so browsing and tool traffic share one identity. Marionette makes the browser agent-drivable.");
@@ -2104,6 +2179,7 @@ impl eframe::App for CamioApp {
         self.theme.apply(ctx);
         self.sync_bg(ctx);
         self.poll_ai(ctx);
+        self.poll_nuclei(ctx);
 
         self.poll_archive();
 
