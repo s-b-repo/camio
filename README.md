@@ -139,9 +139,10 @@ problem, and measures fingerprint parity rather than claiming undetectability.
   (fingerprint status, history, findings) and tools for CamioQL query, scope
   check, policy-gated send, convert, scan, sequencer, input discovery, site map,
   fuzz planning, file import, payload listing, a policy-gated **active_scan**,
-  **analyze_js**, and **OAST** (`oast_new_token` / `oast_interactions`, so an
-  agent can plant a correlated callback and read the out-of-band hits) — all
-  under the same policy as the CLI. Passive reviews also expose task IDs,
+  **analyze_js**, **OAST** (`oast_new_token` / `oast_interactions`, so an
+  agent can plant a correlated callback and read the out-of-band hits), and
+  **subfinder_enum** (passive subdomain recon) — all under the same policy as
+  the CLI. Passive reviews also expose task IDs,
   paginated results, cancellation, and redacted finding reports.
 - **Native desktop app** (`camio-app`): `camio app` opens a real egui/eframe
   window (no Electron, no bundled JS runtime) with a **Burp-style top tool-tab

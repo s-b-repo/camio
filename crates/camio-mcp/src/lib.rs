@@ -189,6 +189,7 @@ impl McpServer {
             "analyze_js" => self.tool_analyze_js(&args),
             "oast_new_token" => self.tool_oast_new_token(),
             "oast_interactions" => self.tool_oast_interactions(&args),
+            "subfinder_enum" => self.tool_subfinder(&args),
             other => Err(format!("unknown tool: {other}")),
         };
         match result {
@@ -271,6 +272,32 @@ impl McpServer {
             "base": st.base,
             "note": "Plant callback_url in a payload (SSRF/blind injection), then poll oast_interactions with this token. Loopback base: only callbacks the target can route here are seen."
         }))
+    }
+
+    /// Enumerate subdomains of a domain with subfinder (external, passive OSINT).
+    fn tool_subfinder(&self, args: &Value) -> Result<Value, String> {
+        let domain = args
+            .get("domain")
+            .and_then(|d| d.as_str())
+            .ok_or("missing `domain`")?
+            .to_string();
+        let timeout_secs = args
+            .get("timeout_secs")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(60)
+            .clamp(5, 180);
+        let opts = camio_integrations::SubfinderOptions {
+            all_sources: args
+                .get("all_sources")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            timeout: std::time::Duration::from_secs(timeout_secs),
+            ..Default::default()
+        };
+        let subs = camio_integrations::run_subfinder(std::slice::from_ref(&domain), &opts)
+            .map_err(|e| e.to_string())?;
+        let hosts = camio_integrations::unique_hosts(&subs);
+        Ok(json!({ "domain": domain, "count": hosts.len(), "hosts": hosts }))
     }
 
     /// List recorded OAST interactions, optionally filtered to one token.
@@ -1138,6 +1165,19 @@ fn tool_defs() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": { "token": { "type": "string", "description": "Correlation token from oast_new_token; omit for all interactions." } }
+            }
+        },
+        {
+            "name": "subfinder_enum",
+            "description": "Enumerate subdomains of a domain with subfinder (external, passive OSINT). Bounded run; returns the unique host list. Requires subfinder on PATH.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "domain": { "type": "string", "description": "Root domain, e.g. example.com" },
+                    "all_sources": { "type": "boolean" },
+                    "timeout_secs": { "type": "integer", "minimum": 5, "maximum": 180 }
+                },
+                "required": ["domain"]
             }
         },
         {
