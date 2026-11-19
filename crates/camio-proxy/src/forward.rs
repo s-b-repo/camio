@@ -10,7 +10,7 @@
 
 use crate::{ForwardError, Forwarder};
 use camio_core::{FingerprintProfile, HttpExchange, HttpRequest, Source};
-use camio_request::matched_engine;
+use camio_request::matched_engine_with_proxy;
 use std::sync::mpsc;
 use std::sync::Mutex;
 
@@ -30,12 +30,23 @@ impl EngineForwarder {
     /// thread (its trait object is not `Send`), so this returns only once the
     /// engine has been constructed — surfacing a build error eagerly.
     pub fn spawn(profile: FingerprintProfile) -> Result<Self, ForwardError> {
+        Self::spawn_with_proxy(profile, None)
+    }
+
+    /// Like [`spawn`](Self::spawn) but routes upstream traffic through a chained
+    /// proxy (`http://…` or `socks5://…`). Only the engine-forwarded paths (plain
+    /// HTTP and TLS-intercepted HTTPS) traverse it; blind-relayed HTTPS and
+    /// WebSocket connections go direct.
+    pub fn spawn_with_proxy(
+        profile: FingerprintProfile,
+        upstream_proxy: Option<String>,
+    ) -> Result<Self, ForwardError> {
         let (tx, rx) = mpsc::channel::<Job>();
         let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
         std::thread::Builder::new()
             .name("camio-proxy-engine".into())
             .spawn(move || {
-                let engine = match matched_engine(&profile) {
+                let engine = match matched_engine_with_proxy(&profile, upstream_proxy.as_deref()) {
                     Ok(e) => {
                         let _ = ready_tx.send(Ok(()));
                         e

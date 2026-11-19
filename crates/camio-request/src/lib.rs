@@ -40,15 +40,25 @@ use camio_core::FingerprintProfile;
 pub fn matched_engine(
     profile: &FingerprintProfile,
 ) -> Result<Box<dyn RequestEngine>, RequestError> {
+    matched_engine_with_proxy(profile, None)
+}
+
+/// Like [`matched_engine`] but routes all outbound traffic through an upstream
+/// proxy (e.g. `http://127.0.0.1:8080` to chain through Burp/ZAP, or a
+/// `socks5://` URL with the `socks` feature). The fingerprint is unchanged.
+pub fn matched_engine_with_proxy(
+    profile: &FingerprintProfile,
+    upstream_proxy: Option<&str>,
+) -> Result<Box<dyn RequestEngine>, RequestError> {
     let spec = FingerprintSpec::from_profile(profile);
     #[cfg(feature = "impersonate")]
     {
-        let engine = impersonate::ImpersonatingEngine::new(spec)?;
+        let engine = impersonate::ImpersonatingEngine::new_with_proxy(spec, upstream_proxy)?;
         Ok(Box::new(engine))
     }
     #[cfg(not(feature = "impersonate"))]
     {
-        let _ = &spec;
+        let _ = (&spec, upstream_proxy);
         Err(RequestError::Unavailable(
             "built without the `impersonate` feature; use DryRunEngine".into(),
         ))

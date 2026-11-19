@@ -39,6 +39,17 @@ pub struct ImpersonatingEngine {
 
 impl ImpersonatingEngine {
     pub fn new(spec: FingerprintSpec) -> Result<Self, RequestError> {
+        Self::new_with_proxy(spec, None)
+    }
+
+    /// Build the engine, optionally routing all outbound traffic through an
+    /// upstream proxy (e.g. `http://127.0.0.1:8080` to chain through Burp/ZAP, or
+    /// `socks5://…` with the `socks` feature). The fingerprint is unchanged — the
+    /// upstream proxy only changes the egress path.
+    pub fn new_with_proxy(
+        spec: FingerprintSpec,
+        upstream_proxy: Option<&str>,
+    ) -> Result<Self, RequestError> {
         let (profile, preset_major) = pick_firefox_emulation(spec.major_version);
         let exact_preset = preset_major == spec.major_version;
         let preset_label = format!("firefox/{preset_major}");
@@ -48,16 +59,27 @@ impl ImpersonatingEngine {
             .build()
             .map_err(|e| RequestError::Unavailable(format!("tokio runtime: {e}")))?;
 
+        let proxy =
+            match upstream_proxy {
+                Some(url) => Some(wreq::Proxy::all(url).map_err(|e| {
+                    RequestError::Unavailable(format!("invalid upstream proxy: {e}"))
+                })?),
+                None => None,
+            };
+
         let client = rt
             .block_on(async {
-                Client::builder()
+                let mut builder = Client::builder()
                     .emulation(profile)
                     // Camio controls redirects (in-scope-only policy lives above
                     // the engine, plan §9): capture the 3xx, don't auto-follow.
                     .redirect(Policy::none())
                     .connect_timeout(Duration::from_secs(15))
-                    .timeout(Duration::from_secs(30))
-                    .build()
+                    .timeout(Duration::from_secs(30));
+                if let Some(proxy) = proxy {
+                    builder = builder.proxy(proxy);
+                }
+                builder.build()
             })
             .map_err(|e| RequestError::Transport(format!("building client: {e}")))?;
 

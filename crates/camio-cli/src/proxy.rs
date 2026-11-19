@@ -66,6 +66,12 @@ pub struct ProxyArgs {
     /// and store its findings. Out-of-scope traffic is recorded but never tested.
     #[arg(long)]
     auto_scan: bool,
+    /// Chain upstream traffic through another proxy (e.g. http://127.0.0.1:8081
+    /// for Burp/ZAP, or socks5://… with the engine's `socks` feature). Applies to
+    /// engine-forwarded traffic (plain HTTP + TLS-intercepted HTTPS); blind-relay
+    /// and WebSocket go direct.
+    #[arg(long)]
+    upstream_proxy: Option<String>,
     /// Suppress the per-exchange capture log line.
     #[arg(long)]
     quiet: bool,
@@ -107,7 +113,10 @@ pub fn run(args: ProxyArgs) -> Result<()> {
         ..ProxyConfig::default()
     };
 
-    let forwarder = Arc::new(EngineForwarder::spawn(profile).map_err(|e| anyhow::anyhow!("{e}"))?);
+    let forwarder = Arc::new(
+        EngineForwarder::spawn_with_proxy(profile, args.upstream_proxy.clone())
+            .map_err(|e| anyhow::anyhow!("{e}"))?,
+    );
     let store = Store::open(&args.db).with_context(|| format!("opening {}", args.db.display()))?;
     let sink = Arc::new(StoreSink::new(store, !args.quiet, args.auto_scan));
     let interceptor: Arc<dyn Interceptor> = Arc::new(AutoForward);
@@ -136,6 +145,9 @@ pub fn run(args: ProxyArgs) -> Result<()> {
     eprintln!("Camio proxy listening on {local}");
     eprintln!("  capture database : {}", args.db.display());
     eprintln!("  fingerprint      : {} preset", args.preset.label());
+    if let Some(up) = &args.upstream_proxy {
+        eprintln!("  upstream proxy   : {up} (engine-forwarded traffic only)");
+    }
     eprintln!(
         "  auto-scan        : {}",
         if args.auto_scan {

@@ -47,6 +47,11 @@ versioning once it reaches 1.0.
   - **Scope-aware automation:** `--auto-scan` runs the passive scanner on every
     **in-scope** captured exchange and stores its findings as traffic flows;
     out-of-scope traffic is still recorded but never scanned or attacked.
+  - **Upstream (chained) proxy:** `--upstream-proxy http://… | socks5://…` routes
+    engine-forwarded traffic through another proxy (chain through Burp/ZAP or a
+    corporate egress) without changing the fingerprint. New
+    `camio_request::matched_engine_with_proxy` /
+    `EngineForwarder::spawn_with_proxy`. Blind-relay and WebSocket go direct.
   - **WebSocket:** a plain `ws://` upgrade is scope-gated, recorded as metadata,
     then raw-relayed to the origin so the connection works through the proxy;
     `wss://` is preserved by the default blind-relay, and under `--tls-intercept`
