@@ -93,6 +93,12 @@ correlation tokens and records out-of-band callbacks (SSRF, blind XXE, webhooks,
 DNS-style host exfil), correlating each hit to its token. \fB\-\-tokens N\fR
 prints sample callback URLs instead of serving.
 .TP
+.B nuclei \fIURL\fR
+Run Nuclei (external, optional) against an authorized target as a bounded
+subprocess and normalize its JSONL results into Camio findings. Scope- and
+policy-gated: needs an in-scope target and \fB\-\-confirm\fR; \fB\-\-save\fR
+persists the findings.
+.TP
 .B app
 Launch the native desktop workbench (egui). Every capability in one window, with
 customizable themes, a plugin system, and an "Open in browser" launcher.

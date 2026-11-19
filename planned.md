@@ -64,7 +64,7 @@ Track each capability as `planned`, `in progress`, `partial`, `verified`, or `bl
 | F13 | Passive/active scanner profiles, sessions, exclusions, reproducible evidence | Partial | P1 | M4–M6 |
 | F14 | Findings triage, cross-run/tool correlation, notes, retest, reports | Partial | P1 | M3–M5 |
 | F15 | Self-hosted OAST collection, interaction correlation and retention | Partial | P2 | M6–M7 |
-| F16 | Integration registry, httpx, Nuclei, Rustploit, compatibility fixtures | Planned | P1 | M3–M5 |
+| F16 | Integration registry, httpx, Nuclei, Rustploit, compatibility fixtures | Partial | P1 | M3–M5 |
 | F17 | Convert, Comparer, JWT, Sequencer sampling/reporting, reusable transforms | Partial | P2 | M2, M6 |
 | F18 | Organizer/Library: saved exchanges, labels, notes, packs, profiles, extensions | Partial | P2 | M2, M6 |
 | F19 | Burp/HAR migration, rule import, format-supported Caido migration | Partial | P2 | M6 |

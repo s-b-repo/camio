@@ -944,6 +944,7 @@ dependencies = [
  "camio-core",
  "camio-engine",
  "camio-import",
+ "camio-integrations",
  "camio-mcp",
  "camio-oast",
  "camio-proxy",
@@ -998,6 +999,15 @@ dependencies = [
  "base64 0.22.1",
  "camio-core",
  "quick-xml 0.41.0",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "camio-integrations"
+version = "0.0.1"
+dependencies = [
+ "camio-core",
  "serde",
  "serde_json",
 ]

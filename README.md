@@ -195,6 +195,7 @@ crates/
   camio-ai/        Optional OpenAI-compatible assistant (BYO key)
   camio-proxy/     Intercepting HTTP/HTTPS proxy (scope-gated, TLS MITM, intercept queue)
   camio-oast/      Self-hosted OAST collector (out-of-band callback correlation)
+  camio-integrations/ External-tool adapters (Nuclei): bounded runner + normalizer
   camio-app/       Native desktop workbench (egui/eframe)
   camio-web/       Local loopback web UI (serves every capability)
   camio-mcp/       Local MCP server (stdio JSON-RPC)
@@ -301,6 +302,9 @@ cargo run -p camio-cli -- proxy --tls-intercept --db camio.db \
 # Self-hosted OAST: run a collector for blind callbacks, or print sample URLs.
 cargo run -p camio-cli -- oast --listen 0.0.0.0:8888 --base oast.your-host.tld:8888
 cargo run -p camio-cli -- oast --tokens 3     # print correlation tokens + callback URLs
+
+# Run Nuclei (external, optional) against an AUTHORIZED target; normalize + save.
+cargo run -p camio-cli -- nuclei https://target.example.com --tag tech --confirm --save
 
 # Launch the native desktop app — every capability in one window
 cargo run -p camio-cli -- app

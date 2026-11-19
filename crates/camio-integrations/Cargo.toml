@@ -1,0 +1,15 @@
+[package]
+name = "camio-integrations"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Camio adapters for external security tools (Nuclei, httpx): bounded subprocess runners that normalize tool output into Camio's findings/assets (plan §F16)."
+
+[dependencies]
+camio-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+camio-core.workspace = true

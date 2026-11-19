@@ -8,6 +8,15 @@ versioning once it reaches 1.0.
 
 ### Added
 
+- **External-tool integrations** (`camio-integrations`): the start of the
+  integration layer (plan §F16). A **Nuclei** adapter runs ProjectDiscovery's
+  template scanner as a *bounded* subprocess — overall timeout with process kill,
+  16 MiB stdout cap, update-check and public OOB server disabled — and normalizes
+  its JSONL into Camio findings (severity mapped, matched-URL/template/tags in
+  the detail; no fabricated exchange evidence). The parser is pure and
+  fixture-tested; `camio nuclei <url>` is scope- and policy-gated (active,
+  `--confirm`) and can `--save` findings. A missing binary is reported, never a
+  crash.
 - **Self-hosted OAST collector** (`camio-oast`, `camio oast`): a local-first
   analog of Burp's (paid, cloud) Collaborator. A small HTTP listener mints
   hard-to-guess correlation tokens, records every out-of-band callback (SSRF,

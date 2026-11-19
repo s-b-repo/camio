@@ -18,6 +18,7 @@ members = [
     "crates/camio-ai",
     "crates/camio-proxy",
     "crates/camio-oast",
+    "crates/camio-integrations",
     "crates/camio-web",
     "crates/camio-app",
     "crates/camio-mcp",
@@ -89,6 +90,7 @@ camio-active = { path = "crates/camio-active", version = "0.0.1" }
 camio-ai = { path = "crates/camio-ai", version = "0.0.1" }
 camio-proxy = { path = "crates/camio-proxy", version = "0.0.1" }
 camio-oast = { path = "crates/camio-oast", version = "0.0.1" }
+camio-integrations = { path = "crates/camio-integrations", version = "0.0.1" }
 camio-web = { path = "crates/camio-web", version = "0.0.1" }
 camio-app = { path = "crates/camio-app", version = "0.0.1" }
 camio-mcp = { path = "crates/camio-mcp", version = "0.0.1" }

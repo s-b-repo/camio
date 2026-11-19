@@ -95,6 +95,8 @@ enum Command {
     Proxy(proxy::ProxyArgs),
     /// Self-hosted OAST collector (a local Burp-Collaborator analog for blind callbacks).
     Oast(OastArgs),
+    /// Run Nuclei (external) against an authorized target and normalize its findings.
+    Nuclei(NucleiArgs),
     /// Review stored traffic, import evidence, and manage the workspace.
     Workbench(workbench::Args),
     /// Verify checksums and evidence references in an exported review bundle.
@@ -359,6 +361,7 @@ fn main() -> Result<()> {
         Command::Ui(args) => ui_cmd(args),
         Command::Proxy(args) => proxy::run(args),
         Command::Oast(args) => oast_cmd(args),
+        Command::Nuclei(args) => nuclei_cmd(args),
         Command::Workbench(args) => workbench::run(args),
         Command::VerifyBundle { file } => workbench::verify_bundle(&file),
         Command::Mcp { action } => match action {
@@ -1460,6 +1463,109 @@ fn oast_cmd(args: OastArgs) -> Result<()> {
     server
         .serve_with_listener(listener)
         .context("serving OAST collector")?;
+    Ok(())
+}
+
+// ===========================================================================
+// Nuclei integration (external tool)
+// ===========================================================================
+
+#[derive(Parser)]
+struct NucleiArgs {
+    /// Authorized target URL to scan.
+    url: String,
+    /// Limit to these severities (repeatable): info|low|medium|high|critical.
+    #[arg(long = "severity")]
+    severities: Vec<String>,
+    /// Limit to templates with these tags (repeatable).
+    #[arg(long = "tag")]
+    tags: Vec<String>,
+    /// Requests-per-second cap passed to Nuclei.
+    #[arg(long)]
+    rate_limit: Option<u32>,
+    /// Overall timeout in seconds; Nuclei is killed if it runs longer.
+    #[arg(long, default_value_t = 300)]
+    timeout_secs: u64,
+    #[arg(long, value_enum, default_value_t = Preset::Balanced)]
+    preset: Preset,
+    #[arg(long = "scope-include")]
+    scope_include: Vec<String>,
+    #[arg(long = "scope-exclude")]
+    scope_exclude: Vec<String>,
+    #[arg(long)]
+    allow_private: bool,
+    /// Actually run Nuclei. Without this, prints what would run.
+    #[arg(long)]
+    confirm: bool,
+    #[arg(long, default_value = "camio.db")]
+    db: PathBuf,
+    /// Persist the normalized findings to the findings store.
+    #[arg(long)]
+    save: bool,
+    #[arg(long)]
+    json: bool,
+    /// Extra args passed verbatim to nuclei (after `--`), e.g. -t a-template.
+    #[arg(last = true)]
+    extra: Vec<String>,
+}
+
+fn nuclei_cmd(args: NucleiArgs) -> Result<()> {
+    let scope = build_scope(&args.scope_include, &args.scope_exclude, args.allow_private)?;
+    let base = HttpRequest::get(&args.url);
+    let decision = scope.decide(&HttpExchange::new(base.clone(), Source::Scanner));
+
+    // Nuclei actively probes: in scope + explicit confirmation (plan §16).
+    let policy = Policy {
+        allow_active: true,
+        allow_destructive: false,
+        require_confirmation: true,
+    };
+    match policy.gate(ActionClass::Active, decision, args.confirm) {
+        PolicyOutcome::Deny(reason) => bail!("refused: {reason}"),
+        PolicyOutcome::NeedsConfirmation(reason) => {
+            println!("{reason}.");
+            println!(
+                "Would run Nuclei against {} (scope {}). Re-run with --confirm (authorized targets only).",
+                args.url,
+                decision.as_str()
+            );
+            return Ok(());
+        }
+        PolicyOutcome::Allow => {}
+    }
+
+    let opts = camio_integrations::NucleiOptions {
+        severities: args.severities.clone(),
+        tags: args.tags.clone(),
+        rate_limit: args.rate_limit,
+        timeout: std::time::Duration::from_secs(args.timeout_secs),
+        extra_args: args.extra.clone(),
+    };
+    eprintln!(
+        "running nuclei against {} (timeout {}s)…",
+        args.url, args.timeout_secs
+    );
+    let raw = match camio_integrations::run_nuclei(std::slice::from_ref(&args.url), &opts) {
+        Ok(r) => r,
+        Err(camio_integrations::IntegrationError::NotInstalled(_)) => {
+            bail!("nuclei is not installed or not on PATH; install it from https://github.com/projectdiscovery/nuclei")
+        }
+        Err(e) => bail!("nuclei run failed: {e}"),
+    };
+    let findings = camio_integrations::nuclei_to_findings(&raw);
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&findings)?);
+    } else {
+        print_findings(&findings);
+        println!("\n{} finding(s) from nuclei.", findings.len());
+    }
+    if args.save {
+        let mut store =
+            Store::open(&args.db).with_context(|| format!("opening {}", args.db.display()))?;
+        let n = store.insert_findings(&findings).unwrap_or(0);
+        eprintln!("saved {n} finding(s) to {}", args.db.display());
+    }
     Ok(())
 }
 
