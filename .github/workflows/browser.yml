@@ -95,9 +95,10 @@ jobs:
         if: always()
         run: |
           mkdir -p out
-          # LibreWolf's `make package` drops librewolf-*.tar.xz in the repo dir;
-          # also sweep obj-*/dist for any other packaged output.
-          find /mnt/camio-browser-build -maxdepth 2 -name 'librewolf-*.tar.*' \
+          # build.sh rebrands to camio-browser-*.tar.xz; also keep the raw
+          # librewolf-*.tar.xz and sweep obj-*/dist for any other packaged output.
+          find /mnt/camio-browser-build -maxdepth 2 \
+               \( -name 'camio-browser-*.tar.*' -o -name 'librewolf-*.tar.*' \) \
                -exec cp -v {} out/ \; 2>/dev/null || true
           find /mnt/camio-browser-build -path '*obj-*/dist/*' \
                \( -name '*.tar.*' -o -name '*.zip' -o -name '*.deb' \) \
@@ -121,7 +122,7 @@ jobs:
           # obj-*/dist. Fail honestly if none exists, so a green check means a
           # browser — not just "the workflow ran".
           if find /mnt/camio-browser-build \
-                  \( -name 'librewolf-*.tar.*' \
+                  \( -name 'camio-browser-*.tar.*' -o -name 'librewolf-*.tar.*' \
                      -o \( -path '*obj-*/dist/*' \
                            \( -name 'librewolf' -o -name 'firefox' \
                               -o -name '*.tar.*' -o -name '*.zip' \) \) \) \

@@ -54,15 +54,35 @@ the runner's disk, adds swap, installs the toolchain, runs `build.sh --full`, an
 uploads the `camio-browser` artifact.
 
 This **builds end-to-end in ~1h35m** on a stock `ubuntu-latest` runner and
-produces `librewolf-<version>.en-US.linux-x86_64.tar.xz` (~103 MB). Two things
-make it fit a 16 GB / 4-core runner: a **16 GB swapfile** and
+produces **`camio-browser-<version>.en-US.linux-x86_64.tar.xz`** (~103 MB) — a
+rebranded LibreWolf with the black/blue theme and extra hardening **baked in**
+(see "What's baked in" below); the raw `librewolf-*.tar.xz` is kept too. Two
+things make it fit a 16 GB / 4-core runner: a **16 GB swapfile** and
 **`--disable-debug-symbols`** — Firefox's `dom/bindings` / `dom/canvas` TUs OOM
-the runner otherwise. Download the result from the run's **Artifacts**, or:
+the runner otherwise. Download from the run's **Artifacts**, or:
 
 ```sh
 gh run download <run-id> -n camio-browser   # grabs the .tar.xz
-tar xf librewolf-*.tar.xz                    # extracts ./librewolf/
+tar xf camio-browser-*.tar.xz               # extracts ./camio-browser/
+./camio-browser/librewolf                   # launch
 ```
+
+### What's baked in
+
+The build's post-package step turns the stock LibreWolf tarball into the Camio
+fork by editing loose config files (no source patching, no `omni.ja` surgery):
+
+- `camio-userChrome.css` at the app root — the black/blue chrome.
+- `defaults/pref/camio-autoconfig.js` — disables the autoconfig *sandbox* so the
+  `.cfg` can do file I/O.
+- appended to LibreWolf's `librewolf.cfg`: `lockPref` enabling userChrome
+  stylesheets, extra `defaultPref` hardening (battery/netinfo/gamepad/beacon/DNS
+  prefetch/predictor off), and a guarded snippet that copies `camio-userChrome.css`
+  into each profile's `chrome/` on startup.
+
+So the fork is themed + stealth-preconfigured out of the box. (If a profile-copy
+ever fails, Camio's launcher still applies the same theme + per-persona
+fingerprint at run time, so there's no regression.)
 
 Camoufox's C++ patches are skipped (upstream suspended), so this is a
 **Camio-branded LibreWolf**; set the `camoufox_repo` input to a reachable source

@@ -177,4 +177,54 @@ fi
 echo "==> compiling + packaging (this is the multi-hour part)"
 make build   </dev/null || { echo "build failed — see logs"; exit 1; }
 make package </dev/null || echo "    package step non-zero"
-echo "==> done. Look for librewolf-*.tar.xz in $PWD."
+
+# ---- Camio rebrand: bake the black/blue theme + hardening into the package ---
+# LibreWolf ships an autoconfig (librewolf.cfg) whose sandbox allows only pref
+# functions. We disable that sandbox via defaults/pref so the .cfg can also copy
+# our userChrome.css into each profile, append Camio prefs + that copy to the
+# .cfg, ship the stylesheet at the app root, and rebrand the dir + tarball.
+pkg="$(ls librewolf-*.en-US.*.tar.xz 2>/dev/null | head -1)"
+if [ -n "$pkg" ] && [ -f "$BRANDING_CSS" ]; then
+  echo "==> baking Camio branding into $pkg"
+  rm -rf camio-pkg && mkdir camio-pkg
+  tar -xf "$pkg" -C camio-pkg
+  app="camio-pkg/librewolf"
+  if [ -d "$app" ]; then
+    install -m 0644 "$BRANDING_CSS" "$app/camio-userChrome.css"
+    mkdir -p "$app/defaults/pref"
+    cat > "$app/defaults/pref/camio-autoconfig.js" <<'CAMIOPREF'
+// Camio: allow the autoconfig (.cfg) full power so it can install the theme.
+pref("general.config.sandbox_enabled", false);
+CAMIOPREF
+    cat >> "$app/librewolf.cfg" <<'CAMIOCFG'
+
+// ===== Camio fork: black/blue theme + extra hardening =====
+lockPref("toolkit.legacyUserProfileCustomizations.stylesheets", true);
+defaultPref("dom.battery.enabled", false);
+defaultPref("dom.netinfo.enabled", false);
+defaultPref("dom.gamepad.enabled", false);
+defaultPref("beacon.enabled", false);
+defaultPref("network.dns.disablePrefetch", true);
+defaultPref("network.predictor.enabled", false);
+try {
+  var _camioChrome = Services.dirsvc.get("ProfD", Components.interfaces.nsIFile);
+  _camioChrome.append("chrome");
+  if (!_camioChrome.exists())
+    _camioChrome.create(Components.interfaces.nsIFile.DIRECTORY_TYPE, 0o755);
+  var _camioDst = _camioChrome.clone(); _camioDst.append("userChrome.css");
+  var _camioSrc = Services.dirsvc.get("GreD", Components.interfaces.nsIFile);
+  _camioSrc.append("camio-userChrome.css");
+  if (_camioSrc.exists()) {
+    if (_camioDst.exists()) _camioDst.remove(false);
+    _camioSrc.copyTo(_camioChrome, "userChrome.css");
+  }
+} catch (e) { try { Components.utils.reportError(e); } catch (_e) {} }
+CAMIOCFG
+    mv "$app" "camio-pkg/camio-browser"
+    camio_tar="${pkg/librewolf-/camio-browser-}"
+    ( cd camio-pkg && tar -cJf "../$camio_tar" camio-browser )
+    echo "    wrote $camio_tar — themed + stealth-preconfigured Camio browser"
+  fi
+  rm -rf camio-pkg
+fi
+echo "==> done. Look for camio-browser-*.tar.xz (and librewolf-*.tar.xz) in $PWD."
