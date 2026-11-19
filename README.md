@@ -13,11 +13,12 @@ anti-detect Firefox engine. See [`plan.md`](./plan.md) for the full product plan
 > supervisor, fingerprint policy, matched request engine, query language, storage,
 > scope/policy engine and MCP server are now joined by a passive **scanner**,
 > **Intruder-class** fuzzing, **Convert/Decoder/Comparer**, **Burp/HAR importers**,
-> a **Sequencer**, a **site map**, and **Match & Replace** — all driven from the
+> a **Sequencer**, a **site map**, **Match & Replace**, and an **intercepting
+> HTTP/HTTPS proxy** (`camio proxy`, with opt-in TLS MITM) — all driven from the
 > CLI, a **native desktop app** (`camio app`, egui/eframe), an optional local web
 > UI (`camio ui`), and the MCP server under the one shared scope/policy. Stored
 > traffic can be reviewed with versioned offline workflows, evidence imports,
-> and finding reports. Live browser capture, WebDriver-BiDi interception, and a
+> and finding reports. Live managed-browser WebDriver-BiDi interception and a
 > general-purpose workflow editor remain on the roadmap.
 
 ## Camio vs Burp Suite and Caido
@@ -29,6 +30,7 @@ Burp nor Caido offers. An honest comparison:
 |---|---|---|---|
 | Price | Paid (Pro/Enterprise) | Freemium (gated) | **Free, no locks** |
 | Tool-traffic fingerprint | Proxy TLS/H2 — a known WAF tell | Proxy — tool tell | **Matched to the browser, measured** |
+| Intercepting proxy (TLS MITM) | Core | Core | **Yes — scope-gated, matched-engine upstream** |
 | Query language | Filters | HTTPQL | **CamioQL (HTTPQL-compatible)** |
 | Automation | Intruder | Workflows | Intruder-class + MCP |
 | AI / agents | Add-ons | Plugins | **Built-in MCP server** |
@@ -66,6 +68,28 @@ problem, and measures fingerprint parity rather than claiming undetectability.
   (loopback/link-local/metadata/private are blocked unless a lab profile opts in),
   and one shared authorization policy (reads free; sends in-scope + confirmed;
   active/destructive disabled by default).
+- **Intercepting proxy** (`camio-proxy`, `camio proxy`): a Burp-style
+  HTTP/HTTPS proxy you point a browser at. Every request is **scope-decided and
+  policy-gated** through the *same* `Scope`/`Policy` path as the rest of Camio
+  (out-of-scope and SSRF-guarded destinations are refused and recorded as
+  attempts), **Match & Replace** rewrites run in-flight (request rules before the
+  send, response rules after), and every exchange is captured to the SQLite store
+  tagged `source=proxy`. HTTPS is handled two ways: by default a CONNECT is
+  **blind-relayed** so the browser's own TLS stays end-to-end (fingerprint-true;
+  only the host is recorded), or with `--tls-intercept` it is **terminated** by
+  Camio's own operator-trusted CA (`camio proxy --export-ca`) so the plaintext is
+  inspected and re-sent through the fingerprint-matched engine — honestly tagged
+  fingerprint-changing. A UI-agnostic **intercept queue** (`QueueInterceptor`)
+  lets a front-end pause/edit/drop requests and responses. The upstream send is
+  the injected matched engine, so the proxy adds no second HTTP client and all
+  destination policy stays in one place. **Hard to fingerprint:** the re-sent
+  request keeps the matched JA3/JA4/H2 identity, proxy replies carry no
+  identifying header, and the intercept CA is neutral by default and settable
+  (`--ca-name`). **Scope-aware automation:** `--auto-scan` runs the passive
+  scanner on in-scope captures automatically (out-of-scope is recorded, never
+  tested). Available from the CLI (`camio proxy`) and a **Proxy** surface in the
+  native app (Start/Stop, TLS toggle, auto-scan, CA export, live capture table,
+  and **interactive intercept** — hold a request, edit it, Forward or Drop).
 - **Passive scanner** (`camio-scan`): seventeen passive checks over captured
   history — security headers, insecure cookies, banner/version disclosure,
   directory listing, verbose errors, reflected input, CORS misconfig, secrets in
@@ -136,8 +160,11 @@ problem, and measures fingerprint parity rather than claiming undetectability.
 - **Local web UI** (`camio-web`): `camio ui` serves the workbench on loopback.
   Open the full session link printed by the command. The interface bundles its
   fonts locally and supports both browser-level and in-app reduced motion.
-- **No TLS MITM, no CA install** for browser traffic — the browser makes the real
-  connection, so the server sees Camoufox's genuine fingerprint (plan §6).
+- **Browser capture needs no TLS MITM and no CA install** — in the managed-browser
+  path the browser makes the real connection, so the server sees Camoufox's genuine
+  fingerprint (plan §6). TLS interception is available only in the *optional*
+  `camio proxy --tls-intercept` mode, is off by default, and is clearly tagged
+  fingerprint-changing when you choose it.
 
 ## Workspace layout
 
@@ -152,6 +179,9 @@ crates/
   camio-automate/  Intruder: insertion points, payload packs, attack types, campaigns
   camio-import/    Burp XML + HAR importers
   camio-sequencer/ Token randomness/entropy analysis
+  camio-active/    Opt-in active scanner (reflected XSS, error SQLi, open redirect)
+  camio-ai/        Optional OpenAI-compatible assistant (BYO key)
+  camio-proxy/     Intercepting HTTP/HTTPS proxy (scope-gated, TLS MITM, intercept queue)
   camio-app/       Native desktop workbench (egui/eframe)
   camio-web/       Local loopback web UI (serves every capability)
   camio-mcp/       Local MCP server (stdio JSON-RPC)
@@ -242,6 +272,18 @@ cargo run -p camio-cli -- ai --camioql "find 5xx responses from the api host"
 # Rewrite an outgoing request (Match & Replace), then send
 cargo run -p camio-cli -- send https://example.org --confirm \
   --rewrite 'header=User-Agent|curl|Mozilla/5.0'
+
+# Run the intercepting proxy; point your browser's HTTP/HTTPS proxy at it.
+# Plain HTTP is intercepted; HTTPS is blind-relayed (fingerprint-true).
+# --auto-scan passively tests every IN-SCOPE exchange and stores findings.
+cargo run -p camio-cli -- proxy --listen 127.0.0.1:8080 --db camio.db --auto-scan \
+  --scope-include 'host.eq:"target.example.com"'
+
+# Decrypt HTTPS too: export the CA, import it into the browser, then intercept.
+cargo run -p camio-cli -- proxy --export-ca camio-ca.pem
+cargo run -p camio-cli -- proxy --tls-intercept --db camio.db \
+  --scope-include 'host.eq:"target.example.com"' \
+  --rewrite 'resp-header=Content-Security-Policy|*|'   # strip a response header in-flight
 
 # Launch the native desktop app — every capability in one window
 cargo run -p camio-cli -- app

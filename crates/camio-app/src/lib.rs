@@ -27,12 +27,17 @@ use camio_core::{
     ActionClass, Body, FingerprintProfile, HttpExchange, HttpRequest, MatchReplaceRule,
     MatchTarget, Policy, PolicyOutcome, Query, RuleSet, Scope, SiteMap, Source,
 };
+use camio_proxy::{
+    CertAuthority, EngineForwarder, ExchangeSink, Interceptor, Pending, ProxyConfig, ProxyServer,
+    QueueInterceptor, RequestDecision,
+};
 use camio_request::{matched_engine, DryRunEngine, FingerprintSpec, RequestEngine};
 use camio_store::Store;
 use plugins::Plugin;
 use std::collections::HashMap;
+use std::net::TcpListener;
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Mutex};
 use theme::Theme;
 
 /// What the app needs to run: the history DB and the shared profile/scope/policy.
@@ -88,6 +93,7 @@ enum Surface {
     ActiveScan,
     AnalyzeJs,
     Ai,
+    Proxy,
     Browser,
     Plugins,
     Settings,
@@ -205,6 +211,22 @@ struct CamioApp {
     // analyze-js / active-scan
     js_blob: String,
     active_save: bool,
+    // intercepting proxy (runs on a background thread via a stoppable handle)
+    proxy_listen: String,
+    proxy_tls: bool,
+    proxy_auto_scan: bool,
+    proxy_intercept: bool,
+    proxy_handle: Option<camio_proxy::ProxyHandle>,
+    proxy_sink: std::sync::Arc<camio_proxy::VecSink>,
+    proxy_queue: std::sync::Arc<QueueInterceptor>,
+    proxy_ca_dir: PathBuf,
+    proxy_status: String,
+    // intercept editor (the request currently held in the queue)
+    icept_id: Option<u64>,
+    icept_method: String,
+    icept_url: String,
+    icept_headers: String,
+    icept_body: String,
     // output
     out: Output,
     surface_outputs: HashMap<Surface, Output>,
@@ -280,6 +302,20 @@ impl CamioApp {
             ai_pending: None,
             js_blob: String::new(),
             active_save: true,
+            proxy_listen: "127.0.0.1:8080".to_string(),
+            proxy_tls: false,
+            proxy_auto_scan: true,
+            proxy_intercept: false,
+            proxy_handle: None,
+            proxy_sink: std::sync::Arc::new(camio_proxy::VecSink::new()),
+            proxy_queue: std::sync::Arc::new(QueueInterceptor::new()),
+            proxy_ca_dir: default_proxy_ca_dir(),
+            proxy_status: String::new(),
+            icept_id: None,
+            icept_method: String::new(),
+            icept_url: String::new(),
+            icept_headers: String::new(),
+            icept_body: String::new(),
             out: Output::None,
             surface_outputs: HashMap::new(),
         };
@@ -843,42 +879,45 @@ impl CamioApp {
 
     // --- UI ----------------------------------------------------------------
 
+    /// The Burp-style horizontal tool tab bar (top of the window). Groups are
+    /// laid out left-to-right with a thin separator between them; the active tab
+    /// is accent-coloured with an underline, like Burp Suite's tool tabs.
     fn nav_ui(&mut self, ui: &mut egui::Ui) {
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, true])
-            .show(ui, |ui| {
-                for (group, items) in workbench::NAV {
-                    ui.add_space(8.0);
-                    ui.label(
-                        egui::RichText::new(group.to_uppercase())
-                            .monospace()
-                            .size(10.0)
-                            .weak(),
+        let accent = self.theme.accent_color();
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(3.0, 4.0);
+            for (gi, (_group, items)) in workbench::NAV.iter().enumerate() {
+                if gi > 0 {
+                    ui.add_space(5.0);
+                    ui.separator();
+                    ui.add_space(5.0);
+                }
+                for (surface, label) in *items {
+                    let active = self.surface == *surface;
+                    let color = if active {
+                        accent
+                    } else {
+                        ui.visuals().weak_text_color()
+                    };
+                    let resp = ui.selectable_label(
+                        active,
+                        egui::RichText::new(*label).color(color).size(13.5),
                     );
-                    for (surface, label) in *items {
-                        let active = self.surface == *surface;
-                        let color = if active {
-                            egui::Color32::from_rgb(113, 179, 255)
-                        } else {
-                            ui.visuals().text_color()
-                        };
-                        ui.horizontal(|ui| {
-                            let (marker, _) =
-                                ui.allocate_exact_size(egui::vec2(4.0, 19.0), egui::Sense::hover());
-                            if active {
-                                ui.painter()
-                                    .rect_filled(marker, 2.0, self.theme.accent_color());
-                            }
-                            if ui
-                                .selectable_label(active, egui::RichText::new(*label).color(color))
-                                .clicked()
-                            {
-                                self.navigate(*surface);
-                            }
-                        });
+                    if active {
+                        // Burp-style active-tab underline.
+                        let r = resp.rect;
+                        ui.painter().hline(
+                            r.x_range(),
+                            r.bottom() + 1.0,
+                            egui::Stroke::new(2.0_f32, accent),
+                        );
+                    }
+                    if resp.clicked() {
+                        self.navigate(*surface);
                     }
                 }
-            });
+            }
+        });
     }
 
     fn central_ui(&mut self, ui: &mut egui::Ui) {
@@ -1061,6 +1100,7 @@ impl CamioApp {
             Surface::ActiveScan => self.active_scan_surface(ui),
             Surface::AnalyzeJs => self.analyze_js_surface(ui),
             Surface::Ai => self.ai_surface(ui),
+            Surface::Proxy => self.proxy_surface(ui),
             Surface::Browser => self.browser_surface(ui),
             Surface::Plugins => self.plugins_surface(ui),
             _ => unreachable!(),
@@ -1070,6 +1110,334 @@ impl CamioApp {
         ui.separator();
         ui.add_space(6.0);
         self.output_ui(ui);
+    }
+
+    fn proxy_surface(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Intercepting proxy");
+        ui.label(
+            "Point your browser's HTTP and HTTPS proxy at the listen address. Every request is \
+             scope- and policy-gated (the same path as the rest of Camio) and captured to this \
+             workspace tagged source=proxy. HTTPS is blind-relayed (fingerprint-true) unless you \
+             enable TLS interception.",
+        );
+        ui.add_space(8.0);
+
+        let running = self
+            .proxy_handle
+            .as_ref()
+            .map(camio_proxy::ProxyHandle::is_running)
+            .unwrap_or(false);
+
+        ui.horizontal(|ui| {
+            ui.label("Listen address:");
+            ui.add_enabled(
+                !running,
+                egui::TextEdit::singleline(&mut self.proxy_listen).desired_width(170.0),
+            );
+        });
+        ui.add_enabled(
+            !running,
+            egui::Checkbox::new(
+                &mut self.proxy_tls,
+                "Decrypt HTTPS (TLS interception — fingerprint-CHANGING; import the CA first)",
+            ),
+        );
+        ui.add_enabled(
+            !running,
+            egui::Checkbox::new(
+                &mut self.proxy_auto_scan,
+                "Auto-scan in-scope traffic (passive checks → Findings; out-of-scope is never tested)",
+            ),
+        );
+
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            if running {
+                if ui.button("⏹ Stop").clicked() {
+                    self.stop_proxy();
+                }
+                if let Some(h) = &self.proxy_handle {
+                    ui.label(
+                        egui::RichText::new(format!("● running on {}", h.local_addr()))
+                            .color(egui::Color32::from_rgb(120, 200, 120)),
+                    );
+                }
+            } else if ui.button("▶ Start").clicked() {
+                self.start_proxy();
+            }
+            if ui.button("Export CA…").clicked() {
+                self.export_proxy_ca();
+            }
+        });
+
+        ui.label(
+            egui::RichText::new(format!("CA directory: {}", self.proxy_ca_dir.display()))
+                .weak()
+                .size(11.0),
+        );
+
+        if !self.proxy_status.is_empty() {
+            ui.add_space(6.0);
+            ui.label(&self.proxy_status);
+        }
+
+        self.intercept_ui(ui);
+
+        ui.add_space(8.0);
+        ui.separator();
+        let captures = self.proxy_sink.snapshot();
+        ui.label(format!("Captured this session: {}", captures.len()));
+        egui::ScrollArea::vertical()
+            .max_height(260.0)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for ex in captures.iter().rev().take(100) {
+                    let status = ex.response.as_ref().map(|r| r.status).unwrap_or(0);
+                    let scope = ex.scope.map(|d| d.as_str()).unwrap_or("?");
+                    ui.monospace(format!(
+                        "[{scope}] {:<6} {} -> {}",
+                        ex.request.method,
+                        truncate(&ex.request.url, 72),
+                        status
+                    ));
+                }
+            });
+
+        // Keep the live count/table refreshing while the proxy runs.
+        if running {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(500));
+        }
+    }
+
+    /// Burp's Proxy ▸ Intercept: hold a request, edit it, then Forward or Drop.
+    fn intercept_ui(&mut self, ui: &mut egui::Ui) {
+        let running = self
+            .proxy_handle
+            .as_ref()
+            .map(camio_proxy::ProxyHandle::is_running)
+            .unwrap_or(false);
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Intercept").strong());
+            let mut on = self.proxy_intercept;
+            let label = if on { "on" } else { "off" };
+            if ui.toggle_value(&mut on, label).changed() {
+                self.proxy_intercept = on;
+                if running {
+                    self.proxy_queue.set_active(on);
+                }
+            }
+            ui.label(
+                egui::RichText::new(format!("{} held", self.proxy_queue.pending_count())).weak(),
+            );
+        });
+
+        if !running {
+            ui.label(
+                egui::RichText::new("Start the proxy, then toggle Intercept to hold requests.")
+                    .weak()
+                    .size(11.0),
+            );
+            return;
+        }
+        if !self.proxy_intercept {
+            ui.label(
+                egui::RichText::new("Intercept is off — requests pass straight through.")
+                    .weak()
+                    .size(11.0),
+            );
+            return;
+        }
+
+        // Load the next held request into the editor if nothing is loaded.
+        if self.icept_id.is_none() {
+            if let Some(Pending::Request { id, request }) = self.proxy_queue.next_pending() {
+                self.icept_id = Some(id);
+                self.icept_method = request.method.clone();
+                self.icept_url = request.url.clone();
+                self.icept_headers = request
+                    .headers
+                    .iter()
+                    .map(|h| format!("{}: {}", h.name, h.value))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                self.icept_body = request.body.as_text().to_string();
+            }
+        }
+
+        match self.icept_id {
+            None => {
+                ui.label(egui::RichText::new("Waiting for a request…").weak());
+            }
+            Some(id) => {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label("Method");
+                    ui.add(egui::TextEdit::singleline(&mut self.icept_method).desired_width(74.0));
+                    ui.label("URL");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.icept_url)
+                            .desired_width(f32::INFINITY),
+                    );
+                });
+                ui.label(egui::RichText::new("Headers").small().weak());
+                ui.add(
+                    egui::TextEdit::multiline(&mut self.icept_headers)
+                        .code_editor()
+                        .desired_rows(5)
+                        .desired_width(f32::INFINITY),
+                );
+                ui.label(egui::RichText::new("Body").small().weak());
+                ui.add(
+                    egui::TextEdit::multiline(&mut self.icept_body)
+                        .code_editor()
+                        .desired_rows(4)
+                        .desired_width(f32::INFINITY),
+                );
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if ui.button("➡ Forward").clicked() {
+                        self.resolve_intercept(id, true);
+                    }
+                    if ui.button("✖ Drop").clicked() {
+                        self.resolve_intercept(id, false);
+                    }
+                });
+            }
+        }
+        // Poll for newly held requests while intercepting.
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(250));
+    }
+
+    fn resolve_intercept(&mut self, id: u64, forward: bool) {
+        let decision = if forward {
+            let mut req = HttpRequest::get(self.icept_url.trim());
+            req.method = self.icept_method.trim().to_string();
+            for line in self.icept_headers.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                if let Some((n, v)) = line.split_once(':') {
+                    req.headers.push(n.trim().to_string(), v.trim().to_string());
+                }
+            }
+            req.body = Body::from_text(self.icept_body.clone());
+            RequestDecision::Forward(req)
+        } else {
+            RequestDecision::Drop
+        };
+        self.proxy_queue.resolve_request(id, decision);
+        self.icept_id = None;
+        self.icept_method.clear();
+        self.icept_url.clear();
+        self.icept_headers.clear();
+        self.icept_body.clear();
+    }
+
+    fn start_proxy(&mut self) {
+        let policy = Policy {
+            require_confirmation: false,
+            ..self.cfg.policy
+        };
+        let config = ProxyConfig {
+            scope: self.cfg.scope.clone(),
+            policy,
+            rules: RuleSet::new(),
+            tls_intercept: self.proxy_tls,
+            ..ProxyConfig::default()
+        };
+
+        let forwarder = match EngineForwarder::spawn(self.cfg.profile.clone()) {
+            Ok(f) => Arc::new(f),
+            Err(e) => {
+                self.proxy_status = format!("Could not start the matched engine: {e}");
+                return;
+            }
+        };
+        let store = match Store::open(&self.cfg.db) {
+            Ok(s) => s,
+            Err(e) => {
+                self.proxy_status = format!("Could not open the capture store: {e}");
+                return;
+            }
+        };
+        let sink: Arc<dyn ExchangeSink> = Arc::new(AppProxySink {
+            live: self.proxy_sink.clone(),
+            store: Mutex::new(store),
+            auto_scan: self.proxy_auto_scan,
+        });
+        // The intercept queue is always the interceptor; its active flag decides
+        // whether requests are held (toggle it live without restarting).
+        self.proxy_queue.set_active(self.proxy_intercept);
+        let interceptor: Arc<dyn Interceptor> = self.proxy_queue.clone();
+        let listener = match TcpListener::bind(&self.proxy_listen) {
+            Ok(l) => l,
+            Err(e) => {
+                self.proxy_status = format!("Could not bind {}: {e}", self.proxy_listen);
+                return;
+            }
+        };
+
+        let mut server = ProxyServer::new(config, forwarder, sink, interceptor);
+        if self.proxy_tls {
+            match CertAuthority::load_or_create(&self.proxy_ca_dir) {
+                Ok(ca) => server = server.with_ca(Arc::new(ca)),
+                Err(e) => {
+                    self.proxy_status = format!("Could not load the proxy CA: {e}");
+                    return;
+                }
+            }
+        }
+
+        match server.spawn(listener) {
+            Ok(handle) => {
+                self.proxy_status = format!(
+                    "Listening on {}{}. Set your browser proxy to it.",
+                    handle.local_addr(),
+                    if self.proxy_tls {
+                        " — TLS interception ON (fingerprint-changing)"
+                    } else {
+                        " — HTTPS blind-relayed (fingerprint-true)"
+                    }
+                );
+                self.proxy_handle = Some(handle);
+            }
+            Err(e) => self.proxy_status = format!("Could not serve: {e}"),
+        }
+    }
+
+    fn stop_proxy(&mut self) {
+        // Release any parked request so blocked connection threads can finish.
+        self.proxy_queue.set_active(false);
+        self.icept_id = None;
+        if let Some(handle) = self.proxy_handle.take() {
+            handle.stop_and_join();
+            self.proxy_status = "Proxy stopped.".to_string();
+        }
+    }
+
+    fn export_proxy_ca(&mut self) {
+        match CertAuthority::load_or_create(&self.proxy_ca_dir) {
+            Ok(ca) => {
+                let path = self.proxy_ca_dir.join("camio-ca.pem");
+                match std::fs::write(&path, ca.ca_cert_pem()) {
+                    Ok(()) => {
+                        self.proxy_status = format!(
+                            "CA written to {}. Import it into your browser/OS trust store to \
+                             decrypt HTTPS.",
+                            path.display()
+                        );
+                    }
+                    Err(e) => self.proxy_status = format!("Could not write the CA: {e}"),
+                }
+            }
+            Err(e) => self.proxy_status = format!("Could not create the CA: {e}"),
+        }
     }
 
     fn fingerprint_surface(&mut self, ui: &mut egui::Ui) {
@@ -1672,6 +2040,65 @@ impl CamioApp {
     }
 }
 
+/// Capture sink for the in-app proxy: records live for the UI table and persists
+/// each exchange to the workspace store (WAL + 5s busy-timeout make this safe
+/// alongside the UI's reads). Store errors are logged, never fatal to capture.
+struct AppProxySink {
+    live: Arc<camio_proxy::VecSink>,
+    store: Mutex<Store>,
+    auto_scan: bool,
+}
+
+impl ExchangeSink for AppProxySink {
+    fn record(&self, exchange: &HttpExchange) {
+        self.live.record(exchange);
+        if let Ok(mut store) = self.store.lock() {
+            let id = match store.insert(exchange) {
+                Ok(id) => id,
+                Err(e) => {
+                    eprintln!("proxy capture store error: {e}");
+                    return;
+                }
+            };
+            // Scope-aware automation: passively scan only in-scope traffic.
+            if self.auto_scan
+                && exchange.scope == Some(camio_core::ScopeDecision::InScope)
+                && exchange.response.is_some()
+            {
+                let mut scanned = exchange.clone();
+                scanned.id = id;
+                let findings = camio_scan::scan_exchange(&scanned);
+                if !findings.is_empty() {
+                    if let Err(e) = store.insert_findings(&findings) {
+                        eprintln!("proxy finding store error: {e}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Truncate a string to `max` characters (char-safe), appending an ellipsis.
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let t: String = s.chars().take(max.saturating_sub(1)).collect();
+        format!("{t}…")
+    }
+}
+
+/// Default directory for the proxy CA (matches the CLI's `camio proxy`).
+fn default_proxy_ca_dir() -> PathBuf {
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        return PathBuf::from(xdg).join("camio");
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        return PathBuf::from(home).join(".config").join("camio");
+    }
+    PathBuf::from("camio-ca")
+}
+
 impl eframe::App for CamioApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.theme.apply(ctx);
@@ -1706,7 +2133,11 @@ impl eframe::App for CamioApp {
                     ui.painter().circle_filled(mark.center(), 2.3, accent);
                     ui.label(egui::RichText::new("CAMIO").size(21.0).strong());
                     ui.separator();
-                    ui.label(format!("Workspace / {}", workbench::title(self.surface)));
+                    ui.label(
+                        egui::RichText::new(workbench::title(self.surface))
+                            .size(15.0)
+                            .color(accent),
+                    );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button("Search tools   Ctrl K").clicked() {
                             self.toggle_command();
@@ -1735,14 +2166,12 @@ impl eframe::App for CamioApp {
                     }
                 });
             });
-        egui::SidePanel::left("nav")
-            .default_width(188.0)
-            .width_range(152.0..=260.0)
+        egui::TopBottomPanel::top("toolbar")
             .frame(
                 egui::Frame::none()
                     .fill(panel)
                     .stroke(line)
-                    .inner_margin(egui::Margin::symmetric(11.0, 7.0)),
+                    .inner_margin(egui::Margin::symmetric(13.0, 6.0)),
             )
             .show(ctx, |ui| self.nav_ui(ui));
         egui::CentralPanel::default()
@@ -1790,6 +2219,7 @@ fn surface_from_name(s: &str) -> Option<Surface> {
         "activescan" | "active" => Surface::ActiveScan,
         "analyzejs" | "js" => Surface::AnalyzeJs,
         "ai" => Surface::Ai,
+        "proxy" => Surface::Proxy,
         "browser" => Surface::Browser,
         "plugins" => Surface::Plugins,
         "settings" => Surface::Settings,

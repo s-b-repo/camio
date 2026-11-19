@@ -16,6 +16,7 @@ members = [
     "crates/camio-sequencer",
     "crates/camio-active",
     "crates/camio-ai",
+    "crates/camio-proxy",
     "crates/camio-web",
     "crates/camio-app",
     "crates/camio-mcp",
@@ -51,6 +52,17 @@ quick-xml = "0.41"
 md-5 = "0.10"
 sha1 = "0.10"
 tiny_http = "0.12"
+# Minimal, zero-copy HTTP/1 parser (already in the tree via wreq) used by the
+# intercepting proxy to parse client requests off the wire.
+httparse = "1.9"
+# Server-side TLS + on-the-fly leaf-certificate generation for the optional
+# TLS-intercepting proxy (camio-proxy). rustls is used ONLY as the server
+# acceptor that terminates the browser's TLS so traffic can be inspected; the
+# real upstream request still goes through the fingerprint-matched BoringSSL
+# engine (camio-request). This is Camio's own CA, trusted explicitly by the
+# operator — never a hidden second client stack.
+rustls = "0.23"
+rcgen = "0.14"
 # Reused by camio-ai for OpenAI-compatible API calls (NVIDIA NIM, OpenAI,
 # Ollama, …) — the same BoringSSL client the matched engine uses, so no second
 # TLS stack is added.
@@ -71,6 +83,7 @@ camio-import = { path = "crates/camio-import", version = "0.0.1" }
 camio-sequencer = { path = "crates/camio-sequencer", version = "0.0.1" }
 camio-active = { path = "crates/camio-active", version = "0.0.1" }
 camio-ai = { path = "crates/camio-ai", version = "0.0.1" }
+camio-proxy = { path = "crates/camio-proxy", version = "0.0.1" }
 camio-web = { path = "crates/camio-web", version = "0.0.1" }
 camio-app = { path = "crates/camio-app", version = "0.0.1" }
 camio-mcp = { path = "crates/camio-mcp", version = "0.0.1" }

@@ -8,6 +8,46 @@ versioning once it reaches 1.0.
 
 ### Added
 
+- **Intercepting HTTP/HTTPS proxy** (`camio-proxy`, `camio proxy`): a Burp-style
+  proxy a browser points at. Each request is scope-decided and policy-gated
+  through the shared `Scope`/`Policy` path (out-of-scope and SSRF-guarded targets
+  are refused and recorded as attempts); **Match & Replace** runs in-flight
+  (request rules before the send, response rules after, via the new
+  `RuleSet::apply_to_response`); and every exchange is captured to the store as
+  `source=proxy`. HTTPS is **blind-relayed** by default (the browser's own TLS
+  stays end-to-end, fingerprint-true, host-only capture) or **terminated** with
+  `--tls-intercept` using Camio's own operator-trusted CA (`--export-ca`,
+  persisted with the private key `0600`), after which the decrypted request is
+  re-sent through the fingerprint-matched engine and tagged fingerprint-changing.
+  A UI-agnostic intercept queue (`QueueInterceptor`) supports pause/edit/drop of
+  requests and responses. The upstream send is the injected matched engine, so no
+  second HTTP client is added and all destination policy stays in one place. New
+  CLI response-side rewrite targets: `resp-header=NAME`, `resp-body`,
+  `status-reason`.
+  - **Hard to fingerprint:** when intercepting, the upstream request is
+    re-originated through the fingerprint-matched engine, so the *target* sees the
+    matched JA3/JA4/H2 fingerprint, not a tool tell. Proxy-generated replies carry
+    no identifying header, and the intercept CA's name is neutral by default
+    (`Internal Root CA`) and operator-settable (`--ca-name`) so an inspected
+    certificate chain doesn't announce the proxy.
+  - **Scope-aware automation:** `--auto-scan` runs the passive scanner on every
+    **in-scope** captured exchange and stores its findings as traffic flows;
+    out-of-scope traffic is still recorded but never scanned or attacked.
+  - **Native app:** a new **Proxy** surface starts/stops the proxy on a background
+    thread (via the new `ProxyServer::spawn`/`ProxyHandle`), toggles TLS
+    interception and auto-scan, exports the CA, shows a live capture table, and
+    drives an **interactive intercept** (Burp's Proxy ▸ Intercept): toggle
+    Intercept to hold a request, edit its method/URL/headers/body, then Forward or
+    Drop. Response interception is gated off by default
+    (`QueueInterceptor::set_intercept_responses`) so a request-only UI never hangs.
+
+### Changed
+
+- **Native app layout is now Burp-style.** The left sidebar is replaced by a
+  horizontal **top tool-tab bar** (active tab accent-underlined) with full-width
+  content, and the tools are reordered/renamed to Burp's names (Dashboard,
+  Target, Proxy, Repeater, Intruder, Scanner, Decoder, Extensions, HTTP history,
+  …) so the muscle memory carries over.
 - **AI assistant** (`camio-ai`): optional, BYO-key, OpenAI-compatible client for
   NVIDIA NIM, OpenAI, or a local Ollama — explain an exchange, suggest next tests,
   or translate natural language to CamioQL. Off by default; the API key is read

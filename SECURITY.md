@@ -48,5 +48,13 @@ documented permission to test.
   destinations unless a lab profile explicitly opts in.
 - The plugin system runs **arbitrary local commands** you configure; treat
   third-party plugins as untrusted code and review their manifest before running.
+- The intercepting proxy's TLS interception (`camio proxy --tls-intercept`) uses a
+  **local CA you generate and import**. Anything that trusts that CA will trust
+  certificates Camio mints, so: keep the CA private key (`camio-ca.key`, written
+  `0600`) on a machine you control, import the CA only into browsers/profiles used
+  for authorized testing, and remove it afterwards. TLS interception is off by
+  default; without it, HTTPS is blind-relayed and the browser's own TLS is
+  untouched. Out-of-scope and SSRF-guarded destinations are refused by the proxy
+  just like every other Camio send.
 
 You are responsible for complying with all applicable laws and authorizations.

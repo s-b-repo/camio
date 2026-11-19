@@ -9,59 +9,75 @@ use egui::{Color32, RichText, Stroke};
 use std::io::Read;
 use std::time::{Duration, Instant};
 
+// Ordered Burp-style: the top tab bar renders these groups left-to-right with a
+// thin separator between each, so the most-used tools (Dashboard, Target, Proxy,
+// Repeater, Intruder, Scanner) lead, mirroring Burp Suite's layout. Labels use
+// Burp's tool names where there's a direct equivalent so the muscle memory
+// carries over; group names are structure only (not shown as tabs).
 pub(super) const NAV: &[(&str, &[(Surface, &str)])] = &[
     (
-        "Workspace",
+        "Dashboard",
         &[
-            (Surface::Status, "Overview"),
-            (Surface::Workflows, "Review workflows"),
-            (Surface::Tasks, "Review tasks"),
+            (Surface::Status, "Dashboard"),
+            (Surface::Tasks, "Tasks"),
+            (Surface::Workflows, "Workflows"),
             (Surface::Library, "Library"),
         ],
     ),
     (
-        "Traffic",
+        "Target",
         &[
-            (Surface::History, "History"),
+            (Surface::Sitemap, "Target"),
+            (Surface::Inventory, "Assets"),
+            (Surface::Discover, "Discover"),
+        ],
+    ),
+    (
+        "Proxy",
+        &[
+            (Surface::Proxy, "Proxy"),
+            (Surface::History, "HTTP history"),
             (Surface::Query, "CamioQL"),
-            (Surface::Sitemap, "Site map"),
-            (Surface::Inventory, "Asset inventory"),
-            (Surface::Replay, "Replay"),
-            (Surface::Discover, "Discover inputs"),
             (Surface::MatchReplace, "Match & Replace"),
-            (Surface::Browser, "Open browser"),
+            (Surface::Browser, "Browser"),
         ],
     ),
     (
-        "Review",
+        "Attack",
         &[
-            (Surface::Scan, "Passive review"),
-            (Surface::Findings, "Findings"),
-            (Surface::Import, "Import traffic"),
-            (Surface::Integrations, "Integration evidence"),
-            (Surface::Fuzz, "Automate / Fuzz"),
-            (Surface::ActiveScan, "Active scan"),
-        ],
-    ),
-    (
-        "Utilities",
-        &[
-            (Surface::Convert, "Convert"),
-            (Surface::Comparer, "Comparer"),
-            (Surface::Jwt, "JWT decode"),
+            (Surface::Replay, "Repeater"),
+            (Surface::Fuzz, "Intruder"),
             (Surface::Sequencer, "Sequencer"),
+        ],
+    ),
+    (
+        "Scanner",
+        &[
+            (Surface::Scan, "Scanner"),
+            (Surface::ActiveScan, "Active scan"),
+            (Surface::Findings, "Findings"),
+            (Surface::Import, "Import"),
+            (Surface::Integrations, "Integrations"),
+        ],
+    ),
+    (
+        "Tools",
+        &[
+            (Surface::Convert, "Decoder"),
+            (Surface::Comparer, "Comparer"),
+            (Surface::Jwt, "JWT"),
             (Surface::AnalyzeJs, "Analyze JS"),
-            (Surface::Scope, "Scope check"),
+            (Surface::Scope, "Scope"),
             (Surface::Payloads, "Payloads"),
-            (Surface::Ai, "AI assistant"),
+            (Surface::Ai, "AI"),
         ],
     ),
     (
         "Settings",
         &[
             (Surface::Fingerprint, "Transport"),
-            (Surface::Plugins, "Plugins"),
-            (Surface::Settings, "Workspace settings"),
+            (Surface::Plugins, "Extensions"),
+            (Surface::Settings, "Settings"),
         ],
     ),
 ];

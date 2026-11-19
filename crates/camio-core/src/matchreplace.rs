@@ -276,6 +276,40 @@ impl RuleSet {
         }
         count
     }
+
+    /// Apply every enabled response-targeting rule to a response, honouring each
+    /// rule's CamioQL condition against a probe exchange built from `request` and
+    /// the response. Returns how many rules changed something.
+    ///
+    /// Request-targeting rules are deliberately ignored: the intercepting proxy
+    /// rewrites the outbound request with [`apply_to_request`](Self::apply_to_request)
+    /// *before* it is sent, so the captured request is never rewritten after the
+    /// fact and stored evidence stays faithful to what went on the wire.
+    pub fn apply_to_response(&self, request: &HttpRequest, resp: &mut HttpResponse) -> usize {
+        let mut count = 0;
+        for rule in &self.rules {
+            if !rule.enabled {
+                continue;
+            }
+            if !matches!(
+                rule.target,
+                Target::ResponseReason | Target::ResponseHeader(_) | Target::ResponseBody
+            ) {
+                continue;
+            }
+            if let Some(q) = &rule.condition {
+                let probe = HttpExchange::new(request.clone(), crate::model::Source::Replay)
+                    .with_response(resp.clone());
+                if !q.matches(&probe) {
+                    continue;
+                }
+            }
+            if rule.apply_response(resp) {
+                count += 1;
+            }
+        }
+        count
+    }
 }
 
 #[cfg(test)]

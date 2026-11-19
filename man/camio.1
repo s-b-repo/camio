@@ -76,6 +76,17 @@ Build a site map tree from stored history.
 .B payloads \fR[\fINAME\fR]
 List the built-in payload packs, or show one pack's entries.
 .TP
+.B proxy
+Run the intercepting HTTP/HTTPS proxy. Point a browser's proxy at it; every
+request is scope/policy-gated and captured to the store as \fBsource=proxy\fR,
+with in-flight \fB\-\-rewrite\fR (Match & Replace). HTTPS is blind-relayed
+(fingerprint-true) unless \fB\-\-tls\-intercept\fR terminates it with a local CA
+(\fB\-\-export\-ca\fR writes the CA certificate for browser import; \fB\-\-ca\-name\fR
+sets a neutral issuer name). \fB\-\-auto\-scan\fR runs the passive scanner on each
+in-scope exchange and stores findings; out-of-scope traffic is recorded but never
+tested. When intercepting, the upstream request is re-sent through the
+fingerprint-matched engine, so the target sees the matched fingerprint.
+.TP
 .B app
 Launch the native desktop workbench (egui). Every capability in one window, with
 customizable themes, a plugin system, and an "Open in browser" launcher.
@@ -92,6 +103,11 @@ Default SQLite history database in the working directory.
 .TP
 .I ~/.config/camio/theme.json
 Saved native-app theme.
+.TP
+.I ~/.config/camio/camio-ca.pem, camio-ca.key
+Proxy TLS-interception CA certificate and private key (key written 0600),
+created on first \fB\-\-tls\-intercept\fR use. Override the directory with
+\fB\-\-ca\-dir\fR.
 .TP
 .I ./plugins/
 Directory scanned by the native app for process-based plugins.

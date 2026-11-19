@@ -70,7 +70,7 @@ Track each capability as `planned`, `in progress`, `partial`, `verified`, or `bl
 | F19 | Burp/HAR migration, rule import, format-supported Caido migration | Partial | P2 | M6 |
 | F20 | Permissioned extension host, versioned SDK, transforms/checks/actions/panels | Partial | P2 | M1, M7 |
 | F21 | MCP capability coverage and optional AI-assisted explanations/planning | Partial | P1 | M1–M7 |
-| F22 | Optional external-client proxy, CA lifecycle, upstream proxy, HTTP/2/WebSocket | Planned | P2 | M7 |
+| F22 | Optional external-client proxy, CA lifecycle, upstream proxy, HTTP/2/WebSocket | Partial | P2 | M7 |
 | F23 | Browser-assisted DOM inspection, clickjacking proof artifacts, visible instrumentation | Planned | P2 | M7 |
 | F24 | Native GUI and web capability parity, onboarding, accessibility, layout/density | Partial | P1 | M2–M8 |
 | F25 | Headless DAST, schedules, CI, deployment API, team/project access controls | Planned | P3 | M9 |
@@ -343,7 +343,7 @@ Keep settings/help in secondary navigation and a persistent task/status area. Su
 - [ ] Implement self-hosted OAST configuration, correlation IDs, DNS/HTTP interaction records, polling tasks, retention, and evidence linking. External providers are explicit optional connectors.
 - [ ] Version the extension SDK and manifest permissions for transforms, checks, actions, and panels. Enforce filesystem/network/task limits rather than relying on process separation.
 - [ ] Make plugin discovery errors visible and add timeouts, cancellation, output limits, integrity checks, explicit update handling, and examples.
-- [ ] Treat the external-client MITM proxy as a separate opt-in transport with CA install/remove, upstream proxy support, history/rules, HTTP/2/WebSocket coverage, and a visible transport-change status.
+- [~] External-client MITM proxy as a separate opt-in transport. **Delivered (`camio-proxy`, `camio proxy`):** scope/policy-gated HTTP/HTTPS proxy; a persisted operator-trusted CA (`--export-ca`, key `0600`) that mints per-host leaves on demand; in-flight Match & Replace (request + response) and capture to the store as `source=proxy`; a blind-relay path that keeps the browser's own TLS fingerprint-true for non-intercepted HTTPS and a `--tls-intercept` path that re-sends the decrypted request through the fingerprint-matched engine (honestly tagged fingerprint-changing); and a UI-agnostic intercept queue (`QueueInterceptor`) for pause/edit/drop. **Still to do:** CA removal/rotation UX, upstream (chained) proxy support, HTTP/2 and WebSocket interception, the background-task controls from §4.2 (the proxy currently serves thread-per-connection and blocks the CLI foreground), and a native-app/web transport-change status surface.
 - [ ] Add optional browser-assisted DOM/source-to-sink inspection, operator-built local clickjacking proof artifacts, and visible page instrumentation with cleanup and saved evidence.
 
 ### MCP, AI, deployment, and release — F21, F25–F26

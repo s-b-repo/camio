@@ -9,6 +9,7 @@
 //!   * `camio scope`                  — the one scope-decision path for a URL
 //!   * `camio mcp serve`              — the local MCP server over stdio
 
+mod proxy;
 mod workbench;
 
 use anyhow::{bail, Context, Result};
@@ -90,6 +91,8 @@ enum Command {
     App(AppArgs),
     /// Launch the local web workbench and print its session URL.
     Ui(UiArgs),
+    /// Run the intercepting HTTP/HTTPS proxy (scope-gated capture + Match & Replace).
+    Proxy(proxy::ProxyArgs),
     /// Review stored traffic, import evidence, and manage the workspace.
     Workbench(workbench::Args),
     /// Verify checksums and evidence references in an exported review bundle.
@@ -287,7 +290,7 @@ enum Format {
     Json,
 }
 
-fn profile_for(preset: Preset) -> FingerprintProfile {
+pub(crate) fn profile_for(preset: Preset) -> FingerprintProfile {
     let mut p = FingerprintProfile::new(
         format!(
             "win-firefox-{}-{}",
@@ -301,7 +304,11 @@ fn profile_for(preset: Preset) -> FingerprintProfile {
 }
 
 /// Build a [`Scope`] from CLI include/exclude CamioQL rules.
-fn build_scope(includes: &[String], excludes: &[String], allow_private: bool) -> Result<Scope> {
+pub(crate) fn build_scope(
+    includes: &[String],
+    excludes: &[String],
+    allow_private: bool,
+) -> Result<Scope> {
     let mut scope = Scope::new();
     if allow_private {
         scope = scope.allowing_private();
@@ -348,6 +355,7 @@ fn main() -> Result<()> {
         Command::Ai(args) => ai_cmd(args),
         Command::App(args) => app_cmd(args),
         Command::Ui(args) => ui_cmd(args),
+        Command::Proxy(args) => proxy::run(args),
         Command::Workbench(args) => workbench::run(args),
         Command::VerifyBundle { file } => workbench::verify_bundle(&file),
         Command::Mcp { action } => match action {
@@ -1340,7 +1348,7 @@ fn build_request(
 }
 
 /// Parse `--rewrite PART|FIND|REPLACE` specs into a [`RuleSet`].
-fn build_ruleset(specs: &[String]) -> Result<RuleSet> {
+pub(crate) fn build_ruleset(specs: &[String]) -> Result<RuleSet> {
     let mut set = RuleSet::new();
     for (i, spec) in specs.iter().enumerate() {
         let parts: Vec<&str> = spec.splitn(3, '|').collect();
@@ -1362,11 +1370,19 @@ fn parse_rewrite_target(s: &str) -> Result<MatchTarget> {
     if let Some(name) = s.strip_prefix("header=") {
         return Ok(MatchTarget::RequestHeader(name.to_string()));
     }
+    if let Some(name) = s.strip_prefix("resp-header=") {
+        return Ok(MatchTarget::ResponseHeader(name.to_string()));
+    }
     Ok(match s.to_ascii_lowercase().as_str() {
         "url" => MatchTarget::Url,
         "method" => MatchTarget::Method,
         "body" => MatchTarget::RequestBody,
-        other => bail!("unknown rewrite part `{other}` (use url|method|body|header=NAME)"),
+        "resp-body" => MatchTarget::ResponseBody,
+        "status-reason" | "reason" => MatchTarget::ResponseReason,
+        other => bail!(
+            "unknown rewrite part `{other}` (use url|method|body|header=NAME|\
+             resp-header=NAME|resp-body|status-reason)"
+        ),
     })
 }
 
