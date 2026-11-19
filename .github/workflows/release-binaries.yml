@@ -1,0 +1,90 @@
+name: Release binaries
+
+# Every release ships ready-to-run binaries, compiled with EVERY feature enabled
+# (`cargo build --release --all-features`). The version-bump/tag itself is handled
+# by the reusable Release workflow; this job reacts to the published release (and
+# can be run manually for any tag, or on a bare tag push) and attaches binaries.
+#
+# Note on triggers: a release created with the default GITHUB_TOKEN does not fire
+# `release: published`. The central release workflow inherits secrets (a PAT), so
+# it normally does — but if an auto-run is ever skipped, dispatch this manually
+# with the tag, or it will also catch the tag push.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build + attach binaries to (e.g. v0.1.11)"
+        required: true
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-binaries-${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  binaries:
+    name: Build + attach (linux x86_64, all features)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve tag
+        id: tag
+        run: |
+          TAG="${{ github.event.release.tag_name || inputs.tag || github.ref_name }}"
+          [ -n "$TAG" ] || { echo "::error::no tag resolved"; exit 1; }
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "resolved tag: $TAG"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+
+      # Same native deps as CI: eframe/egui (windowing + xkb) for camio-app, and
+      # the C toolchain for bundled SQLite (rusqlite) and BoringSSL (camio-request).
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -o Acquire::Retries=5
+          sudo apt-get install -y --no-install-recommends \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libwayland-dev cmake
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Compile every binary with all features
+        run: cargo build --workspace --release --all-features --bins
+
+      - name: Package
+        id: pkg
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          NAME="camio-${TAG}-linux-x86_64"
+          mkdir -p "$NAME"
+          found=0
+          for b in camio camio-app; do
+            if [ -x "target/release/$b" ]; then cp "target/release/$b" "$NAME/"; found=1; fi
+          done
+          [ "$found" = 1 ] || { echo "::error::no binaries were built"; exit 1; }
+          cp README.md LICENSE "$NAME/" 2>/dev/null || true
+          tar -czf "${NAME}.tar.gz" "$NAME"
+          sha256sum "${NAME}.tar.gz" | tee "${NAME}.tar.gz.sha256"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "built binaries:"; ls -la "$NAME"
+
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          # If the trigger was a bare tag push with no release yet, make one.
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" --title "$TAG" --generate-notes
+          gh release upload "$TAG" \
+            "${{ steps.pkg.outputs.name }}.tar.gz" \
+            "${{ steps.pkg.outputs.name }}.tar.gz.sha256" --clobber
+          echo "attached binaries to release $TAG"
