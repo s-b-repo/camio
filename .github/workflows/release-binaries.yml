@@ -120,6 +120,10 @@ jobs:
     needs: resolve
     if: needs.resolve.outputs.tag != ''
     runs-on: ${{ matrix.target.runner }}
+    # Cap each target at 45 min so a runner stuck in an unavailable
+    # queue (e.g. macos-aarch64 on accounts without that runner) does
+    # not keep `attach` waiting indefinitely.
+    timeout-minutes: 45
     # Apple-Silicon runners are not always available to every account.
     # macos-aarch64 is marked `continue-on-error: true` via `required: false`
     # so a missing runner doesn't block the release — the three required
