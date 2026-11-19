@@ -8,6 +8,7 @@ rust-version.workspace = true
 description = "Passive (and opt-in active) security checks that produce Camio findings."
 
 [dependencies]
+camio-automate.workspace = true
 camio-core.workspace = true
 camio-import.workspace = true
 camio-store.workspace = true

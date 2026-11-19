@@ -1,0 +1,250 @@
+{
+  "categories": [
+    {
+      "description": "Classic auth-bypass / login / 2FA / IDOR probe strings.",
+      "name": "auth-bypass",
+      "raw_count": 182,
+      "source_file": "base/auth-bypass.txt",
+      "total_count": 2000
+    },
+    {
+      "description": "Web-cache deception / poisoning probe paths — static-extension suffixes and parameter tricks.",
+      "name": "cache-deception",
+      "raw_count": 43,
+      "source_file": "base/cache-deception.txt",
+      "total_count": 473
+    },
+    {
+      "description": "Command injection — Unix shells, Windows cmd/PowerShell, blind with time probes.",
+      "name": "cmdi",
+      "raw_count": 182,
+      "source_file": "base/cmdi.txt",
+      "total_count": 2002
+    },
+    {
+      "description": "CORS origin-reflection / null / subdomain-wildcard probes — Origin header values.",
+      "name": "cors",
+      "raw_count": 26,
+      "source_file": "base/cors.txt",
+      "total_count": 26
+    },
+    {
+      "description": "CRLF / header / log injection probes — encoded carriage returns, header smuggling via response splitting.",
+      "name": "crlf",
+      "raw_count": 50,
+      "source_file": "base/crlf.txt",
+      "total_count": 550
+    },
+    {
+      "description": "CSRF / SameSite / anti-CSRF-token probes — missing / weak / recycled / predictable.",
+      "name": "csrf",
+      "raw_count": 58,
+      "source_file": "base/csrf.txt",
+      "total_count": 638
+    },
+    {
+      "description": "Insecure-deserialization probes — Java / PHP / .NET / Python / Ruby / Node.",
+      "name": "deserialization",
+      "raw_count": 97,
+      "source_file": "base/deserialization.txt",
+      "total_count": 1067
+    },
+    {
+      "description": "File-upload bypasses — extension, content-type, magic bytes, polyglots, SVG-XXE.",
+      "name": "file-upload",
+      "raw_count": 83,
+      "source_file": "base/file-upload.txt",
+      "total_count": 913
+    },
+    {
+      "description": "C-style format string probes — stack-leak, write-what-where, printf-family misuse.",
+      "name": "formatstring",
+      "raw_count": 81,
+      "source_file": "base/formatstring.txt",
+      "total_count": 888
+    },
+    {
+      "description": "Spreadsheet / CSV formula injection — Excel / LibreOffice / Google Sheets.",
+      "name": "formula",
+      "raw_count": 36,
+      "source_file": "base/formula.txt",
+      "total_count": 396
+    },
+    {
+      "description": "General-purpose fuzz metacharacters, format strings, buffer sizes, nullbytes.",
+      "name": "fuzz",
+      "raw_count": 125,
+      "source_file": "base/fuzz.txt",
+      "total_count": 1372
+    },
+    {
+      "description": "GraphQL probes — introspection, batching, aliases, fragment loops, injection.",
+      "name": "graphql",
+      "raw_count": 64,
+      "source_file": "base/graphql.txt",
+      "total_count": 704
+    },
+    {
+      "description": "Header-injection payloads and interesting header names/values for fuzzing.",
+      "name": "headers",
+      "raw_count": 117,
+      "source_file": "base/headers.txt",
+      "total_count": 117
+    },
+    {
+      "description": "JWT attack surface — alg confusion, none, kid injection, weak secrets, JWK/JKU/x5u.",
+      "name": "jwt",
+      "raw_count": 68,
+      "source_file": "base/jwt.txt",
+      "total_count": 68
+    },
+    {
+      "description": "LDAP injection — AND/OR flips, wildcard existence, blind char-by-char, bind-bypass.",
+      "name": "ldap",
+      "raw_count": 55,
+      "source_file": "base/ldap.txt",
+      "total_count": 604
+    },
+    {
+      "description": "Local-file inclusion probes — common Unix/Windows targets, PHP wrappers.",
+      "name": "lfi",
+      "raw_count": 162,
+      "source_file": "base/lfi.txt",
+      "total_count": 1782
+    },
+    {
+      "description": "JNDI / log4j lookup strings used to probe for CVE-2021-44228 class vulns.",
+      "name": "log4shell",
+      "raw_count": 43,
+      "source_file": "base/log4shell.txt",
+      "total_count": 473
+    },
+    {
+      "description": "NoSQL operator-based injection — Mongo $ne/$gt/$regex, body JSON, keyed arrays.",
+      "name": "nosqli",
+      "raw_count": 68,
+      "source_file": "base/nosqli.txt",
+      "total_count": 748
+    },
+    {
+      "description": "Open-redirect targets and parser bypasses — userinfo trick, backslash, whitespace, unicode, double-schemes.",
+      "name": "open-redirect",
+      "raw_count": 86,
+      "source_file": "base/open-redirect.txt",
+      "total_count": 946
+    },
+    {
+      "description": "ACL / normalisation / path-confusion bypasses — ..;/ semicolons, double-URL, trailing slashes, case skew.",
+      "name": "path-confusion",
+      "raw_count": 78,
+      "source_file": "base/path-confusion.txt",
+      "total_count": 855
+    },
+    {
+      "description": "Prototype pollution probes — client-side and server-side (Node, lodash, jQuery, Express body-parser).",
+      "name": "prototype-pollution",
+      "raw_count": 86,
+      "source_file": "base/prototype-pollution.txt",
+      "total_count": 946
+    },
+    {
+      "description": "HTTP/2 single-packet-attack and TOCTOU race probes — auth, redeem, limit-step.",
+      "name": "race-conditions",
+      "raw_count": 57,
+      "source_file": "base/race-conditions.txt",
+      "total_count": 627
+    },
+    {
+      "description": "Remote-file inclusion probes — HTTP(S), FTP, SMB, data/php wrappers hosted off-target.",
+      "name": "rfi",
+      "raw_count": 28,
+      "source_file": "base/rfi.txt",
+      "total_count": 308
+    },
+    {
+      "description": "SMTP header-injection / email-input abuse — BCC smuggling, from-spoofing, SMTP command injection.",
+      "name": "smtp",
+      "raw_count": 31,
+      "source_file": "base/smtp.txt",
+      "total_count": 341
+    },
+    {
+      "description": "HTTP request smuggling probes — CL.TE, TE.CL, TE.TE, H2.CL, H2.TE, prefix-based desync.",
+      "name": "smuggling",
+      "raw_count": 94,
+      "source_file": "base/smuggling.txt",
+      "total_count": 94
+    },
+    {
+      "description": "SQL injection probes — error-based, boolean-based, UNION, time-based, stacked.",
+      "name": "sqli",
+      "raw_count": 215,
+      "source_file": "base/sqli.txt",
+      "total_count": 2363
+    },
+    {
+      "description": "Server-side request forgery — cloud metadata, loopback bypass, DNS tricks, URL parsing differentials.",
+      "name": "ssrf",
+      "raw_count": 159,
+      "source_file": "base/ssrf.txt",
+      "total_count": 1749
+    },
+    {
+      "description": "Server-side template injection — Jinja2/Twig/Mustache/Smarty/ERB/EL/Velocity/Handlebars/Freemarker.",
+      "name": "ssti",
+      "raw_count": 104,
+      "source_file": "base/ssti.txt",
+      "total_count": 1144
+    },
+    {
+      "description": "Path traversal — raw, URL-encoded, double-encoded, mixed OS, nullbyte.",
+      "name": "traversal",
+      "raw_count": 133,
+      "source_file": "base/traversal.txt",
+      "total_count": 1461
+    },
+    {
+      "description": "Unicode normalisation / homoglyph / overlong-encoding bypasses.",
+      "name": "unicode",
+      "raw_count": 95,
+      "source_file": "base/unicode.txt",
+      "total_count": 1044
+    },
+    {
+      "description": "XPath injection — authentication-bypass, blind char-by-char, XPath 2.0 features.",
+      "name": "xpath",
+      "raw_count": 38,
+      "source_file": "base/xpath.txt",
+      "total_count": 418
+    },
+    {
+      "description": "Cross-site scripting probes — reflected, DOM, event handlers, SVG/MathML, polyglots.",
+      "name": "xss",
+      "raw_count": 247,
+      "source_file": "base/xss.txt",
+      "total_count": 2715
+    },
+    {
+      "description": "XML external entity probes — classic, OOB, blind, parameter entity, XInclude.",
+      "name": "xxe",
+      "raw_count": 69,
+      "source_file": "base/xxe.txt",
+      "total_count": 759
+    }
+  ],
+  "encodings": [
+    "raw",
+    "url",
+    "url-double",
+    "html",
+    "html-numeric",
+    "b64",
+    "hex",
+    "unicode-escape",
+    "js-escape",
+    "mixed-case",
+    "null-insert"
+  ],
+  "total_payloads": 30591,
+  "version": 1
+}

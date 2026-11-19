@@ -231,6 +231,15 @@ submission guide (`docs/KALI_SUBMISSION.md`) ship in the repo.
 > [`docs/BUILDING.md`](./docs/BUILDING.md).** Covers every per-crate feature,
 > all CLI subcommands and combos, environment variables, LLDB/VS Code
 > configurations, performance profiling, and troubleshooting.
+>
+> 🎯 **Payload database (1,568 base payloads × 5 encodings = 6,995 rows, 22
+> categories including HTTP request smuggling, SSTI, Log4Shell, SSRF, XXE,
+> NoSQLi, CRLF, JWT, Unicode-normalisation, auth-bypass and more) →
+> [`docs/PAYLOAD-DB.md`](./docs/PAYLOAD-DB.md).** Transparent plain-text source
+> under `payloads/DB/base/`, pre-built SQLite catalog at
+> `payloads/DB/payloads.sqlite`, combined/chained generation via `camio combo`,
+> and automated passive signature matching for in-scope captures when
+> `camio proxy --auto-scan` is on.
 
 ## Quick start
 

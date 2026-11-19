@@ -26,17 +26,34 @@
 //! built-in payload packs are short, inert, standard probe strings (see
 //! [`payloads`]); they are not exploits.
 
+pub mod ai_chain;
 pub mod campaign;
+pub mod chain;
 pub mod classify;
+pub mod combo;
 pub mod discover;
+pub mod encoding;
+pub mod payload_db;
 pub mod payloads;
 pub mod positions;
+
+pub use ai_chain::{authorize_chain_steps, authorize_next_url, AiChainError};
 
 pub use campaign::{
     count_requests, generate, plan, AttackType, Campaign, CampaignPlan, GeneratedRequest,
 };
+pub use chain::{
+    materialize as materialize_chain, validate as validate_chain, Chain, ChainError, ChainState,
+    ChainStep, Condition, Extractor, MaterializedStep,
+};
 pub use classify::{classify, Baseline, ClassifiedResult};
-pub use discover::{discover_inputs, DiscoveredInput, InputKind};
+pub use combo::{combo, ComboMode};
+pub use discover::{detect_body_context, discover_inputs, DiscoveredInput, InputKind};
+pub use encoding::{
+    compatible_encodings, expand_for_context, expand_with_encodings, sql_encodings, to_payload_set,
+    EncodedPayload, Encoding, InputContext,
+};
+pub use payload_db::{load_default as load_payload_db, scan_for_signatures, PayloadDb, Signature};
 pub use payloads::{builtin_pack, builtin_packs, PayloadSet};
 pub use positions::{find_positions, strip_markers, Position, DEFAULT_MARKER};
 

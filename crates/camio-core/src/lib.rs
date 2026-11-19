@@ -13,6 +13,8 @@
 //! * [`fingerprint`] — anti-detection fingerprint profiles/policy for the
 //!   managed Camoufox browser and the matched request engine (plan §6).
 
+pub mod ai_guard;
+pub mod ai_tools;
 pub mod camioql;
 pub mod fingerprint;
 pub mod matchreplace;
@@ -33,6 +35,16 @@ pub use model::{
     Body, Confidence, ExchangeId, Finding, FindingId, Header, HeaderList, HttpExchange,
     HttpRequest, HttpResponse, HttpVersion, Project, ProjectId, ScopeDecision, Severity, Source,
     Target, Task, TaskId, TaskState, Timings,
+};
+pub use ai_guard::{
+    action_allowed, authorize_findings, bind_session, bind_session_with_integrity,
+    default_integrity_paths, integrity_manifest_hash, target_authorized,
+    verify_and_authorize_action, verify_and_authorize_target, verify_binding, verify_integrity,
+    AiGuardError, SessionBinding, SessionKey,
+};
+pub use ai_tools::{
+    default_catalog, resolve_tool_call, ResolveRequest, ToolCatalog, ToolResolution, ToolSpec,
+    ToolSuggestion,
 };
 pub use policy::{ActionClass, Policy, PolicyOutcome};
 pub use rate::RateLimiter;

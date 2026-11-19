@@ -1,14 +1,31 @@
 name: Release binaries
 
-# Every release ships ready-to-run binaries, compiled with EVERY feature enabled
-# (`cargo build --release --all-features`). The version-bump/tag itself is handled
-# by the reusable Release workflow; this job reacts to the published release (and
-# can be run manually for any tag, or on a bare tag push) and attaches binaries.
+# Every release ships ready-to-run binaries, compiled with EVERY feature
+# enabled (`cargo build --release --all-features`). The version-bump/tag
+# itself is handled by the reusable Release workflow; this job reacts to
+# the published release (and can be run manually for any tag, or on a
+# bare tag push) and attaches multi-target binaries.
 #
-# Note on triggers: a release created with the default GITHUB_TOKEN does not fire
-# `release: published`. The central release workflow inherits secrets (a PAT), so
-# it normally does — but if an auto-run is ever skipped, dispatch this manually
-# with the tag, or it will also catch the tag push.
+# Targets:
+#   * linux   x86_64  (ubuntu-latest, gnu)
+#   * linux   aarch64 (ubuntu-latest + cross via `cross`)
+#   * macOS   x86_64  (macos-13 — Intel runner)
+#   * macOS   aarch64 (macos-14 — Apple Silicon runner)
+#
+# Each archive bundles:
+#   * `camio` and `camio-app` binaries (all features on)
+#   * `README.md`, `LICENSE`, `CHANGELOG.md`
+#   * `docs/BUILDING.md`, `docs/PAYLOAD-DB.md`, `docs/AI-SAFETY.md`,
+#     `docs/STEALTH.md`
+#   * `payloads/DB/` — the pre-built SQLite catalog + base/*.txt sources
+#   * a SHA-256 of the archive
+#
+# Note on triggers: a release created with the default GITHUB_TOKEN does
+# not fire `release: published`. The central release workflow inherits
+# secrets (a PAT), so it normally does — but if an auto-run is ever
+# skipped, dispatch this manually with the tag, or it will also catch
+# the bare tag push.
+
 on:
   release:
     types: [published]
@@ -28,63 +45,189 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  binaries:
-    name: Build + attach (linux x86_64, all features)
+  # ------------------------------------------------------------------
+  # Resolve the tag once so every matrix job sees the same string.
+  # ------------------------------------------------------------------
+  resolve:
+    name: Resolve tag
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.r.outputs.tag }}
     steps:
-      - name: Resolve tag
-        id: tag
+      - name: Resolve
+        id: r
         run: |
           TAG="${{ github.event.release.tag_name || inputs.tag || github.ref_name }}"
           [ -n "$TAG" ] || { echo "::error::no tag resolved"; exit 1; }
+          case "$TAG" in v[0-9]*.[0-9]*.[0-9]*) ;; *) echo "::error::tag `$TAG` is not vMAJOR.MINOR.PATCH"; exit 1 ;; esac
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "resolved tag: $TAG"
 
+  # ------------------------------------------------------------------
+  # Build + package each target.
+  # ------------------------------------------------------------------
+  build:
+    name: Build ${{ matrix.target.name }}
+    needs: resolve
+    runs-on: ${{ matrix.target.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - name: linux-x86_64
+            runner: ubuntu-latest
+            triple: x86_64-unknown-linux-gnu
+            cross: false
+          - name: linux-aarch64
+            runner: ubuntu-latest
+            triple: aarch64-unknown-linux-gnu
+            cross: true
+          - name: macos-x86_64
+            runner: macos-13
+            triple: x86_64-apple-darwin
+            cross: false
+          - name: macos-aarch64
+            runner: macos-14
+            triple: aarch64-apple-darwin
+            cross: false
+    steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ steps.tag.outputs.tag }}
+          ref: ${{ needs.resolve.outputs.tag }}
 
-      # Same native deps as CI: eframe/egui (windowing + xkb) for camio-app, and
-      # the C toolchain for bundled SQLite (rusqlite) and BoringSSL (camio-request).
-      - name: Install system dependencies
+      # ------- platform system dependencies -------
+      - name: Install Linux build deps
+        if: runner.os == 'Linux' && matrix.target.cross == false
         run: |
           sudo apt-get update -o Acquire::Retries=5
           sudo apt-get install -y --no-install-recommends \
             libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
-            libxkbcommon-dev libwayland-dev cmake
+            libxkbcommon-dev libwayland-dev cmake clang pkg-config
 
+      # ------- Rust toolchain + target -------
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target.triple }}
+
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target.triple }}
 
-      - name: Compile every binary with all features
-        run: cargo build --workspace --release --all-features --bins
+      # ------- `cross` for linux-aarch64 so we don't need an arm runner -------
+      - name: Install cross
+        if: matrix.target.cross == true
+        run: cargo install cross --locked --version 0.2.5
 
-      - name: Package
-        id: pkg
+      # ------- native build -------
+      - name: Compile (native)
+        if: matrix.target.cross == false
+        env:
+          # Help eframe/egui find X11/Wayland on Linux; no-op on macOS.
+          PKG_CONFIG_ALLOW_SYSTEM_LIBS: "1"
+        run: >
+          cargo build
+          --workspace --release --all-features --bins
+          --target ${{ matrix.target.triple }}
+
+      # ------- cross-compiled build (linux-aarch64) -------
+      # The egui app depends on Xorg/Wayland dev headers that are tricky
+      # under `cross`; we build only the CLI + MCP server + web UI for
+      # aarch64, which is what most headless users want.
+      - name: Compile (cross — CLI only)
+        if: matrix.target.cross == true
+        run: >
+          cross build
+          --release --all-features
+          -p camio-cli -p camio-mcp -p camio-web
+          --target ${{ matrix.target.triple }}
+
+      # ------- stage archive directory -------
+      - name: Stage
+        id: stage
+        shell: bash
         run: |
-          TAG="${{ steps.tag.outputs.tag }}"
-          NAME="camio-${TAG}-linux-x86_64"
+          set -euo pipefail
+          TAG="${{ needs.resolve.outputs.tag }}"
+          NAME="camio-${TAG}-${{ matrix.target.name }}"
           mkdir -p "$NAME"
+          # Binaries (may be absent on cross builds that excluded camio-app).
           found=0
           for b in camio camio-app; do
-            if [ -x "target/release/$b" ]; then cp "target/release/$b" "$NAME/"; found=1; fi
+            path="target/${{ matrix.target.triple }}/release/${b}"
+            if [ -x "$path" ]; then
+              cp "$path" "$NAME/"
+              found=1
+            fi
           done
-          [ "$found" = 1 ] || { echo "::error::no binaries were built"; exit 1; }
-          cp README.md LICENSE "$NAME/" 2>/dev/null || true
-          tar -czf "${NAME}.tar.gz" "$NAME"
-          sha256sum "${NAME}.tar.gz" | tee "${NAME}.tar.gz.sha256"
-          echo "name=$NAME" >> "$GITHUB_OUTPUT"
-          echo "built binaries:"; ls -la "$NAME"
+          [ "$found" = 1 ] || { echo "::error::no binaries built for ${{ matrix.target.name }}"; exit 1; }
 
-      - name: Attach to the release
+          # Docs + license + changelog (if present in the tagged commit).
+          for f in README.md LICENSE CHANGELOG.md \
+                   docs/BUILDING.md docs/PAYLOAD-DB.md docs/AI-SAFETY.md docs/STEALTH.md; do
+            [ -f "$f" ] && cp "$f" "$NAME/" || true
+          done
+
+          # Payload DB (source of truth + pre-built SQLite).
+          if [ -d payloads/DB ]; then
+            mkdir -p "$NAME/payloads/DB"
+            cp -r payloads/DB/base "$NAME/payloads/DB/" 2>/dev/null || true
+            cp payloads/DB/README.md "$NAME/payloads/DB/" 2>/dev/null || true
+            cp payloads/DB/catalog.json "$NAME/payloads/DB/" 2>/dev/null || true
+            cp payloads/DB/payloads.sqlite "$NAME/payloads/DB/" 2>/dev/null || true
+          fi
+
+          # Archive + checksum.
+          tar -czf "${NAME}.tar.gz" "$NAME"
+          # BSD/GNU shasum compat: `sha256sum` on linux, `shasum -a 256` on macOS.
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256"
+          else
+            shasum -a 256 "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256"
+          fi
+          cat "${NAME}.tar.gz.sha256"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "Built archive for ${{ matrix.target.name }}:"
+          ls -la "$NAME"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.stage.outputs.name }}
+          path: |
+            ${{ steps.stage.outputs.name }}.tar.gz
+            ${{ steps.stage.outputs.name }}.tar.gz.sha256
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------
+  # Attach every built archive to the GitHub Release in one step so the
+  # release page lists them together.
+  # ------------------------------------------------------------------
+  attach:
+    name: Attach to release
+    needs: [resolve, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.tag }}
+
+      - name: Download all built archives
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish to release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="${{ steps.tag.outputs.tag }}"
+          set -euo pipefail
+          TAG="${{ needs.resolve.outputs.tag }}"
           # If the trigger was a bare tag push with no release yet, make one.
           gh release view "$TAG" >/dev/null 2>&1 \
             || gh release create "$TAG" --title "$TAG" --generate-notes
-          gh release upload "$TAG" \
-            "${{ steps.pkg.outputs.name }}.tar.gz" \
-            "${{ steps.pkg.outputs.name }}.tar.gz.sha256" --clobber
-          echo "attached binaries to release $TAG"
+          # Flatten the download dir and upload every .tar.gz + .sha256.
+          cd dist
+          ls -la
+          gh release upload "$TAG" *.tar.gz *.tar.gz.sha256 --clobber
+          echo "attached $(ls *.tar.gz | wc -l) archive(s) to release $TAG"

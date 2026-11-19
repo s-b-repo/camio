@@ -7,6 +7,7 @@
 //! pure parsing — it reads a request and reports structure, it does not mutate or
 //! send anything.
 
+use crate::encoding::InputContext;
 use camio_core::HttpRequest;
 use serde::{Deserialize, Serialize};
 
@@ -42,6 +43,63 @@ impl DiscoveredInput {
             value: value.into(),
         }
     }
+
+    /// Smart-detect the [`InputContext`] for this input given its containing
+    /// request. Used by the dynamic encoded-payload expander to pick the right
+    /// encoding set.
+    ///
+    /// Heuristics:
+    /// * `QueryParam` → `UrlQuery`
+    /// * `BodyParam` → `FormUrlencoded`
+    /// * `Cookie` → `HttpCookie`
+    /// * `Header` → `HttpHeaderValue`
+    /// * `JsonField` → `JsonString`, unless the value parses as a number →
+    ///   `JsonNumber`
+    pub fn detect_context(&self, _req: &HttpRequest) -> InputContext {
+        match self.kind {
+            InputKind::QueryParam => InputContext::UrlQuery,
+            InputKind::BodyParam => InputContext::FormUrlencoded,
+            InputKind::Cookie => InputContext::HttpCookie,
+            InputKind::Header => InputContext::HttpHeaderValue,
+            InputKind::JsonField => {
+                if self.value.parse::<f64>().is_ok() {
+                    InputContext::JsonNumber
+                } else {
+                    InputContext::JsonString
+                }
+            }
+        }
+    }
+}
+
+/// Smart context detection from the request alone — for callers that don't
+/// have a [`DiscoveredInput`] yet. Inspects `Content-Type` and known XML/JSON/
+/// GraphQL hints.
+pub fn detect_body_context(req: &HttpRequest) -> InputContext {
+    let ct = req
+        .headers
+        .get("Content-Type")
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    if ct.contains("application/json") || ct.contains("+json") {
+        return InputContext::JsonString;
+    }
+    if ct.contains("application/xml") || ct.contains("text/xml") || ct.contains("+xml") {
+        return InputContext::XmlText;
+    }
+    if ct.contains("application/x-www-form-urlencoded") {
+        return InputContext::FormUrlencoded;
+    }
+    if ct.contains("multipart/form-data") {
+        return InputContext::Multipart;
+    }
+    if ct.contains("application/graphql") || req.url.contains("/graphql") {
+        return InputContext::GraphqlString;
+    }
+    if ct.contains("text/html") {
+        return InputContext::HtmlBody;
+    }
+    InputContext::Raw
 }
 
 /// Request headers worth testing on their own (plan §10: headers are an input

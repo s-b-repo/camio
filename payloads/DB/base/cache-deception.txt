@@ -1,0 +1,47 @@
+# category: cache-deception
+# description: Web-cache deception / poisoning probe paths — static-extension suffixes and parameter tricks.
+# references: Omer Gil "Web Cache Deception", PortSwigger Web Cache Poisoning labs.
+
+/account.css
+/account.js
+/account.png
+/account.jpg
+/account.jpeg
+/account.gif
+/account.webp
+/account.ico
+/account.svg
+/account.pdf
+/account.txt
+/account.html
+/account.xml
+/account.json
+/account.woff
+/account.woff2
+/account/nonexistent.css
+/account/x.css
+/account;.css
+/account%2f.css
+/account?.css
+/account%00.css
+/account/file.css
+/account/file.js
+/profile/x.jpg
+/profile/picture.jpg?v=1
+/api/user?format=json
+/api/user?callback=cache
+/api/user#.css
+/users/me.css
+/users/me/x.jpg
+/users/me;x.jpg
+/users/me%2fx.jpg
+/users/me?x.jpg
+/api/v1/me;.css
+/api/v1/me/avatar.png
+/api/v1/me/?ignored.png
+/api/v1/me/.html
+/api/v1/me/index.css
+/me/.css
+/me/.html
+/me/%00.css
+/me%00.css

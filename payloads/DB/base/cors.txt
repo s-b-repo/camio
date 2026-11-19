@@ -1,0 +1,30 @@
+# category: cors
+# description: CORS origin-reflection / null / subdomain-wildcard probes — Origin header values.
+# references: PortSwigger CORS labs, OWASP CORS Original Sin.
+
+null
+file://
+https://evil.test
+http://evil.test
+https://sub.example.com.evil.test
+https://example.com.evil.test
+https://evil.test.example.com
+https://example.com
+https://EXAMPLE.com
+https://Example.com
+HTTPS://example.com
+https://example.com:1337
+https://example%2ecom
+https://example.com%00.evil.test
+https://example.com@evil.test
+https://evil.test@example.com
+*
+*.example.com
+https://*.example.com
+http://127.0.0.1
+http://localhost
+https://localhost
+https://[::1]
+http://localhost:8080
+https://localhost:3000
+https://localhost.evil.test

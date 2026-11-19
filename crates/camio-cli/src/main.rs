@@ -89,6 +89,15 @@ enum Command {
     Sitemap(SitemapArgs),
     /// List or show the built-in payload packs.
     Payloads(PayloadsArgs),
+    /// Combine or chain payloads from multiple DB categories into one set.
+    Combo(ComboArgs),
+    /// Encode a payload set through one or more encodings (dynamic testing).
+    Encode(EncodeArgs),
+    /// AI-mediation guard (bind a session, verify a binding, authorize a chain).
+    AiGuard {
+        #[command(subcommand)]
+        action: AiCmd,
+    },
     /// Opt-in ACTIVE scan (reflected XSS, error-based SQLi, open redirect) via the matched engine.
     Activescan(ActiveArgs),
     /// Ask the optional AI assistant (NVIDIA NIM / OpenAI / Ollama; BYO key via env).
@@ -418,6 +427,9 @@ fn main() -> Result<()> {
         Command::Sequencer(args) => sequencer_cmd(args),
         Command::Sitemap(args) => sitemap_cmd(args),
         Command::Payloads(args) => payloads_cmd(args),
+        Command::Combo(args) => combo_cmd(args),
+        Command::Encode(args) => encode_cmd(args),
+        Command::AiGuard { action } => ai_guard_cmd(action),
         Command::Activescan(args) => activescan_cmd(args),
         Command::Ai(args) => ai_cmd(args),
         Command::App(args) => app_cmd(args),
@@ -1387,7 +1399,9 @@ fn fuzz_cmd(args: FuzzArgs) -> Result<()> {
 }
 
 fn load_payload_set(spec: &str) -> Result<PayloadSet> {
-    if let Some(set) = camio_automate::builtin_pack(spec) {
+    // Try the on-disk DB first (`db:<cat>` prefix or plain category name).
+    let db = camio_automate::load_payload_db();
+    if let Some(set) = resolve_pack(spec, &db) {
         return Ok(set);
     }
     let path = PathBuf::from(spec);
@@ -1396,7 +1410,10 @@ fn load_payload_set(spec: &str) -> Result<PayloadSet> {
             std::fs::read_to_string(&path).with_context(|| format!("reading payloads {spec}"))?;
         return Ok(PayloadSet::from_lines(spec, &text));
     }
-    bail!("payloads `{spec}` is not a built-in pack (see `camio payloads`) or an existing file");
+    bail!(
+        "payloads `{spec}` is not a built-in pack, a DB category (see `camio payloads`), \
+         or an existing file"
+    );
 }
 
 /// A copy of `req` with every §…§ marker removed (baseline request).
@@ -1624,18 +1641,44 @@ struct PayloadsArgs {
 }
 
 fn payloads_cmd(args: PayloadsArgs) -> Result<()> {
+    let db = camio_automate::load_payload_db();
     match &args.name {
         None => {
-            println!("Built-in payload packs (for AUTHORIZED testing only):");
+            println!("Built-in payload packs (small, hand-curated, for AUTHORIZED testing only):");
             for name in camio_automate::builtin_packs() {
                 let n = camio_automate::builtin_pack(name)
                     .map(|s| s.len())
                     .unwrap_or(0);
-                println!("  {:<14} {} payload(s)", name, n);
+                println!("  {:<18} {} payload(s)", name, n);
+            }
+            if !db.categories.is_empty() {
+                println!();
+                println!(
+                    "Camio payload database (payloads/DB/base/*.txt — {} categor{}):",
+                    db.categories.len(),
+                    if db.categories.len() == 1 { "y" } else { "ies" }
+                );
+                let total: usize = db.categories.values().map(|s| s.len()).sum();
+                for (name, set) in &db.categories {
+                    println!("  db:{:<15} {} payload(s)", name, set.len());
+                }
+                println!("  {:>18}  (total {})", "", total);
+                println!();
+                println!(
+                    "Use `--payloads db:<category>` in fuzz/combo, or `camio payloads db:<category>` to list."
+                );
+            } else {
+                println!();
+                println!(
+                    "note: payloads/DB/base/ not found — the database isn't shipped with this build."
+                );
+                println!(
+                    "      set CAMIO_PAYLOADS_DIR or run from the workspace root to use it."
+                );
             }
         }
         Some(name) => {
-            let set = camio_automate::builtin_pack(name)
+            let set = resolve_pack(name, &db)
                 .ok_or_else(|| anyhow::anyhow!("unknown pack `{name}` (see `camio payloads`)"))?;
             for p in &set.payloads {
                 println!("{p}");
@@ -1643,6 +1686,287 @@ fn payloads_cmd(args: PayloadsArgs) -> Result<()> {
         }
     }
     Ok(())
+}
+
+// ===========================================================================
+// Combo (payload chaining)
+// ===========================================================================
+
+#[derive(Parser)]
+struct ComboArgs {
+    /// Comma-separated payload categories to combine (e.g. `xss,sqli,traversal`).
+    #[arg(long = "categories", required = true)]
+    categories: String,
+    /// Composition mode: parallel|chain|cross-product.
+    #[arg(long = "mode", default_value = "parallel")]
+    mode: ComboModeArg,
+    /// String inserted between category contributions in each generated payload.
+    #[arg(long = "join", default_value = ";")]
+    join: String,
+    /// Cap the number of generated payloads.
+    #[arg(long = "limit", default_value_t = 50)]
+    limit: usize,
+    /// Write the combo as a one-per-line list to this file instead of stdout.
+    #[arg(long = "out")]
+    out: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ComboModeArg {
+    Parallel,
+    Chain,
+    CrossProduct,
+}
+
+impl From<ComboModeArg> for camio_automate::ComboMode {
+    fn from(m: ComboModeArg) -> Self {
+        match m {
+            ComboModeArg::Parallel => camio_automate::ComboMode::Parallel,
+            ComboModeArg::Chain => camio_automate::ComboMode::Chain,
+            ComboModeArg::CrossProduct => camio_automate::ComboMode::CrossProduct,
+        }
+    }
+}
+
+fn combo_cmd(args: ComboArgs) -> Result<()> {
+    let db = camio_automate::load_payload_db();
+    let names: Vec<&str> = args
+        .categories
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if names.len() < 2 {
+        bail!(
+            "combo needs at least two --categories (got {}): try `camio combo --categories xss,sqli`",
+            names.len()
+        );
+    }
+    let mut sets = Vec::with_capacity(names.len());
+    for n in &names {
+        let set = resolve_pack(n, &db)
+            .ok_or_else(|| anyhow::anyhow!("unknown category `{n}` (see `camio payloads`)"))?;
+        sets.push(set);
+    }
+    let out = camio_automate::combo(&sets, args.mode.into(), &args.join, args.limit)
+        .ok_or_else(|| anyhow::anyhow!("combo generation yielded no payloads"))?;
+
+    match &args.out {
+        Some(path) => {
+            let body = out
+                .payloads
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            std::fs::write(path, format!("{body}\n"))
+                .with_context(|| format!("writing {}", path.display()))?;
+            eprintln!(
+                "wrote {} payload(s) from combo `{}` to {}",
+                out.payloads.len(),
+                out.name,
+                path.display()
+            );
+        }
+        None => {
+            eprintln!(
+                "combo `{}`: {} payload(s) ({} mode, join={:?})",
+                out.name,
+                out.payloads.len(),
+                match args.mode {
+                    ComboModeArg::Parallel => "parallel",
+                    ComboModeArg::Chain => "chain",
+                    ComboModeArg::CrossProduct => "cross-product",
+                },
+                args.join
+            );
+            for p in &out.payloads {
+                println!("{p}");
+            }
+        }
+    }
+    Ok(())
+}
+
+// ===========================================================================
+// Encode (dynamic encoded-payload testing)
+// ===========================================================================
+
+#[derive(Parser)]
+struct EncodeArgs {
+    /// A pack name (built-in or `db:<cat>`), a file path, or `-` for stdin.
+    /// Required unless one of `--list-encodings` / `--list-contexts` is used.
+    #[arg(
+        long = "payloads",
+        required_unless_present_any = ["list_encodings", "list_contexts"]
+    )]
+    payloads: Option<String>,
+    /// Target context — selects a compatible encoding set automatically.
+    /// Use `--encodings` for an explicit list instead.
+    #[arg(long = "context", conflicts_with = "encodings")]
+    context: Option<String>,
+    /// Explicit comma-separated encodings (e.g. `raw,url,url-double,html,b64`).
+    /// Run `camio encode --list-encodings` to see every name.
+    #[arg(long = "encodings")]
+    encodings: Option<String>,
+    /// List every encoding name and exit.
+    #[arg(long = "list-encodings")]
+    list_encodings: bool,
+    /// List every context name (and its encoding set) and exit.
+    #[arg(long = "list-contexts")]
+    list_contexts: bool,
+    /// Also print the encoding tag before each line (useful for classifiers).
+    #[arg(long = "tagged")]
+    tagged: bool,
+    /// Cap the number of emitted payloads.
+    #[arg(long = "limit", default_value_t = 500)]
+    limit: usize,
+    /// Write to this file instead of stdout.
+    #[arg(long = "out")]
+    out: Option<PathBuf>,
+}
+
+fn encode_cmd(args: EncodeArgs) -> Result<()> {
+    if args.list_encodings {
+        println!("Available encodings (apply in the given order; `raw` is always first):");
+        for e in camio_automate::Encoding::all() {
+            println!("  {}", e.name());
+        }
+        return Ok(());
+    }
+    if args.list_contexts {
+        println!("Known input contexts and their compatible encodings:");
+        let contexts = [
+            "url-path", "url-query", "form", "json", "json-number", "xml", "xml-attr",
+            "header", "cookie", "html", "html-attr", "html-script", "html-style", "graphql",
+            "multipart", "raw",
+        ];
+        for name in contexts {
+            if let Some(ctx) = camio_automate::InputContext::from_name(name) {
+                let encs = camio_automate::compatible_encodings(ctx);
+                let names: Vec<&str> = encs.iter().map(|e| e.name()).collect();
+                println!("  {:<12} {}", name, names.join(", "));
+            }
+        }
+        return Ok(());
+    }
+
+    // Resolve the payload set.
+    let db = camio_automate::load_payload_db();
+    let payloads_spec = args
+        .payloads
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("--payloads is required"))?;
+    let set = if payloads_spec == "-" {
+        let mut buf = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buf)
+            .context("reading stdin")?;
+        camio_automate::PayloadSet::from_lines("stdin", &buf)
+    } else if let Some(s) = resolve_pack(payloads_spec, &db) {
+        s
+    } else {
+        let p = PathBuf::from(payloads_spec);
+        if p.exists() {
+            let text = std::fs::read_to_string(&p)
+                .with_context(|| format!("reading {}", p.display()))?;
+            camio_automate::PayloadSet::from_lines(payloads_spec, &text)
+        } else {
+            bail!(
+                "payloads `{payloads_spec}` is not a built-in pack, a DB category, stdin (`-`), or a file"
+            );
+        }
+    };
+
+    // Resolve the encoding list.
+    let encs: Vec<camio_automate::Encoding> = match (&args.context, &args.encodings) {
+        (Some(c), _) => {
+            let ctx = camio_automate::InputContext::from_name(c).ok_or_else(|| {
+                anyhow::anyhow!("unknown context `{c}` (see `camio encode --list-contexts`)")
+            })?;
+            camio_automate::compatible_encodings(ctx)
+        }
+        (None, Some(e)) => {
+            let mut out = Vec::new();
+            for name in e.split(',') {
+                let name = name.trim();
+                if name.is_empty() {
+                    continue;
+                }
+                let enc = camio_automate::Encoding::from_name(name).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "unknown encoding `{name}` (see `camio encode --list-encodings`)"
+                    )
+                })?;
+                out.push(enc);
+            }
+            out
+        }
+        (None, None) => {
+            bail!("pass --context <name> or --encodings <list> (see --list-contexts/--list-encodings)");
+        }
+    };
+
+    let mut expanded = camio_automate::expand_with_encodings(&set, &encs);
+    if expanded.len() > args.limit {
+        expanded.truncate(args.limit);
+    }
+
+    let format_line = |e: &camio_automate::EncodedPayload| {
+        if args.tagged {
+            format!("{}\t{}", e.encoding.name(), e.body)
+        } else {
+            e.body.clone()
+        }
+    };
+
+    match &args.out {
+        Some(path) => {
+            let mut body = String::new();
+            for e in &expanded {
+                body.push_str(&format_line(e));
+                body.push('\n');
+            }
+            std::fs::write(path, body)
+                .with_context(|| format!("writing {}", path.display()))?;
+            eprintln!(
+                "wrote {} encoded payload(s) from `{}` to {}",
+                expanded.len(),
+                set.name,
+                path.display()
+            );
+        }
+        None => {
+            eprintln!(
+                "encode `{}`: {} payload(s), encodings=[{}]",
+                set.name,
+                expanded.len(),
+                encs.iter()
+                    .map(|e| e.name())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
+            for e in &expanded {
+                println!("{}", format_line(e));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Resolve `spec` to a `PayloadSet`, trying (in order): a `db:<cat>` reference,
+/// a plain category name in the DB, and the small built-in packs.
+fn resolve_pack(
+    spec: &str,
+    db: &camio_automate::PayloadDb,
+) -> Option<camio_automate::PayloadSet> {
+    if let Some(rest) = spec.strip_prefix("db:") {
+        return db.categories.get(rest).cloned();
+    }
+    if let Some(s) = db.categories.get(spec).cloned() {
+        return Some(s);
+    }
+    camio_automate::builtin_pack(spec)
 }
 
 // ===========================================================================
@@ -2383,4 +2707,391 @@ fn ui_cmd(args: UiArgs) -> Result<()> {
         policy,
     };
     camio_web::serve(cfg).context("serving the web UI")
+}
+
+// ===========================================================================
+// AI guard
+// ===========================================================================
+
+#[derive(Subcommand)]
+enum AiCmd {
+    /// Bind a session — commit scope + targets + allowed action classes to a
+    /// signed capability, keep the key in `~/.config/camio/ai-keys/`, print the
+    /// binding JSON for the AI to carry.
+    Bind(AiBindArgs),
+    /// Verify a binding against its on-disk key. Prints OK or the error.
+    Verify(AiVerifyArgs),
+    /// Authorize a chain file (JSON) — materialize it, re-check every URL
+    /// against the binding, print the ready-to-send request plan.
+    AuthorizeChain(AiAuthorizeChainArgs),
+    /// Re-check the integrity-locked paths against the binding's pinned
+    /// hash. Refuses with `IntegrityBreach` if a file/dir has changed.
+    CheckIntegrity(AiCheckIntegrityArgs),
+}
+
+#[derive(Parser)]
+struct AiCheckIntegrityArgs {
+    /// Path to a binding JSON file.
+    binding: String,
+    /// Extra paths to re-check in addition to the defaults. The set must
+    /// match what the binding was issued with — any mismatch is a breach.
+    #[arg(long = "lock-path")]
+    lock_paths: Vec<PathBuf>,
+    #[arg(long = "key-dir")]
+    key_dir: Option<PathBuf>,
+}
+
+#[derive(Parser)]
+struct AiBindArgs {
+    /// Optional session id. Defaults to a random one derived from the time.
+    #[arg(long = "session-id")]
+    session_id: Option<String>,
+    /// Scope include rule (CamioQL), repeatable.
+    #[arg(long = "scope-include")]
+    scope_include: Vec<String>,
+    /// Scope exclude rule (CamioQL), repeatable.
+    #[arg(long = "scope-exclude")]
+    scope_exclude: Vec<String>,
+    /// Authorized target URL — at least one is required. Hashed at host level
+    /// (scheme://host[:port]); the AI may hit any path on these hosts.
+    #[arg(long = "target", required = true)]
+    targets: Vec<String>,
+    /// Allowed action classes (repeatable). Choose from: read, mutating,
+    /// active, destructive. Defaults to read-only.
+    #[arg(long = "allow")]
+    allow: Vec<String>,
+    /// Optional binding lifetime in seconds (0 or unset = no expiry).
+    #[arg(long = "ttl-secs", default_value_t = 0)]
+    ttl_secs: u64,
+    /// Directory to persist the per-session key. Default
+    /// `$XDG_CONFIG_HOME/camio/ai-keys` (or `~/.config/camio/ai-keys`).
+    #[arg(long = "key-dir")]
+    key_dir: Option<PathBuf>,
+    /// Pretty-print the binding JSON.
+    #[arg(long = "pretty")]
+    pretty: bool,
+    /// Pin on-disk integrity — snapshot the Camio binary, `~/.config/camio`,
+    /// and `plugins/` at bind time and fold their SHA-256 into the signed
+    /// binding. Any subsequent change (new plugin dropped, binary swapped,
+    /// key file replaced) causes the next guard check to refuse.
+    #[arg(long = "lock")]
+    lock: bool,
+    /// Extra paths to add to the integrity lock (repeatable). Implies `--lock`.
+    #[arg(long = "lock-path")]
+    lock_paths: Vec<PathBuf>,
+}
+
+#[derive(Parser)]
+struct AiVerifyArgs {
+    /// Path to a binding JSON file. Use `-` for stdin.
+    binding: String,
+    /// Key directory (same default as `camio ai bind`).
+    #[arg(long = "key-dir")]
+    key_dir: Option<PathBuf>,
+}
+
+#[derive(Parser)]
+struct AiAuthorizeChainArgs {
+    /// Path to a binding JSON file.
+    #[arg(long = "binding", required = true)]
+    binding: PathBuf,
+    /// Path to a chain JSON file with the shape documented in
+    /// `docs/AI-SAFETY.md`.
+    #[arg(long = "chain", required = true)]
+    chain: PathBuf,
+    /// Key directory.
+    #[arg(long = "key-dir")]
+    key_dir: Option<PathBuf>,
+}
+
+fn ai_guard_cmd(action: AiCmd) -> Result<()> {
+    match action {
+        AiCmd::Bind(a) => ai_bind(a),
+        AiCmd::Verify(a) => ai_verify(a),
+        AiCmd::AuthorizeChain(a) => ai_authorize_chain(a),
+        AiCmd::CheckIntegrity(a) => ai_check_integrity(a),
+    }
+}
+
+fn default_key_dir(override_: Option<PathBuf>) -> PathBuf {
+    if let Some(p) = override_ {
+        return p;
+    }
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+        .unwrap_or_else(|| PathBuf::from("."));
+    base.join("camio").join("ai-keys")
+}
+
+fn save_key(dir: &std::path::Path, session_id: &str, key_bytes: &[u8; 32]) -> Result<PathBuf> {
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let path = dir.join(format!("{session_id}.key"));
+    std::fs::write(&path, hex_encode(key_bytes))
+        .with_context(|| format!("writing {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        let _ = std::fs::set_permissions(&path, perms);
+    }
+    Ok(path)
+}
+
+fn load_key(dir: &std::path::Path, session_id: &str) -> Result<camio_core::SessionKey> {
+    let path = dir.join(format!("{session_id}.key"));
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("reading {} (did you `camio ai bind` first?)", path.display()))?;
+    let bytes = hex_decode(text.trim())
+        .map_err(|_| anyhow::anyhow!("invalid hex in {}", path.display()))?;
+    if bytes.len() != 32 {
+        bail!("key file {} is not 32 bytes", path.display());
+    }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&bytes);
+    Ok(camio_core::SessionKey::from_bytes(arr))
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
+}
+
+fn hex_decode(s: &str) -> std::result::Result<Vec<u8>, ()> {
+    if !s.len().is_multiple_of(2) {
+        return Err(());
+    }
+    let mut out = Vec::with_capacity(s.len() / 2);
+    let b = s.as_bytes();
+    let from_hex = |c: u8| match c {
+        b'0'..=b'9' => Ok(c - b'0'),
+        b'a'..=b'f' => Ok(c - b'a' + 10),
+        b'A'..=b'F' => Ok(c - b'A' + 10),
+        _ => Err(()),
+    };
+    let mut i = 0;
+    while i < b.len() {
+        out.push((from_hex(b[i])? << 4) | from_hex(b[i + 1])?);
+        i += 2;
+    }
+    Ok(out)
+}
+
+fn parse_action(s: &str) -> Result<camio_core::ActionClass> {
+    use camio_core::ActionClass;
+    match s.trim().to_ascii_lowercase().as_str() {
+        "read" => Ok(ActionClass::Read),
+        "mutating" | "mutate" | "send" => Ok(ActionClass::Mutating),
+        "active" => Ok(ActionClass::Active),
+        "destructive" | "destroy" => Ok(ActionClass::Destructive),
+        other => bail!("unknown action class `{other}` (want: read|mutating|active|destructive)"),
+    }
+}
+
+fn ai_bind(args: AiBindArgs) -> Result<()> {
+    // Build scope rules from CamioQL strings.
+    let mut rules: Vec<camio_core::ScopeRule> = Vec::new();
+    for r in &args.scope_include {
+        rules.push(camio_core::ScopeRule::include(r).with_context(|| format!("scope rule `{r}`"))?);
+    }
+    for r in &args.scope_exclude {
+        rules.push(camio_core::ScopeRule::exclude(r).with_context(|| format!("scope rule `{r}`"))?);
+    }
+
+    // Parse allowed actions (default to read).
+    let allowed = if args.allow.is_empty() {
+        vec![camio_core::ActionClass::Read]
+    } else {
+        args.allow
+            .iter()
+            .map(|s| parse_action(s))
+            .collect::<Result<Vec<_>>>()?
+    };
+
+    let session_id = args.session_id.unwrap_or_else(|| {
+        let t = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        format!("ai-{t:x}")
+    });
+
+    let key = camio_core::SessionKey::generate();
+    let key_dir = default_key_dir(args.key_dir);
+    let raw = key.expose_for_persist();
+    let key_path = save_key(&key_dir, &session_id, &raw)?;
+
+    let expires = if args.ttl_secs == 0 {
+        0
+    } else {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        now.saturating_add(args.ttl_secs.saturating_mul(1000))
+    };
+    let want_lock = args.lock || !args.lock_paths.is_empty();
+    let binding = if want_lock {
+        let mut paths = camio_core::default_integrity_paths();
+        paths.extend(args.lock_paths.iter().cloned());
+        camio_core::bind_session_with_integrity(
+            &session_id,
+            &rules,
+            &args.targets,
+            &allowed,
+            &paths,
+            expires,
+            &key,
+        )
+        .with_context(|| "bind_session_with_integrity failed (malformed target or unreadable lock path?)")?
+    } else {
+        camio_core::bind_session(&session_id, &rules, &args.targets, &allowed, expires, &key)
+            .with_context(|| "bind_session failed (malformed target?)")?
+    };
+    eprintln!("stored key at {}", key_path.display());
+    eprintln!("session_id = {session_id}");
+    if want_lock {
+        eprintln!("integrity-locked ({} paths)", {
+            let mut paths = camio_core::default_integrity_paths();
+            paths.extend(args.lock_paths.iter().cloned());
+            paths.len()
+        });
+    }
+    let json = if args.pretty {
+        serde_json::to_string_pretty(&binding)?
+    } else {
+        serde_json::to_string(&binding)?
+    };
+    println!("{json}");
+    Ok(())
+}
+
+fn ai_check_integrity(args: AiCheckIntegrityArgs) -> Result<()> {
+    let text = if args.binding == "-" {
+        let mut s = String::new();
+        std::io::stdin().read_to_string(&mut s)?;
+        s
+    } else {
+        std::fs::read_to_string(&args.binding)
+            .with_context(|| format!("reading {}", args.binding))?
+    };
+    let binding: camio_core::SessionBinding =
+        serde_json::from_str(&text).context("parsing binding JSON")?;
+    let dir = default_key_dir(args.key_dir);
+    let _key = load_key(&dir, &binding.session_id)?;
+    let mut paths = camio_core::default_integrity_paths();
+    paths.extend(args.lock_paths);
+    match camio_core::verify_integrity(&binding, &paths) {
+        Ok(()) if binding.integrity_hash.is_empty() => {
+            println!("ok  no integrity lock on this binding");
+            Ok(())
+        }
+        Ok(()) => {
+            println!("ok  integrity matches ({} paths)", paths.len());
+            Ok(())
+        }
+        Err(e) => bail!("{e}"),
+    }
+}
+
+fn ai_verify(args: AiVerifyArgs) -> Result<()> {
+    let text = if args.binding == "-" {
+        let mut s = String::new();
+        std::io::stdin().read_to_string(&mut s)?;
+        s
+    } else {
+        std::fs::read_to_string(&args.binding)
+            .with_context(|| format!("reading {}", args.binding))?
+    };
+    let binding: camio_core::SessionBinding =
+        serde_json::from_str(&text).context("parsing binding JSON")?;
+    let dir = default_key_dir(args.key_dir);
+    let key = load_key(&dir, &binding.session_id)?;
+    match camio_core::verify_binding(&binding, &key) {
+        Ok(()) => {
+            println!(
+                "ok  session={}  targets={}  actions=[{}]",
+                binding.session_id,
+                binding.target_hashes.len(),
+                binding.allowed_actions.join(",")
+            );
+            Ok(())
+        }
+        Err(e) => bail!("{e}"),
+    }
+}
+
+fn ai_authorize_chain(args: AiAuthorizeChainArgs) -> Result<()> {
+    use camio_automate::{authorize_chain_steps, Chain, ChainState, ChainStep};
+
+    let binding_text = std::fs::read_to_string(&args.binding)
+        .with_context(|| format!("reading {}", args.binding.display()))?;
+    let binding: camio_core::SessionBinding = serde_json::from_str(&binding_text)?;
+    let key = load_key(&default_key_dir(args.key_dir), &binding.session_id)?;
+
+    // Load the chain spec as untyped JSON — avoids bringing `serde` into
+    // scope just for a transient reader struct.
+    let chain_text = std::fs::read_to_string(&args.chain)
+        .with_context(|| format!("reading {}", args.chain.display()))?;
+    let json: serde_json::Value = serde_json::from_str(&chain_text)?;
+
+    let mut chain = Chain::new();
+    let steps_json = json
+        .get("steps")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| anyhow::anyhow!("chain spec needs a `steps` array"))?;
+    for s in steps_json {
+        let label = s
+            .get("label")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("every step needs a `label`"))?;
+        let url = s
+            .get("url")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("every step needs a `url`"))?;
+        let method = s.get("method").and_then(|v| v.as_str()).unwrap_or("GET");
+        let mut req = camio_core::HttpRequest::get(url);
+        req.method = method.to_string();
+        if let Some(hs) = s.get("headers").and_then(|v| v.as_array()) {
+            for h in hs {
+                if let Some(pair) = h.as_array() {
+                    if pair.len() == 2 {
+                        if let (Some(n), Some(v)) = (pair[0].as_str(), pair[1].as_str()) {
+                            req.headers.push(n.to_string(), v.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(body) = s.get("body").and_then(|v| v.as_str()) {
+            if !body.is_empty() {
+                req.body = camio_core::Body::from_text(body.to_string());
+            }
+        }
+        chain = chain.push(ChainStep::new(label, req));
+    }
+    let mut state = ChainState::new();
+    if let Some(obj) = json.get("state").and_then(|v| v.as_object()) {
+        for (k, v) in obj {
+            if let Some(s) = v.as_str() {
+                state.insert(k.clone(), s.to_string());
+            }
+        }
+    }
+    match authorize_chain_steps(&chain, &state, &binding, &key) {
+        Ok(steps) => {
+            println!(
+                "authorized: {} step(s) — ready to send through the scope-gated engine",
+                steps.len()
+            );
+            for s in &steps {
+                println!("  [{}] {} {}", s.step_label, s.request.method, s.request.url);
+            }
+            Ok(())
+        }
+        Err(e) => bail!("refused: {e}"),
+    }
 }

