@@ -68,7 +68,10 @@ jobs:
           MOZBUILD_STATE_PATH: /mnt/mozbuild
           CAMOUFOX_REPO: ${{ inputs.camoufox_repo }}
         run: |
-          sudo mkdir -p /mnt/camio-browser-build && sudo chown "$USER" /mnt/camio-browser-build
+          # /mnt is root-owned; make both the build dir and mach's state dir
+          # ($MOZBUILD_STATE_PATH) writable by the build user.
+          sudo mkdir -p /mnt/camio-browser-build /mnt/mozbuild
+          sudo chown "$USER" /mnt/camio-browser-build /mnt/mozbuild
           ln -s /mnt/camio-browser-build build
           ./build.sh --full \
             --librewolf "${{ inputs.librewolf_ref }}" \
