@@ -61,6 +61,19 @@ jobs:
           done
           node --version && python3 --version
 
+      - name: Add swap (Firefox's dom/bindings + dom/canvas TUs OOM 16 GB)
+        run: |
+          # The default runner has ~16 GB RAM; Firefox's heaviest C++ TUs spike
+          # past that in parallel. A 16 GB swapfile on /mnt lets them complete
+          # (slower, not killed). /mnt still has ~50 GB left for the build.
+          sudo swapoff -a || true
+          sudo fallocate -l 16G /mnt/swapfile \
+            || sudo dd if=/dev/zero of=/mnt/swapfile bs=1M count=16384
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          free -h; swapon --show
+
       - name: Build the fork (LibreWolf + Camoufox + Camio branding)
         working-directory: browser
         env:
@@ -76,7 +89,7 @@ jobs:
           ./build.sh --full \
             --librewolf "${{ inputs.librewolf_ref }}" \
             --camoufox "${{ inputs.camoufox_ref }}" \
-            --jobs "$(nproc)" || echo "::warning::build.sh --full returned non-zero (see logs); uploading whatever was produced"
+            --jobs "$(( $(nproc) > 3 ? 3 : $(nproc) ))" || echo "::warning::build.sh --full returned non-zero (see logs); uploading whatever was produced"
 
       - name: Collect artifacts
         if: always()

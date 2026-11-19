@@ -160,6 +160,20 @@ if [ -n "$lwsrc" ] && [ -f "$BRANDING_CSS" ]; then
     && echo "    staged Camio userChrome.css into the branding dir"
 fi
 
+# Trim peak RAM so the heaviest TUs (dom/bindings, dom/canvas) don't OOM a
+# memory-constrained runner: drop separate debug symbols (the big RAM/disk/time
+# hog) and cap parallel jobs. $JOBS defaults to nproc; the CI caps it lower.
+if [ -n "$lwsrc" ]; then
+  {
+    echo ''
+    echo '# --- Camio build tuning (reduce peak memory) ---'
+    echo 'ac_add_options --disable-debug-symbols'
+    echo "mk_add_options MOZ_MAKE_FLAGS=\"-j$JOBS\""
+    echo "mk_add_options \"export RUSTC_WRAPPER=\""
+  } >> "$lwsrc/mozconfig" 2>/dev/null \
+    && echo "    appended memory-trimming options to $lwsrc/mozconfig"
+fi
+
 echo "==> compiling + packaging (this is the multi-hour part)"
 make build   </dev/null || { echo "build failed — see logs"; exit 1; }
 make package </dev/null || echo "    package step non-zero"
