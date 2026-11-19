@@ -8,6 +8,9 @@ versioning once it reaches 1.0.
 
 ### Added
 
+- **Exchange diff** (`camio diff <id1> <id2>`, plan §F09): a unified line diff
+  between two stored exchanges' responses (or `--request`), over the existing
+  Comparer — e.g. a replay against a baseline.
 - **Workspace backup** (`camio backup <dest>`, plan §F01): a consistent compacted
   copy of a workspace database (SQLite `VACUUM INTO`, WAL-safe, refuses to
   overwrite) — verified reopenable with history and saved searches intact.

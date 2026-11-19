@@ -69,6 +69,8 @@ enum Command {
     Jwt(JwtArgs),
     /// Byte/line diff between two files (Comparer).
     Compare(CompareArgs),
+    /// Unified diff between two stored exchanges' responses (or requests) (F09).
+    Diff(DiffArgs),
     /// Run passive security checks over stored history (Scanner).
     Scan(ScanArgs),
     /// Triage stored findings: list them, or set a finding's status (F14).
@@ -375,6 +377,7 @@ fn main() -> Result<()> {
         Command::Convert(args) => convert_cmd(args),
         Command::Jwt(args) => jwt_cmd(args),
         Command::Compare(args) => compare_cmd(args),
+        Command::Diff(args) => diff_cmd(args),
         Command::Scan(args) => scan_cmd(args),
         Command::Findings(args) => findings_cmd(args),
         Command::Fuzz(args) => fuzz_cmd(args),
@@ -984,6 +987,50 @@ fn findings_cmd(args: FindingsArgs) -> Result<()> {
             );
         }
         eprintln!("{} finding(s).", rows.len());
+    }
+    Ok(())
+}
+
+#[derive(Parser)]
+struct DiffArgs {
+    /// First stored exchange id.
+    id1: i64,
+    /// Second stored exchange id.
+    id2: i64,
+    #[arg(long, default_value = "camio.db")]
+    db: PathBuf,
+    /// Diff the requests instead of the responses.
+    #[arg(long)]
+    request: bool,
+    /// Context lines around each change.
+    #[arg(long, default_value_t = 3)]
+    context: usize,
+}
+
+fn diff_cmd(args: DiffArgs) -> Result<()> {
+    let store = open_store(&args.db)?;
+    let load = |id: i64| -> Result<HttpExchange> {
+        store
+            .get(camio_core::ExchangeId(id))?
+            .ok_or_else(|| anyhow::anyhow!("no exchange #{id} in {}", args.db.display()))
+    };
+    let a = load(args.id1)?;
+    let b = load(args.id2)?;
+
+    let (ta, tb) = if args.request {
+        (a.request.raw(), b.request.raw())
+    } else {
+        let raw = |ex: &HttpExchange| ex.response.as_ref().map(|r| r.raw()).unwrap_or_default();
+        (raw(&a), raw(&b))
+    };
+
+    let what = if args.request { "request" } else { "response" };
+    eprintln!("diff {} of #{} ↔ #{}", what, args.id1, args.id2);
+    let diff = camio_convert::unified_diff(&ta, &tb, args.context);
+    if diff.trim().is_empty() {
+        println!("(identical)");
+    } else {
+        print!("{diff}");
     }
     Ok(())
 }
