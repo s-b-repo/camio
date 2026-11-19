@@ -379,6 +379,72 @@ pub fn to_http_request(head: &RequestHead, body: Body, url: String) -> HttpReque
     }
 }
 
+/// Whether this request is a WebSocket upgrade handshake (RFC 6455): a GET with
+/// `Connection: Upgrade` (token, possibly among others) and `Upgrade: websocket`.
+pub fn is_websocket_upgrade(head: &RequestHead) -> bool {
+    if !head.method.eq_ignore_ascii_case("GET") {
+        return false;
+    }
+    let conn_upgrade = head.headers.iter().any(|h| {
+        h.name.eq_ignore_ascii_case("connection")
+            && h.value
+                .to_ascii_lowercase()
+                .split(',')
+                .any(|t| t.trim() == "upgrade")
+    });
+    let upgrade_ws = head
+        .headers
+        .get("upgrade")
+        .map(|v| v.eq_ignore_ascii_case("websocket"))
+        .unwrap_or(false);
+    conn_upgrade && upgrade_ws
+}
+
+/// The origin-form request target (path + query) from a request head, whether it
+/// arrived absolute-form (forward proxy) or origin-form (inside a tunnel).
+pub fn origin_form_target(head: &RequestHead) -> String {
+    let t = head.target.as_str();
+    for scheme in ["http://", "https://"] {
+        if let Some(rest) = t.strip_prefix(scheme) {
+            return match rest.find('/') {
+                Some(i) => rest[i..].to_string(),
+                None => "/".to_string(),
+            };
+        }
+    }
+    if t.starts_with('/') {
+        t.to_string()
+    } else {
+        format!("/{t}")
+    }
+}
+
+/// Reconstruct the raw upgrade handshake bytes to replay to the origin,
+/// preserving the `Upgrade`/`Connection`/`Sec-WebSocket-*` headers (which the
+/// normal forwarding path strips) and dropping only proxy-specific headers.
+pub fn reconstruct_upgrade_request(head: &RequestHead, body: &Body) -> Vec<u8> {
+    let mut out = String::with_capacity(256);
+    out.push_str(&head.method);
+    out.push(' ');
+    out.push_str(&origin_form_target(head));
+    out.push_str(" HTTP/1.1\r\n");
+    for h in head.headers.iter() {
+        if h.name.eq_ignore_ascii_case("proxy-connection")
+            || h.name.eq_ignore_ascii_case("proxy-authorization")
+        {
+            continue;
+        }
+        out.push_str(&h.name);
+        out.push_str(": ");
+        out.push_str(&h.value);
+        out.push_str("\r\n");
+    }
+    out.push_str("\r\n");
+    let mut bytes = out.into_bytes();
+    bytes.extend_from_slice(body.as_bytes());
+    bytes
+}
+
 /// Split `host:port` (or bare `host`) into its parts, defaulting the port to 443.
 pub fn split_authority(authority: &str) -> (String, u16) {
     // Handle bracketed IPv6 literals: [::1]:443
@@ -610,6 +676,36 @@ mod tests {
         assert_eq!(split_authority("h:8443"), ("h".to_string(), 8443));
         assert_eq!(split_authority("h"), ("h".to_string(), 443));
         assert_eq!(split_authority("[::1]:9000"), ("[::1]".to_string(), 9000));
+    }
+
+    #[test]
+    fn detects_websocket_upgrade() {
+        let raw = b"GET http://h/ws HTTP/1.1\r\nHost: h\r\nUpgrade: websocket\r\nConnection: keep-alive, Upgrade\r\nSec-WebSocket-Key: abc\r\n\r\n";
+        let mut conn = Conn::new(TestIo::new(raw));
+        let (head, _b) = conn
+            .read_request(DEFAULT_MAX_HEADER_BYTES, DEFAULT_MAX_BODY_BYTES)
+            .unwrap()
+            .unwrap();
+        assert!(is_websocket_upgrade(&head));
+        assert_eq!(origin_form_target(&head), "/ws");
+        let bytes = reconstruct_upgrade_request(&head, &Body::empty());
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.starts_with("GET /ws HTTP/1.1\r\n"));
+        // Upgrade/Connection/Sec-WebSocket headers are preserved for the origin.
+        assert!(text.contains("Upgrade: websocket\r\n"));
+        assert!(text.contains("Connection: keep-alive, Upgrade\r\n"));
+        assert!(text.contains("Sec-WebSocket-Key: abc\r\n"));
+    }
+
+    #[test]
+    fn plain_get_is_not_upgrade() {
+        let raw = b"GET http://h/ HTTP/1.1\r\nHost: h\r\n\r\n";
+        let mut conn = Conn::new(TestIo::new(raw));
+        let (head, _b) = conn
+            .read_request(DEFAULT_MAX_HEADER_BYTES, DEFAULT_MAX_BODY_BYTES)
+            .unwrap()
+            .unwrap();
+        assert!(!is_websocket_upgrade(&head));
     }
 
     #[test]

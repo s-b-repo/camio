@@ -33,6 +33,11 @@ versioning once it reaches 1.0.
   - **Scope-aware automation:** `--auto-scan` runs the passive scanner on every
     **in-scope** captured exchange and stores its findings as traffic flows;
     out-of-scope traffic is still recorded but never scanned or attacked.
+  - **WebSocket:** a plain `ws://` upgrade is scope-gated, recorded as metadata,
+    then raw-relayed to the origin so the connection works through the proxy;
+    `wss://` is preserved by the default blind-relay, and under `--tls-intercept`
+    a WebSocket is refused honestly (501) rather than broken, since relaying it
+    would require a second, non-matched TLS client.
   - **Native app:** a new **Proxy** surface starts/stops the proxy on a background
     thread (via the new `ProxyServer::spawn`/`ProxyHandle`), toggles TLS
     interception and auto-scan, exports the CA, shows a live capture table, and

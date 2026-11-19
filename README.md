@@ -79,7 +79,9 @@ problem, and measures fingerprint parity rather than claiming undetectability.
   only the host is recorded), or with `--tls-intercept` it is **terminated** by
   Camio's own operator-trusted CA (`camio proxy --export-ca`) so the plaintext is
   inspected and re-sent through the fingerprint-matched engine — honestly tagged
-  fingerprint-changing. A UI-agnostic **intercept queue** (`QueueInterceptor`)
+  fingerprint-changing. **WebSocket:** a `ws://` upgrade is scope-gated, recorded,
+  and raw-relayed so it works through the proxy; `wss://` rides the blind-relay.
+  A UI-agnostic **intercept queue** (`QueueInterceptor`)
   lets a front-end pause/edit/drop requests and responses. The upstream send is
   the injected matched engine, so the proxy adds no second HTTP client and all
   destination policy stays in one place. **Hard to fingerprint:** the re-sent

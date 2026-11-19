@@ -52,7 +52,10 @@ use camio_core::{
     ActionClass, Body, HeaderList, HttpExchange, HttpRequest, HttpResponse, HttpVersion, Policy,
     PolicyOutcome, RuleSet, Scope, ScopeDecision, Source,
 };
-use http1::{absolute_url, split_authority, to_http_request, write_response, Conn, RequestHead};
+use http1::{
+    absolute_url, is_websocket_upgrade, reconstruct_upgrade_request, split_authority,
+    to_http_request, write_response, Conn, RequestHead,
+};
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -248,6 +251,13 @@ impl ProxyServer {
                 return; // CONNECT consumes the socket
             }
 
+            // A plain-HTTP (ws://) WebSocket upgrade: raw-relay the connection to
+            // the origin instead of forwarding the handshake through the engine.
+            if is_websocket_upgrade(&head) {
+                self.handle_ws_upgrade(conn, &head, body);
+                return; // the tunnel consumes the socket
+            }
+
             let keep_alive = wants_keep_alive(&head);
             match self.process_request(&mut conn, &head, body, None, keep_alive) {
                 Ok(true) => continue,
@@ -422,12 +432,99 @@ impl ProxyServer {
                     Ok(Some(hb)) => hb,
                     _ => return,
                 };
+            // WebSocket inside a terminated TLS tunnel can't be relayed to the
+            // origin without a second (non-matched) TLS client, which would be a
+            // fingerprint tell. Refuse honestly; blind-relay keeps wss://
+            // fingerprint-true when this host is excluded from TLS interception.
+            if is_websocket_upgrade(&head) {
+                let resp = synthetic(
+                    501,
+                    "Camio proxy: WebSocket is not intercepted under --tls-intercept. \
+                     Exclude this host from TLS interception to blind-relay it (fingerprint-true).",
+                );
+                if let Some(url) = absolute_url(&head, Some(authority)) {
+                    let request = to_http_request(&head, body, url);
+                    let probe = HttpExchange::new(request.clone(), Source::Proxy);
+                    let decision = self.config.scope.decide(&probe);
+                    self.capture(&request, Some(&resp), decision, None, None);
+                }
+                let _ = write_response(conn.stream_mut(), &resp, false);
+                return;
+            }
             let keep_alive = wants_keep_alive(&head);
             match self.process_request(&mut conn, &head, body, Some(authority), keep_alive) {
                 Ok(true) => continue,
                 _ => return,
             }
         }
+    }
+
+    /// Raw-relay a plain-HTTP (`ws://`) WebSocket upgrade to the origin. The
+    /// handshake is scope/policy-gated and recorded as metadata (frames are not
+    /// decoded), then the connection becomes a transparent byte relay — the
+    /// correct, protocol-preserving behaviour for an intercepting proxy.
+    fn handle_ws_upgrade(self: &Arc<Self>, conn: Conn<TcpStream>, head: &RequestHead, body: Body) {
+        let url = match absolute_url(head, None) {
+            Some(u) => u,
+            None => return,
+        };
+        // Canonical request for scope + capture (hop-by-hop stripped); the raw
+        // upstream bytes below preserve the upgrade headers.
+        let request = to_http_request(head, body.clone(), url);
+        let probe = HttpExchange::new(request.clone(), Source::Proxy);
+        let decision = self.config.scope.decide(&probe);
+        let gate =
+            self.config
+                .policy
+                .gate(ActionClass::Mutating, decision, /*confirmed*/ true);
+
+        let (mut client, leftover) = conn.into_parts();
+
+        if !matches!(gate, PolicyOutcome::Allow) {
+            let status = if decision == ScopeDecision::Blocked {
+                502
+            } else {
+                403
+            };
+            let resp = synthetic(status, "Camio proxy refused the WebSocket (out of scope)");
+            let _ = write_response(&mut client, &resp, false);
+            self.capture(&request, Some(&resp), decision, None, None);
+            return;
+        }
+
+        let host = match request.host() {
+            Some(h) => h,
+            None => return,
+        };
+        let port = request.port().unwrap_or(80);
+        let connect_host = host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_string();
+
+        // Record the handshake as a metadata-only observation.
+        let mut ex = HttpExchange::new(request.clone(), Source::Proxy);
+        ex.scope = Some(decision);
+        ex.note = Some("WebSocket upgrade (raw-relayed; frames not decoded)".to_string());
+        ex.created_at_ms = now_ms();
+        self.sink.record(&ex);
+
+        let upstream = match TcpStream::connect((connect_host.as_str(), port)) {
+            Ok(s) => s,
+            Err(_) => {
+                let resp = synthetic(502, "Camio proxy: WebSocket upstream connect failed");
+                let _ = write_response(&mut client, &resp, false);
+                return;
+            }
+        };
+        let raw = reconstruct_upgrade_request(head, &body);
+        if (&upstream).write_all(&raw).is_err() {
+            return;
+        }
+        if !leftover.is_empty() && (&upstream).write_all(&leftover).is_err() {
+            return;
+        }
+        relay_streams(client, upstream);
     }
 
     /// Capture a completed/refused exchange with a synthetic or real response.
@@ -582,6 +679,16 @@ fn blind_relay(
         Ok(s) => s,
         Err(_) => return,
     };
+    let _ = upstream.set_read_timeout(None);
+    if !leftover.is_empty() && (&upstream).write_all(&leftover).is_err() {
+        return;
+    }
+    relay_streams(client, upstream);
+}
+
+/// Bidirectionally pipe two TCP streams until either side closes. Shared by the
+/// blind HTTPS relay and the plain-HTTP WebSocket relay.
+fn relay_streams(client: TcpStream, upstream: TcpStream) {
     // A relay may idle (long-poll, websockets): no read timeout.
     let _ = client.set_read_timeout(None);
     let _ = upstream.set_read_timeout(None);
@@ -594,10 +701,6 @@ fn blind_relay(
         (Ok(r), w) => (r, w),
         _ => return,
     };
-
-    if up_w.write_all(&leftover).is_err() {
-        return;
-    }
 
     let c2u = std::thread::spawn(move || {
         let _ = io::copy(&mut client_r, &mut up_w);
@@ -898,6 +1001,65 @@ mod tests {
         s.read_to_string(&mut rest).unwrap();
         assert!(rest.contains("echo GET http://a.test/2"), "got: {rest}");
         assert_eq!(sink.len(), 2);
+    }
+
+    #[test]
+    fn websocket_upgrade_is_relayed() {
+        // Fake origin: read the handshake, reply 101, then echo one frame.
+        let origin = TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin_addr = origin.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut s, _)) = origin.accept() {
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 1024];
+                loop {
+                    match s.read(&mut tmp) {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => {
+                            buf.extend_from_slice(&tmp[..n]);
+                            if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                                break;
+                            }
+                        }
+                    }
+                }
+                let _ = s.write_all(
+                    b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+                );
+                if let Ok(n) = s.read(&mut tmp) {
+                    let _ = s.write_all(&tmp[..n]); // echo the frame
+                }
+            }
+        });
+
+        let sink = Arc::new(VecSink::new());
+        let server = ProxyServer::new(
+            lab_config(),
+            echo_forwarder(),
+            sink.clone(),
+            Arc::new(AutoForward),
+        );
+        let addr = start(server);
+
+        let mut s = TcpStream::connect(addr).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let req = format!(
+            "GET http://{origin_addr}/ws HTTP/1.1\r\nHost: {origin_addr}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: x\r\n\r\n"
+        );
+        s.write_all(req.as_bytes()).unwrap();
+
+        let resp = read_until(&mut s, "101 Switching Protocols");
+        assert!(resp.contains("101 Switching Protocols"), "got: {resp}");
+
+        // The tunnel is live: a frame sent now is echoed back through the relay.
+        s.write_all(b"PING").unwrap();
+        let echoed = read_until(&mut s, "PING");
+        assert!(echoed.contains("PING"), "got: {echoed}");
+
+        // The handshake was captured as metadata (frames not decoded).
+        assert_eq!(sink.len(), 1);
+        let note = sink.snapshot()[0].note.clone().unwrap_or_default();
+        assert!(note.contains("WebSocket"), "note: {note}");
     }
 
     #[test]
