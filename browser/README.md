@@ -45,15 +45,28 @@ Firefox uplift. Treat `build.sh` as an automated runbook, not a guarantee.
 
 ## Build
 
-### In the cloud (recommended — "use GitHub to compile")
+### In the cloud (recommended — "use GitHub to compile") ✅ proven
 
 A dev laptop rarely has ~40 GB spare, so build it on GitHub Actions instead:
 **Actions ▸ "Build camio-browser (fork)" ▸ Run workflow**
 ([`.github/workflows/browser.yml`](../.github/workflows/browser.yml)). It frees
-the runner's disk, installs the toolchain, runs `build.sh --full`, and uploads a
-`camio-browser` artifact (or the logs to iterate on). It is **manual** and
-**experimental** — a Firefox uplift may need a Camoufox patch reconciled; fix it
-here and re-run.
+the runner's disk, adds swap, installs the toolchain, runs `build.sh --full`, and
+uploads the `camio-browser` artifact.
+
+This **builds end-to-end in ~1h35m** on a stock `ubuntu-latest` runner and
+produces `librewolf-<version>.en-US.linux-x86_64.tar.xz` (~103 MB). Two things
+make it fit a 16 GB / 4-core runner: a **16 GB swapfile** and
+**`--disable-debug-symbols`** — Firefox's `dom/bindings` / `dom/canvas` TUs OOM
+the runner otherwise. Download the result from the run's **Artifacts**, or:
+
+```sh
+gh run download <run-id> -n camio-browser   # grabs the .tar.xz
+tar xf librewolf-*.tar.xz                    # extracts ./librewolf/
+```
+
+Camoufox's C++ patches are skipped (upstream suspended), so this is a
+**Camio-branded LibreWolf**; set the `camoufox_repo` input to a reachable source
+mirror to merge them when one exists.
 
 ### Locally (needs the disk + hours)
 
