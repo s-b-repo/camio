@@ -118,18 +118,33 @@ NOTE
   exit 0
 fi
 
-# ---- --full: best-effort end-to-end build (hours; experimental) -------------
-echo "==> FULL build (long, experimental — expect to reconcile a patch or two)"
+# ---- --full: end-to-end build (hours; experimental) ------------------------
+# LibreWolf's Makefile chains: download+verify the Firefox tarball -> extract ->
+# copy + run scripts/patch.sh (creates the `librewolf-<version>` source dir) ->
+# `./mach build` -> `./mach package-multi-locale` (drops librewolf-*.tar.xz in
+# the repo dir). `make package` pulls in every prerequisite; `make bootstrap`
+# installs the toolchain first. (There is no `dir`/`fetch` target.)
+echo "==> FULL build (long, experimental)"
 export MOZBUILD_STATE_PATH="${MOZBUILD_STATE_PATH:-$PWD/$WORK/.mozbuild}"
-( cd "$WORK/librewolf" && make dir && make fetch ) \
-  || { echo "LibreWolf fetch failed (check its README targets)"; exit 1; }
+ROOT="$PWD"
+CAMOUFOX_PATCHES="$ROOT/$WORK/camoufox/patches"
+BRANDING_CSS="$ROOT/branding/userChrome.css"
 
-ffdir="$(find "$WORK/librewolf" -maxdepth 2 -type d \( -name 'firefox-*' -o -name 'mozilla-*' \) 2>/dev/null | head -1)"
-echo "==> firefox source: ${ffdir:-<not found>}"
-if [ -n "$ffdir" ] && ls "$WORK"/camoufox/patches/*.patch >/dev/null 2>&1; then
-  echo "==> applying Camoufox stealth patches (best-effort; failures are logged)"
-  for p in "$WORK"/camoufox/patches/*.patch; do
-    if ( cd "$ffdir" && patch -p1 --forward --fuzz=3 --no-backup-if-mismatch < "$OLDPWD/$p" ) >/dev/null 2>&1; then
+cd "$WORK/librewolf"
+echo "==> installing the Firefox build toolchain (mach bootstrap)"
+make bootstrap </dev/null || echo "    bootstrap non-zero (continuing; may already be set up)"
+
+# Create the patched LibreWolf source dir up front so branding / Camoufox
+# patches land *before* the compile. The dir is librewolf-<version>.
+lwver="$(make -s version 2>/dev/null | tr -cd '0-9.' || true)"
+[ -n "$lwver" ] && make "librewolf-$lwver" </dev/null 2>/dev/null || true
+lwsrc="$(find . -maxdepth 1 -type d -name 'librewolf-*' 2>/dev/null | head -1)"
+echo "==> LibreWolf source dir: ${lwsrc:-<created during build>}"
+
+if [ -n "$lwsrc" ] && ls "$CAMOUFOX_PATCHES"/*.patch >/dev/null 2>&1; then
+  echo "==> applying Camoufox stealth patches (best-effort; failures logged)"
+  for p in "$CAMOUFOX_PATCHES"/*.patch; do
+    if ( cd "$lwsrc" && patch -p1 --forward --fuzz=3 --no-backup-if-mismatch < "$p" ) >/dev/null 2>&1; then
       echo "    applied $(basename "$p")"
     else
       echo "    SKIPPED $(basename "$p") — reconcile for this Firefox version"
@@ -137,13 +152,15 @@ if [ -n "$ffdir" ] && ls "$WORK"/camoufox/patches/*.patch >/dev/null 2>&1; then
   done
 fi
 
-inject_branding "$WORK/librewolf" || true
-if [ -n "$ffdir" ]; then
-  install -D -m 0644 branding/userChrome.css "$ffdir/browser/branding/camio/userChrome.css" 2>/dev/null || true
+# Bake the Camio black/blue chrome into the distribution so the fork is themed
+# even before Camio's launcher re-applies it.
+if [ -n "$lwsrc" ] && [ -f "$BRANDING_CSS" ]; then
+  install -D -m 0644 "$BRANDING_CSS" \
+    "$lwsrc/browser/branding/librewolf/camio-userChrome.css" 2>/dev/null \
+    && echo "    staged Camio userChrome.css into the branding dir"
 fi
 
-echo "==> bootstrapping + building (this is the multi-hour part)"
-( cd "$WORK/librewolf" && make bootstrap ) || echo "    bootstrap returned non-zero (may already be set up)"
-( cd "$WORK/librewolf" && make build ) || { echo "build failed — see logs"; exit 1; }
-( cd "$WORK/librewolf" && make package ) || echo "    package step non-zero"
-echo "==> done. Artifacts under $WORK/librewolf (look for obj-*/dist/)."
+echo "==> compiling + packaging (this is the multi-hour part)"
+make build   </dev/null || { echo "build failed — see logs"; exit 1; }
+make package </dev/null || echo "    package step non-zero"
+echo "==> done. Look for librewolf-*.tar.xz in $PWD."
