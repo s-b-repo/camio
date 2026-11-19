@@ -51,11 +51,22 @@ def bump_table_version(text: str, headers: list[str]) -> str | None:
 
 
 # --- Cargo.toml -----------------------------------------------------------
+# Bumps [workspace.package]/[package] version, and re-pins internal path-deps
+# (entries with both `path = "…"` and `version = "…"`) to the new MAJOR, so a
+# release bump never makes the workspace unresolvable (e.g. the 0.x -> 1.0 jump).
 p = Path("Cargo.toml")
 if p.is_file():
     txt = p.read_text(encoding="utf-8")
-    out = bump_table_version(txt, ["workspace.package", "package"])
-    if out and out != txt:
+    out = bump_table_version(txt, ["workspace.package", "package"]) or txt
+    major = version.split(".")[0]
+
+    def pin_pathdep(line: str) -> str:
+        if re.search(r'\bpath\s*=\s*"', line) and re.search(r'\bversion\s*=\s*"', line):
+            return re.sub(r'(\bversion\s*=\s*")[^"]*(")', rf"\g<1>{major}\g<2>", line, count=1)
+        return line
+
+    out = "\n".join(pin_pathdep(ln) for ln in out.split("\n"))
+    if out != txt:
         write(p, out)
 
 # --- package.json ---------------------------------------------------------
