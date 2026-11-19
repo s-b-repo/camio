@@ -37,6 +37,14 @@ pub struct McpServer {
     policy: Policy,
     store: Option<Store>,
     engine: Box<dyn RequestEngine>,
+    /// A loopback OAST collector, started lazily on the first `oast_*` tool call.
+    oast: Option<OastState>,
+}
+
+struct OastState {
+    collector: std::sync::Arc<camio_oast::Collector>,
+    base: String,
+    _handle: camio_oast::OastHandle,
 }
 
 impl McpServer {
@@ -51,6 +59,7 @@ impl McpServer {
             policy: Policy::safe(),
             store: None,
             engine: Box::new(DryRunEngine::new(spec)),
+            oast: None,
         }
     }
 
@@ -178,6 +187,8 @@ impl McpServer {
             "payloads_list" => Ok(self.tool_payloads()),
             "active_scan" => self.tool_active_scan(&args),
             "analyze_js" => self.tool_analyze_js(&args),
+            "oast_new_token" => self.tool_oast_new_token(),
+            "oast_interactions" => self.tool_oast_interactions(&args),
             other => Err(format!("unknown tool: {other}")),
         };
         match result {
@@ -228,6 +239,66 @@ impl McpServer {
         let store = self.store.as_ref().ok_or("no store configured")?;
         let findings = store.list_findings().map_err(|e| e.to_string())?;
         Ok(serde_json::to_value(findings).unwrap_or(json!([])))
+    }
+
+    /// Lazily start a loopback OAST collector so `oast_*` tools share one.
+    fn ensure_oast(&mut self) -> Result<&OastState, String> {
+        if self.oast.is_none() {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+            let addr = listener.local_addr().map_err(|e| e.to_string())?;
+            let collector = camio_oast::Collector::new(addr.to_string());
+            let handle = camio_oast::OastServer::new(collector.clone())
+                .spawn(listener)
+                .map_err(|e| e.to_string())?;
+            self.oast = Some(OastState {
+                collector,
+                base: addr.to_string(),
+                _handle: handle,
+            });
+        }
+        Ok(self.oast.as_ref().expect("oast just initialized"))
+    }
+
+    /// Mint a correlated OAST token and its callback URLs. The collector listens
+    /// on loopback, so it only records callbacks the target can route to this host.
+    fn tool_oast_new_token(&mut self) -> Result<Value, String> {
+        let st = self.ensure_oast()?;
+        let token = st.collector.new_token();
+        Ok(json!({
+            "token": token,
+            "callback_url": st.collector.callback_url(&token),
+            "dns_callback_url": st.collector.dns_callback_url(&token),
+            "base": st.base,
+            "note": "Plant callback_url in a payload (SSRF/blind injection), then poll oast_interactions with this token. Loopback base: only callbacks the target can route here are seen."
+        }))
+    }
+
+    /// List recorded OAST interactions, optionally filtered to one token.
+    fn tool_oast_interactions(&mut self, args: &Value) -> Result<Value, String> {
+        let token = args
+            .get("token")
+            .and_then(|t| t.as_str())
+            .map(str::to_string);
+        let st = self.ensure_oast()?;
+        let items = match &token {
+            Some(t) => st.collector.for_token(t),
+            None => st.collector.all(),
+        };
+        let interactions: Vec<Value> = items
+            .iter()
+            .map(|i| {
+                json!({
+                    "id": i.id,
+                    "token": i.token,
+                    "method": i.method,
+                    "target": i.target,
+                    "host": i.host,
+                    "source": i.source,
+                    "received_at_ms": i.received_at_ms,
+                })
+            })
+            .collect();
+        Ok(json!({ "count": interactions.len(), "interactions": interactions }))
     }
 
     fn tool_send_request(&mut self, args: &Value) -> Result<Value, String> {
@@ -1057,6 +1128,19 @@ fn tool_defs() -> Value {
             }
         },
         {
+            "name": "oast_new_token",
+            "description": "Mint a correlated OAST token and callback URLs (a local Collaborator-style collector starts on first use). Plant the URL in a payload, then poll oast_interactions. Loopback-bound: only callbacks that can reach this host are seen.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "oast_interactions",
+            "description": "List out-of-band interactions the OAST collector recorded, optionally filtered to one token — evidence of blind SSRF/injection callbacks.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "token": { "type": "string", "description": "Correlation token from oast_new_token; omit for all interactions." } }
+            }
+        },
+        {
             "name": "review_start",
             "description": "Start a background passive review of previously stored traffic. Returns a task ID.",
             "inputSchema": { "type": "object", "properties": {
@@ -1196,6 +1280,45 @@ mod tests {
         assert!(s
             .handle_line(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#)
             .is_none());
+    }
+
+    #[test]
+    fn oast_tools_mint_record_and_correlate() {
+        use std::io::{Read, Write};
+        let mut s = server();
+
+        // Mint a token + callback URL.
+        let resp = call(
+            &mut s,
+            r#"{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"oast_new_token","arguments":{}}}"#,
+        );
+        let payload = tool_payload(&resp);
+        let token = payload["token"].as_str().unwrap().to_string();
+        let url = payload["callback_url"].as_str().unwrap().to_string();
+
+        // Simulate a target's blind callback to that URL.
+        let authority_path = url.strip_prefix("http://").unwrap();
+        let (authority, path) = authority_path.split_once('/').unwrap();
+        let (authority, path) = (authority.to_string(), format!("/{path}"));
+        let mut c = std::net::TcpStream::connect(&authority).unwrap();
+        c.write_all(
+            format!("GET {path} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .unwrap();
+        let mut buf = Vec::new();
+        let _ = c.read_to_end(&mut buf);
+
+        // The interaction is recorded and correlates to the token.
+        let resp2 = call(
+            &mut s,
+            &format!(
+                r#"{{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{{"name":"oast_interactions","arguments":{{"token":"{token}"}}}}}}"#
+            ),
+        );
+        let p2 = tool_payload(&resp2);
+        assert_eq!(p2["count"].as_u64().unwrap(), 1, "payload: {p2}");
+        assert_eq!(p2["interactions"][0]["token"].as_str().unwrap(), token);
     }
 
     #[test]

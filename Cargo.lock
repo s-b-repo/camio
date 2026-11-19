@@ -1011,6 +1011,7 @@ dependencies = [
  "camio-convert",
  "camio-core",
  "camio-import",
+ "camio-oast",
  "camio-request",
  "camio-scan",
  "camio-sequencer",

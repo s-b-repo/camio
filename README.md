@@ -138,16 +138,20 @@ problem, and measures fingerprint parity rather than claiming undetectability.
 - **MCP server** (`camio-mcp`): a local stdio MCP server exposing Camio's data
   (fingerprint status, history, findings) and tools for CamioQL query, scope
   check, policy-gated send, convert, scan, sequencer, input discovery, site map,
-  fuzz planning, file import, payload listing, a policy-gated **active_scan**, and
-  **analyze_js** — all under the same policy as the CLI. Passive reviews also
-  expose task IDs, paginated results, cancellation, and redacted finding reports.
+  fuzz planning, file import, payload listing, a policy-gated **active_scan**,
+  **analyze_js**, and **OAST** (`oast_new_token` / `oast_interactions`, so an
+  agent can plant a correlated callback and read the out-of-band hits) — all
+  under the same policy as the CLI. Passive reviews also expose task IDs,
+  paginated results, cancellation, and redacted finding reports.
 - **Native desktop app** (`camio-app`): `camio app` opens a real egui/eframe
-  window (no Electron, no bundled JS runtime) with a grouped left rail for
-  Overview, Transport, History, Query, Site map, Replay, Discover,
-  Automate/Fuzz, Scanner, **Active scan**, Findings, Convert, Comparer, JWT,
-  Sequencer, Match & Replace, Scope, Payloads, Import, **Analyze JS**, **AI
-  assistant**, Open-browser, Plugins, Settings, Review workflows, Review tasks, Library, and
-  Integration evidence. It uses the same storage and policy as the CLI.
+  window (no Electron, no bundled JS runtime) with a **Burp-style top tool-tab
+  bar** — Dashboard, Target, **Proxy**, HTTP history, CamioQL, Repeater,
+  Intruder, Sequencer, Scanner, Active scan, Findings, Decoder, Comparer, JWT,
+  Analyze JS, Match & Replace, Scope, Payloads, Import, **AI assistant**,
+  Open-browser, Extensions (plugins), Settings, and more — reusing Burp's tool
+  names so the muscle memory carries over. The **Proxy** tab runs the
+  intercepting proxy with interactive intercept. It uses the same storage and
+  policy as the CLI.
   - **Customizable themes and background image.** Sentinel Blue is the default,
     with a black canvas, blue grid animation, and a Reduce motion setting. The
     other presets, custom colours, and background controls are available in
