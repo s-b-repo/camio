@@ -78,24 +78,24 @@ tokio = { version = "1.43", features = ["rt", "net", "time"] }
 # Internal crates (path deps, versioned together). The explicit `version` keeps
 # them from being treated as wildcard (`*`) dependencies by cargo-deny and is
 # what publishing would require anyway.
-camio-core = { path = "crates/camio-core", version = "0.1.1" }
-camio-engine = { path = "crates/camio-engine", version = "0.1.1" }
-camio-request = { path = "crates/camio-request", version = "0.1.1", default-features = false }
-camio-store = { path = "crates/camio-store", version = "0.1.1" }
-camio-convert = { path = "crates/camio-convert", version = "0.1.1" }
-camio-scan = { path = "crates/camio-scan", version = "0.1.1" }
-camio-automate = { path = "crates/camio-automate", version = "0.1.1" }
-camio-import = { path = "crates/camio-import", version = "0.1.1" }
-camio-sequencer = { path = "crates/camio-sequencer", version = "0.1.1" }
-camio-active = { path = "crates/camio-active", version = "0.1.1" }
-camio-ai = { path = "crates/camio-ai", version = "0.1.1" }
-camio-proxy = { path = "crates/camio-proxy", version = "0.1.1" }
-camio-oast = { path = "crates/camio-oast", version = "0.1.1" }
-camio-integrations = { path = "crates/camio-integrations", version = "0.1.1" }
-camio-tasks = { path = "crates/camio-tasks", version = "0.1.1" }
-camio-web = { path = "crates/camio-web", version = "0.1.1" }
-camio-app = { path = "crates/camio-app", version = "0.1.1" }
-camio-mcp = { path = "crates/camio-mcp", version = "0.1.1" }
+camio-core = { path = "crates/camio-core", version = "0" }
+camio-engine = { path = "crates/camio-engine", version = "0" }
+camio-request = { path = "crates/camio-request", version = "0", default-features = false }
+camio-store = { path = "crates/camio-store", version = "0" }
+camio-convert = { path = "crates/camio-convert", version = "0" }
+camio-scan = { path = "crates/camio-scan", version = "0" }
+camio-automate = { path = "crates/camio-automate", version = "0" }
+camio-import = { path = "crates/camio-import", version = "0" }
+camio-sequencer = { path = "crates/camio-sequencer", version = "0" }
+camio-active = { path = "crates/camio-active", version = "0" }
+camio-ai = { path = "crates/camio-ai", version = "0" }
+camio-proxy = { path = "crates/camio-proxy", version = "0" }
+camio-oast = { path = "crates/camio-oast", version = "0" }
+camio-integrations = { path = "crates/camio-integrations", version = "0" }
+camio-tasks = { path = "crates/camio-tasks", version = "0" }
+camio-web = { path = "crates/camio-web", version = "0" }
+camio-app = { path = "crates/camio-app", version = "0" }
+camio-mcp = { path = "crates/camio-mcp", version = "0" }
 
 [profile.release]
 lto = "thin"
