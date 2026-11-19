@@ -42,9 +42,11 @@
 use camio_core::{Confidence, ExchangeId, Finding, FindingId, HttpExchange, HttpRequest, Severity};
 
 mod checks;
+mod crawl;
 mod oast_ssrf;
 mod params;
 
+pub use crawl::{crawl, extract_links, CrawlOptions, CrawlResult};
 pub use oast_ssrf::run_oast_ssrf;
 
 pub use checks::{ErrorBasedSqli, OpenRedirect, ReflectedXss};

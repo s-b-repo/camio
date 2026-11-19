@@ -97,6 +97,8 @@ enum Command {
     Oast(OastArgs),
     /// Run Nuclei (external) against an authorized target and normalize its findings.
     Nuclei(NucleiArgs),
+    /// Crawl an authorized target (bounded, same-origin) through the matched engine.
+    Crawl(CrawlArgs),
     /// Enumerate subdomains of a domain with subfinder (external, passive OSINT).
     Subfinder(SubfinderArgs),
     /// List external-tool integrations and whether each is installed.
@@ -366,6 +368,7 @@ fn main() -> Result<()> {
         Command::Proxy(args) => proxy::run(args),
         Command::Oast(args) => oast_cmd(args),
         Command::Nuclei(args) => nuclei_cmd(args),
+        Command::Crawl(args) => crawl_cmd(args),
         Command::Subfinder(args) => subfinder_cmd(args),
         Command::Integrations => integrations_cmd(),
         Command::Workbench(args) => workbench::run(args),
@@ -1626,6 +1629,118 @@ fn subfinder_cmd(args: SubfinderArgs) -> Result<()> {
             println!("{h}");
         }
         eprintln!("{} unique subdomain(s).", hosts.len());
+    }
+    Ok(())
+}
+
+#[derive(Parser)]
+struct CrawlArgs {
+    /// Seed URL to crawl.
+    url: String,
+    /// Maximum pages to fetch.
+    #[arg(long, default_value_t = 50)]
+    max_pages: usize,
+    /// Follow links off the seed's host too (default: same-origin only).
+    #[arg(long)]
+    cross_origin: bool,
+    #[arg(long, value_enum, default_value_t = Preset::Balanced)]
+    preset: Preset,
+    #[arg(long = "scope-include")]
+    scope_include: Vec<String>,
+    #[arg(long = "scope-exclude")]
+    scope_exclude: Vec<String>,
+    #[arg(long)]
+    allow_private: bool,
+    /// Actually crawl. Without this, prints what would run.
+    #[arg(long)]
+    confirm: bool,
+    #[arg(long, default_value = "camio.db")]
+    db: PathBuf,
+    #[arg(long)]
+    json: bool,
+}
+
+fn crawl_cmd(args: CrawlArgs) -> Result<()> {
+    let profile = profile_for(args.preset);
+    let scope = build_scope(&args.scope_include, &args.scope_exclude, args.allow_private)?;
+    let decision = scope.decide(&HttpExchange::new(
+        HttpRequest::get(&args.url),
+        Source::Crawler,
+    ));
+
+    // Crawling sends many requests: in scope + explicit confirmation (plan §16).
+    let policy = Policy::safe();
+    match policy.gate(ActionClass::Mutating, decision, args.confirm) {
+        PolicyOutcome::Deny(reason) => bail!("refused: {reason}"),
+        PolicyOutcome::NeedsConfirmation(reason) => {
+            println!("{reason}.");
+            println!(
+                "Would crawl up to {} page(s) from {} (scope {}{}). Re-run with --confirm.",
+                args.max_pages,
+                args.url,
+                decision.as_str(),
+                if args.cross_origin {
+                    ", cross-origin"
+                } else {
+                    ", same-origin"
+                }
+            );
+            return Ok(());
+        }
+        PolicyOutcome::Allow => {}
+    }
+
+    let eng = matched_engine(&profile).context("building matched request engine")?;
+    let store = RefCell::new(
+        Store::open(&args.db).with_context(|| format!("opening {}", args.db.display()))?,
+    );
+    eprintln!("crawling {} (max {} pages)…", args.url, args.max_pages);
+
+    let send = |req: HttpRequest| -> Option<HttpExchange> {
+        if !scope
+            .decide(&HttpExchange::new(req.clone(), Source::Crawler))
+            .is_sendable()
+        {
+            return None;
+        }
+        match eng.send(req, Source::Crawler) {
+            Ok(mut ex) => {
+                if let Ok(id) = store.borrow_mut().insert(&ex) {
+                    ex.id = id;
+                }
+                Some(ex)
+            }
+            Err(e) => {
+                eprintln!("fetch failed: {e}");
+                None
+            }
+        }
+    };
+    let opts = camio_active::CrawlOptions {
+        max_pages: args.max_pages,
+        same_origin_only: !args.cross_origin,
+    };
+    let result = camio_active::crawl(&args.url, &send, &opts);
+
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "fetched": result.fetched.iter().map(|e| e.0).collect::<Vec<_>>(),
+                "discovered": result.discovered,
+                "skipped": result.skipped,
+            }))?
+        );
+    } else {
+        for u in &result.discovered {
+            println!("{u}");
+        }
+        eprintln!(
+            "crawled {} page(s); {} URL(s) discovered; {} refused/out-of-scope.",
+            result.fetched.len(),
+            result.discovered.len(),
+            result.skipped
+        );
     }
     Ok(())
 }

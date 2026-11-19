@@ -99,6 +99,12 @@ subprocess and normalize its JSONL results into Camio findings. Scope- and
 policy-gated: needs an in-scope target and \fB\-\-confirm\fR; \fB\-\-save\fR
 persists the findings.
 .TP
+.B crawl \fIURL\fR
+Crawl an authorized target (bounded, same-origin by default) through the matched
+engine, following \fBhref\fR/\fBsrc\fR/\fBaction\fR links up to \fB\-\-max\-pages\fR
+and storing fetched pages as \fBsource=crawler\fR. Scope/policy-gated; needs
+\fB\-\-confirm\fR.
+.TP
 .B subfinder \fIDOMAIN\fR
 Enumerate subdomains of a domain with subfinder (external, passive OSINT) as a
 bounded subprocess; prints the unique host list (\fB\-\-json\fR for JSON).

@@ -265,6 +265,9 @@ cargo run -p camio-cli -- import capture.har --db camio.db
 cargo run -p camio-cli -- scan 'resp.code.lt:400' --db camio.db --save
 cargo run -p camio-cli -- sitemap --db camio.db
 
+# Crawl an AUTHORIZED target (bounded, same-origin), then build its site map
+cargo run -p camio-cli -- crawl https://target.example.com --confirm --max-pages 50 --db camio.db
+
 # Discover inputs, then fuzz an AUTHORIZED target (preview first, then --confirm)
 cargo run -p camio-cli -- discover 'https://example.org/s?q=1&id=2'
 cargo run -p camio-cli -- payloads                              # list built-in packs

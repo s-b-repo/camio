@@ -8,6 +8,14 @@ versioning once it reaches 1.0.
 
 ### Added
 
+- **Bounded same-origin crawler** (`camio-active`, `camio crawl`, plan §8/§F10):
+  active discovery to complement the history-built site map. From a seed URL it
+  fetches pages through the injected scope/policy-gated sender, extracts
+  `href`/`src`/`action` links (pure, tested; resolves relatives, drops
+  `javascript:`/`mailto:`/fragments, ignores `data-*` attrs), and follows
+  same-origin links breadth-first up to a page budget. `camio crawl <url>` is
+  gated (`--confirm`, `--max-pages`, `--cross-origin`) and stores pages as
+  `source=crawler` — feeding `camio sitemap`.
 - **Background-task runtime** (`camio-tasks`, plan §4.2/§F03): a thread-backed
   `TaskManager` that returns a task ID immediately and tracks each job's state
   (`camio_core::TaskState`), progress, status message, and distinct terminal

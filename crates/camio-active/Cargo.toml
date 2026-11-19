@@ -12,5 +12,6 @@ camio-core.workspace = true
 camio-automate.workspace = true
 camio-oast.workspace = true
 regex.workspace = true
+url.workspace = true
 serde.workspace = true
 serde_json.workspace = true
