@@ -12,9 +12,13 @@
 //! Camio's "bounded, cancellable" contract (plan §4.2) at the process boundary.
 
 pub mod nuclei;
+pub mod subfinder;
 
 pub use nuclei::{
     nuclei_to_findings, parse_nuclei_jsonl, run_nuclei, NucleiFinding, NucleiOptions,
+};
+pub use subfinder::{
+    parse_subfinder_jsonl, run_subfinder, unique_hosts, Subdomain, SubfinderOptions,
 };
 
 use std::fmt;

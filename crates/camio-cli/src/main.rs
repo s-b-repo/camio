@@ -97,6 +97,8 @@ enum Command {
     Oast(OastArgs),
     /// Run Nuclei (external) against an authorized target and normalize its findings.
     Nuclei(NucleiArgs),
+    /// Enumerate subdomains of a domain with subfinder (external, passive OSINT).
+    Subfinder(SubfinderArgs),
     /// Review stored traffic, import evidence, and manage the workspace.
     Workbench(workbench::Args),
     /// Verify checksums and evidence references in an exported review bundle.
@@ -362,6 +364,7 @@ fn main() -> Result<()> {
         Command::Proxy(args) => proxy::run(args),
         Command::Oast(args) => oast_cmd(args),
         Command::Nuclei(args) => nuclei_cmd(args),
+        Command::Subfinder(args) => subfinder_cmd(args),
         Command::Workbench(args) => workbench::run(args),
         Command::VerifyBundle { file } => workbench::verify_bundle(&file),
         Command::Mcp { action } => match action {
@@ -1565,6 +1568,61 @@ fn nuclei_cmd(args: NucleiArgs) -> Result<()> {
             Store::open(&args.db).with_context(|| format!("opening {}", args.db.display()))?;
         let n = store.insert_findings(&findings).unwrap_or(0);
         eprintln!("saved {n} finding(s) to {}", args.db.display());
+    }
+    Ok(())
+}
+
+// ===========================================================================
+// Subfinder integration (external, passive OSINT)
+// ===========================================================================
+
+#[derive(Parser)]
+struct SubfinderArgs {
+    /// Root domain to enumerate (e.g. example.com).
+    domain: String,
+    /// Use every passive source (subfinder -all).
+    #[arg(long)]
+    all: bool,
+    /// Restrict to these passive sources (repeatable).
+    #[arg(long = "source")]
+    sources: Vec<String>,
+    /// Overall timeout in seconds; subfinder is killed if it runs longer.
+    #[arg(long, default_value_t = 120)]
+    timeout_secs: u64,
+    /// Emit the unique host list as JSON.
+    #[arg(long)]
+    json: bool,
+    /// Extra args passed verbatim to subfinder (after `--`).
+    #[arg(last = true)]
+    extra: Vec<String>,
+}
+
+fn subfinder_cmd(args: SubfinderArgs) -> Result<()> {
+    let opts = camio_integrations::SubfinderOptions {
+        sources: args.sources.clone(),
+        all_sources: args.all,
+        timeout: std::time::Duration::from_secs(args.timeout_secs),
+        extra_args: args.extra.clone(),
+    };
+    eprintln!(
+        "running subfinder on {} (timeout {}s)…",
+        args.domain, args.timeout_secs
+    );
+    let subs = match camio_integrations::run_subfinder(std::slice::from_ref(&args.domain), &opts) {
+        Ok(s) => s,
+        Err(camio_integrations::IntegrationError::NotInstalled(_)) => {
+            bail!("subfinder is not installed or not on PATH; install it from https://github.com/projectdiscovery/subfinder")
+        }
+        Err(e) => bail!("subfinder run failed: {e}"),
+    };
+    let hosts = camio_integrations::unique_hosts(&subs);
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&hosts)?);
+    } else {
+        for h in &hosts {
+            println!("{h}");
+        }
+        eprintln!("{} unique subdomain(s).", hosts.len());
     }
     Ok(())
 }

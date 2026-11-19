@@ -9,8 +9,10 @@ versioning once it reaches 1.0.
 ### Added
 
 - **External-tool integrations** (`camio-integrations`): the start of the
-  integration layer (plan §F16). A **Nuclei** adapter runs ProjectDiscovery's
-  template scanner as a *bounded* subprocess — overall timeout with process kill,
+  integration layer (plan §F16), with a **subfinder** adapter too — passive
+  subdomain enumeration (`camio subfinder <domain>`) normalized to a deduplicated
+  host list (bounded runner, fixture-tested parser). A **Nuclei** adapter runs
+  ProjectDiscovery's template scanner as a *bounded* subprocess — overall timeout with process kill,
   16 MiB stdout cap, update-check and public OOB server disabled — and normalizes
   its JSONL into Camio findings (severity mapped, matched-URL/template/tags in
   the detail; no fabricated exchange evidence). The parser is pure and
