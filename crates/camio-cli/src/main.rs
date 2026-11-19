@@ -17,9 +17,9 @@ use camio_ai::{AiClient, AiConfig, Message};
 use camio_automate::{AttackType, Baseline, Campaign, PayloadSet};
 use camio_convert::Transform;
 use camio_core::{
-    ActionClass, Body, Finding, FingerprintPolicy, FingerprintProfile, HttpExchange, HttpRequest,
-    MatchReplaceRule, MatchTarget, Policy, PolicyOutcome, Query, RuleSet, Scope, ScopeRule,
-    Severity, SiteMap, Source,
+    ActionClass, Body, Finding, FindingId, FingerprintPolicy, FingerprintProfile, HttpExchange,
+    HttpRequest, MatchReplaceRule, MatchTarget, Policy, PolicyOutcome, Query, RuleSet, Scope,
+    ScopeRule, Severity, SiteMap, Source,
 };
 use camio_engine::{self as engine, Camoufox, LaunchOptions};
 use camio_mcp::McpServer;
@@ -71,6 +71,8 @@ enum Command {
     Compare(CompareArgs),
     /// Run passive security checks over stored history (Scanner).
     Scan(ScanArgs),
+    /// Triage stored findings: list them, or set a finding's status (F14).
+    Findings(FindingsArgs),
     /// Intruder-class fuzzing campaign over §-marked insertion points.
     Fuzz(FuzzArgs),
     /// Enumerate injectable inputs of a request (query/body/cookies/headers/JSON).
@@ -355,6 +357,7 @@ fn main() -> Result<()> {
         Command::Jwt(args) => jwt_cmd(args),
         Command::Compare(args) => compare_cmd(args),
         Command::Scan(args) => scan_cmd(args),
+        Command::Findings(args) => findings_cmd(args),
         Command::Fuzz(args) => fuzz_cmd(args),
         Command::Discover(args) => discover_cmd(args),
         Command::Import(args) => import_cmd(args),
@@ -855,6 +858,73 @@ struct ScanArgs {
     /// List the available check ids and exit.
     #[arg(long = "list-checks")]
     list_checks: bool,
+}
+
+#[derive(Parser)]
+struct FindingsArgs {
+    #[arg(long, default_value = "camio.db")]
+    db: PathBuf,
+    /// Set this finding's triage status (requires --status).
+    #[arg(long)]
+    set: Option<i64>,
+    /// Status: open|confirmed|false-positive|fixed|ignored.
+    #[arg(long)]
+    status: Option<String>,
+    /// Attach a triage note (with --set).
+    #[arg(long)]
+    note: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+fn findings_cmd(args: FindingsArgs) -> Result<()> {
+    let mut store =
+        Store::open(&args.db).with_context(|| format!("opening {}", args.db.display()))?;
+
+    if let Some(id) = args.set {
+        let status = args
+            .status
+            .as_deref()
+            .and_then(camio_store::FindingStatus::parse)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--set requires --status open|confirmed|false-positive|fixed|ignored"
+                )
+            })?;
+        store.set_finding_status(FindingId(id), status, args.note.as_deref())?;
+        println!("finding #{id} → {}", status.as_str());
+        return Ok(());
+    }
+
+    let rows = store.list_findings_with_status()?;
+    if args.json {
+        let items: Vec<_> = rows
+            .iter()
+            .map(|(f, s, n)| {
+                serde_json::json!({
+                    "id": f.id.0, "title": f.title, "severity": f.severity.as_str(),
+                    "status": s.as_str(), "note": n,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&items)?);
+    } else {
+        for (f, s, note) in &rows {
+            let note = note
+                .as_deref()
+                .map(|n| format!("  — {n}"))
+                .unwrap_or_default();
+            println!(
+                "  #{:<4} {:<8} {:<14} {}{note}",
+                f.id.0,
+                f.severity.as_str(),
+                s.as_str(),
+                truncate(&f.title, 60)
+            );
+        }
+        eprintln!("{} finding(s).", rows.len());
+    }
+    Ok(())
 }
 
 fn parse_severity(s: &str) -> Result<camio_core::Severity> {

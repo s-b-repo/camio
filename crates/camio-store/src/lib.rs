@@ -15,7 +15,41 @@
 
 use anyhow::{Context, Result};
 use camio_core::{Body, ExchangeId, Finding, FindingId, HttpExchange, Query};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
+
+/// The triage lifecycle state of a finding (plan §F14). A finding with no stored
+/// status is [`FindingStatus::Open`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FindingStatus {
+    Open,
+    Confirmed,
+    FalsePositive,
+    Fixed,
+    Ignored,
+}
+
+impl FindingStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FindingStatus::Open => "open",
+            FindingStatus::Confirmed => "confirmed",
+            FindingStatus::FalsePositive => "false_positive",
+            FindingStatus::Fixed => "fixed",
+            FindingStatus::Ignored => "ignored",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+            "open" => Some(FindingStatus::Open),
+            "confirmed" => Some(FindingStatus::Confirmed),
+            "false_positive" | "fp" => Some(FindingStatus::FalsePositive),
+            "fixed" => Some(FindingStatus::Fixed),
+            "ignored" => Some(FindingStatus::Ignored),
+            _ => None,
+        }
+    }
+}
 use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -44,7 +78,18 @@ pub use review::{ReviewCandidate, ReviewCounts, ReviewTask};
 pub use workflow::{ReviewPlan, ReviewWorkflow, WorkflowVersion, MAX_REVIEW_EXCHANGES};
 pub use workspace::{FindingReview, ReviewState, SavedExchange, SavedQuery, WorkspaceSummary};
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
+
+/// Triage lifecycle for a finding (plan §F14). Additive: the `findings` rows are
+/// untouched; a finding with no row here is treated as `open`.
+const FINDING_STATUS_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS finding_status (
+    finding_id    INTEGER PRIMARY KEY,
+    status        TEXT NOT NULL,
+    note          TEXT,
+    updated_at_ms INTEGER NOT NULL
+);
+";
 
 /// The embedded store.
 pub struct Store {
@@ -109,6 +154,10 @@ impl Store {
             }
             if version < 4 {
                 inventory::migrate(&tx).context("indexing recorded assets")?;
+            }
+            if version < 5 {
+                tx.execute_batch(FINDING_STATUS_SCHEMA)
+                    .context("creating finding-status (triage) schema")?;
             }
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             tx.commit()?;
@@ -343,6 +392,52 @@ impl Store {
         out.sort_by_key(|f| std::cmp::Reverse(f.severity));
         Ok(out)
     }
+
+    /// Set (or clear the note of) a finding's triage status (plan §F14).
+    pub fn set_finding_status(
+        &mut self,
+        id: FindingId,
+        status: FindingStatus,
+        note: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO finding_status (finding_id, status, note, updated_at_ms)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(finding_id) DO UPDATE SET
+                 status = excluded.status, note = excluded.note, updated_at_ms = excluded.updated_at_ms",
+            params![id.0, status.as_str(), note, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    /// The triage status + note for a finding, or `None` if never triaged
+    /// (treat as [`FindingStatus::Open`]).
+    pub fn finding_status(&self, id: FindingId) -> Result<Option<(FindingStatus, Option<String>)>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT status, note FROM finding_status WHERE finding_id = ?1",
+                params![id.0],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+            )
+            .optional()?;
+        Ok(row.map(|(s, n)| (FindingStatus::parse(&s).unwrap_or(FindingStatus::Open), n)))
+    }
+
+    /// All findings with their triage status (default `Open`) and note.
+    pub fn list_findings_with_status(
+        &self,
+    ) -> Result<Vec<(Finding, FindingStatus, Option<String>)>> {
+        let findings = self.list_findings()?;
+        let mut out = Vec::with_capacity(findings.len());
+        for f in findings {
+            let (status, note) = self
+                .finding_status(f.id)?
+                .unwrap_or((FindingStatus::Open, None));
+            out.push((f, status, note));
+        }
+        Ok(out)
+    }
 }
 
 /// Store a body as a content-addressed blob (deduplicated); returns its sha, or
@@ -565,6 +660,42 @@ mod tests {
         let findings = store.list_findings().unwrap();
         assert_eq!(findings.len(), 2);
         assert_eq!(findings[0].severity, Severity::High); // most severe first
+    }
+
+    #[test]
+    fn finding_triage_status_roundtrip() {
+        let mut store = Store::open_in_memory().unwrap();
+        let id = store
+            .insert_finding(&Finding {
+                id: FindingId(0),
+                title: "Open redirect".into(),
+                severity: Severity::Medium,
+                confidence: Confidence::Firm,
+                detail: "d".into(),
+                evidence: vec![],
+                created_at_ms: 0,
+            })
+            .unwrap();
+
+        // Untriaged findings default to Open.
+        assert!(store.finding_status(id).unwrap().is_none());
+        let listed = store.list_findings_with_status().unwrap();
+        assert_eq!(listed[0].1, FindingStatus::Open);
+
+        // Confirm with a note, then re-classify as false positive clearing it.
+        store
+            .set_finding_status(id, FindingStatus::Confirmed, Some("verified"))
+            .unwrap();
+        let (s, note) = store.finding_status(id).unwrap().unwrap();
+        assert_eq!(s, FindingStatus::Confirmed);
+        assert_eq!(note.as_deref(), Some("verified"));
+
+        store
+            .set_finding_status(id, FindingStatus::FalsePositive, None)
+            .unwrap();
+        let (s2, note2) = store.finding_status(id).unwrap().unwrap();
+        assert_eq!(s2, FindingStatus::FalsePositive);
+        assert!(note2.is_none());
     }
 
     #[test]

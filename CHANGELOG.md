@@ -8,6 +8,12 @@ versioning once it reaches 1.0.
 
 ### Added
 
+- **Findings triage** (`camio-store`, `camio findings`, plan §F14): a finding
+  lifecycle status (`open`/`confirmed`/`false_positive`/`fixed`/`ignored`) + note,
+  in a new additive `finding_status` table (schema migration **v4→v5**). `camio
+  findings` lists findings with their status; `camio findings --set <id> --status
+  <s> --note <n>` triages one. Store API: `set_finding_status` /
+  `finding_status` / `list_findings_with_status`.
 - **Scan profiles** (`camio-scan`, plan §F13): `ScanProfile` selects a subset of
   passive checks by id (`--only`/`--exclude`) and a severity floor
   (`--min-severity`); `scan_all_with_profile` reuses the same dedup/sort as the

@@ -99,6 +99,11 @@ subprocess and normalize its JSONL results into Camio findings. Scope- and
 policy-gated: needs an in-scope target and \fB\-\-confirm\fR; \fB\-\-save\fR
 persists the findings.
 .TP
+.B findings
+Triage stored findings: list them with their status, or set one with
+\fB\-\-set \fIID\fR \-\-status \fISTATUS\fR [\fB\-\-note \fITEXT\fR] (status:
+open|confirmed|false-positive|fixed|ignored).
+.TP
 .B crawl \fIURL\fR
 Crawl an authorized target (bounded, same-origin by default) through the matched
 engine, following \fBhref\fR/\fBsrc\fR/\fBaction\fR links up to \fB\-\-max\-pages\fR
