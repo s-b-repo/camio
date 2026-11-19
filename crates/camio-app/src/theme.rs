@@ -182,14 +182,18 @@ impl Theme {
         v.extreme_bg_color = col(scale(self.window, 0.6));
         v.override_text_color = Some(col(self.text));
         if self.name == "Sentinel Blue" {
+            // Black surfaces with visibly *blue* buttons: idle controls carry a
+            // blue fill derived from the accent (#1e80ff), brightening on hover
+            // and active — matching the black/blue site theme.
             v.widgets.noninteractive.bg_stroke =
                 Stroke::new(1.0_f32, Color32::from_rgb(26, 47, 76));
-            v.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(38, 65, 103));
-            v.widgets.inactive.weak_bg_fill = Color32::from_rgb(12, 25, 44);
-            v.widgets.inactive.bg_fill = Color32::from_rgb(12, 25, 44);
+            v.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, accent.gamma_multiply(0.75));
+            v.widgets.inactive.weak_bg_fill = accent.gamma_multiply(0.22);
+            v.widgets.inactive.bg_fill = accent.gamma_multiply(0.34);
+            v.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(210, 226, 248));
             v.extreme_bg_color = Color32::from_rgb(4, 10, 19);
             v.faint_bg_color = Color32::from_rgb(10, 20, 35);
-            v.window_stroke = v.widgets.inactive.bg_stroke;
+            v.window_stroke = Stroke::new(1.0_f32, Color32::from_rgb(38, 65, 103));
         }
 
         let r = Rounding::same(self.rounding);

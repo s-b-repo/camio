@@ -1,0 +1,21 @@
+{
+  "name": "Camio — Black & Blue",
+  "description": "Black surfaces, light-blue text, #1e80ff blue buttons. Matches the native app's 'Sentinel Blue' theme and the Camio site palette. Edit these values to recolor the fork (and the app's color picker does the same live).",
+  "palette": {
+    "ink": "#000000",
+    "ink_2": "#020508",
+    "surface": "#051228",
+    "line": "rgba(20,90,220,0.45)",
+    "text": "#c0d6f0",
+    "muted": "#5a84b8",
+    "accent": "#1e80ff",
+    "accent_deep": "#0d4bb3",
+    "accent_2": "#00aadd",
+    "warn": "#ff3b55"
+  },
+  "fonts": {
+    "display": "Chakra Petch, system-ui, sans-serif",
+    "mono": "JetBrains Mono, ui-monospace, monospace",
+    "body": "IBM Plex Sans, system-ui, sans-serif"
+  }
+}

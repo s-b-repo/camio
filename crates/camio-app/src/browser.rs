@@ -59,6 +59,68 @@ pub struct Launched {
 /// Launch `binary` with Camio's fingerprint profile applied to `profile_dir`,
 /// opening `url`. When `marionette` is set, the browser's remote-automation
 /// channel is enabled so an agent can drive it.
+/// Camio's black-&-blue browser chrome (userChrome.css), matching the native
+/// app's "Sentinel Blue" theme: black toolbars, light-blue text, and the
+/// `#1e80ff` blue accent on the URL bar, selected tab, and buttons.
+pub const CAMIO_USERCHROME_CSS: &str = r#"/* Camio — black & blue browser chrome. Generated; edit the Camio theme instead. */
+:root {
+  --camio-ink: #000000;
+  --camio-surface: #051228;
+  --camio-line: rgba(20, 90, 220, 0.45);
+  --camio-text: #c0d6f0;
+  --camio-accent: #1e80ff;
+
+  --toolbar-bgcolor: var(--camio-ink) !important;
+  --toolbar-color: var(--camio-text) !important;
+  --lwt-accent-color: var(--camio-ink) !important;
+  --lwt-text-color: var(--camio-text) !important;
+  --toolbarbutton-icon-fill: var(--camio-text) !important;
+  --toolbar-field-background-color: var(--camio-surface) !important;
+  --toolbar-field-focus-background-color: var(--camio-surface) !important;
+  --toolbar-field-color: var(--camio-text) !important;
+  --toolbar-field-border-color: var(--camio-line) !important;
+  --tab-selected-bgcolor: var(--camio-surface) !important;
+  --tabs-border-color: var(--camio-line) !important;
+  --lwt-toolbar-field-border-focus: var(--camio-accent) !important;
+}
+#navigator-toolbox {
+  background: var(--camio-ink) !important;
+  border-bottom: 1px solid var(--camio-line) !important;
+}
+#urlbar, #searchbar {
+  background: var(--camio-surface) !important;
+  color: var(--camio-text) !important;
+}
+#urlbar[focused="true"] { outline: 1px solid var(--camio-accent) !important; }
+.tab-background[selected] {
+  background: var(--camio-surface) !important;
+  box-shadow: inset 0 -2px 0 0 var(--camio-accent) !important;
+}
+.toolbarbutton-1 { color: var(--camio-text) !important; }
+/* Blue buttons / accents */
+button, .button, menulist { accent-color: var(--camio-accent) !important; }
+"#;
+
+/// Write the launched profile's files: the fingerprint `user.js` (with legacy
+/// stylesheets enabled) and the Camio black/blue `chrome/userChrome.css`.
+/// Split out from [`launch`] so it is testable without spawning a browser.
+pub fn write_profile(profile_dir: &Path, profile: &FingerprintProfile) -> Result<(), String> {
+    std::fs::create_dir_all(profile_dir)
+        .map_err(|e| format!("creating profile dir {}: {e}", profile_dir.display()))?;
+    // Port the Camoufox fingerprint (about:config layer) + enable userChrome.css.
+    let mut user_js = profile.to_user_js();
+    user_js.push_str("\n// Camio browser theme (black & blue chrome).\n");
+    user_js.push_str("user_pref(\"toolkit.legacyUserProfileCustomizations.stylesheets\", true);\n");
+    std::fs::write(profile_dir.join("user.js"), user_js)
+        .map_err(|e| format!("writing user.js: {e}"))?;
+
+    let chrome = profile_dir.join("chrome");
+    std::fs::create_dir_all(&chrome).map_err(|e| format!("creating {}: {e}", chrome.display()))?;
+    std::fs::write(chrome.join("userChrome.css"), CAMIO_USERCHROME_CSS)
+        .map_err(|e| format!("writing userChrome.css: {e}"))?;
+    Ok(())
+}
+
 pub fn launch(
     binary: &Path,
     profile: &FingerprintProfile,
@@ -66,11 +128,7 @@ pub fn launch(
     url: &str,
     marionette: bool,
 ) -> Result<Launched, String> {
-    std::fs::create_dir_all(profile_dir)
-        .map_err(|e| format!("creating profile dir {}: {e}", profile_dir.display()))?;
-    // Port the Camoufox fingerprint: the about:config preference layer...
-    std::fs::write(profile_dir.join("user.js"), profile.to_user_js())
-        .map_err(|e| format!("writing user.js: {e}"))?;
+    write_profile(profile_dir, profile)?;
 
     let mut cmd = Command::new(binary);
     cmd.arg("-profile")
@@ -99,4 +157,27 @@ pub fn launch(
         binary: binary.to_path_buf(),
         marionette,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use camio_core::FingerprintProfile;
+
+    #[test]
+    fn write_profile_emits_user_js_and_blue_userchrome() {
+        let dir = std::env::temp_dir().join(format!("camio-prof-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let profile = FingerprintProfile::new("t", "158.0.1-beta.41");
+        write_profile(&dir, &profile).unwrap();
+
+        let user_js = std::fs::read_to_string(dir.join("user.js")).unwrap();
+        assert!(user_js.contains("general.useragent.override"));
+        assert!(user_js.contains("legacyUserProfileCustomizations.stylesheets"));
+
+        let css = std::fs::read_to_string(dir.join("chrome").join("userChrome.css")).unwrap();
+        assert!(css.contains("#1e80ff")); // the Camio blue accent
+        assert!(css.contains("#navigator-toolbox"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -8,6 +8,15 @@ versioning once it reaches 1.0.
 
 ### Added
 
+- **Black & blue theme + browser branding:** the native app defaults to the
+  "Sentinel Blue" theme (black surfaces, `#1e80ff` **blue buttons**, light-blue
+  text — matching the Camio site palette), fully recolorable via the existing
+  color picker. The managed-browser launcher now also writes a black/blue
+  `chrome/userChrome.css` (`camio_app::browser::write_profile`) + enables legacy
+  stylesheets, so a launched LibreWolf/Camoufox shows the Camio theme. A
+  **`browser/`** fork scaffold (`build.sh` + `branding/{userChrome.css,theme.json,
+  camio.cfg}`) assembles a LibreWolf-base + Camoufox-stealth + Camio-branded fork
+  (tooling only — no binary is built/committed here).
 - **OS personas** (`camio_core::BrowserOs`, `--os windows|macos|linux`, plan §6):
   Camoufox/`camofox-browser`-style OS selection — `camio fingerprint show --os`
   and `camio launch --os` present a consistent UA / `navigator.platform` / WebGL
