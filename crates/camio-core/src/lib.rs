@@ -18,6 +18,7 @@ pub mod fingerprint;
 pub mod matchreplace;
 pub mod model;
 pub mod policy;
+pub mod rate;
 pub mod scope;
 pub mod sitemap;
 
@@ -34,5 +35,6 @@ pub use model::{
     Target, Task, TaskId, TaskState, Timings,
 };
 pub use policy::{ActionClass, Policy, PolicyOutcome};
+pub use rate::RateLimiter;
 pub use scope::{Scope, ScopeRule};
 pub use sitemap::{SiteMap, SiteNode};

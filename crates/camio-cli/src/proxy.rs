@@ -9,7 +9,7 @@
 use anyhow::{Context, Result};
 use camio_core::{HttpExchange, Policy};
 use camio_proxy::{
-    AutoForward, CertAuthority, EngineForwarder, ExchangeSink, Interceptor, ProxyConfig,
+    AutoForward, CertAuthority, EngineForwarder, ExchangeSink, Forwarder, Interceptor, ProxyConfig,
     ProxyServer,
 };
 use camio_store::Store;
@@ -72,6 +72,10 @@ pub struct ProxyArgs {
     /// and WebSocket go direct.
     #[arg(long)]
     upstream_proxy: Option<String>,
+    /// Per-host requests-per-second cap on engine-forwarded upstream sends
+    /// (paces traffic so a target isn't hammered). 0/unset = unlimited.
+    #[arg(long)]
+    rate_limit: Option<f64>,
     /// Suppress the per-exchange capture log line.
     #[arg(long)]
     quiet: bool,
@@ -113,10 +117,17 @@ pub fn run(args: ProxyArgs) -> Result<()> {
         ..ProxyConfig::default()
     };
 
-    let forwarder = Arc::new(
+    let engine_forwarder = Arc::new(
         EngineForwarder::spawn_with_proxy(profile, args.upstream_proxy.clone())
             .map_err(|e| anyhow::anyhow!("{e}"))?,
     );
+    let forwarder: Arc<dyn Forwarder> = match args.rate_limit {
+        Some(rps) if rps > 0.0 => Arc::new(camio_proxy::RateLimitedForwarder::new(
+            engine_forwarder,
+            Arc::new(camio_core::RateLimiter::new(Some(rps), None)),
+        )),
+        _ => engine_forwarder,
+    };
     let store = Store::open(&args.db).with_context(|| format!("opening {}", args.db.display()))?;
     let sink = Arc::new(StoreSink::new(store, !args.quiet, args.auto_scan));
     let interceptor: Arc<dyn Interceptor> = Arc::new(AutoForward);
@@ -147,6 +158,9 @@ pub fn run(args: ProxyArgs) -> Result<()> {
     eprintln!("  fingerprint      : {} preset", args.preset.label());
     if let Some(up) = &args.upstream_proxy {
         eprintln!("  upstream proxy   : {up} (engine-forwarded traffic only)");
+    }
+    if let Some(rps) = args.rate_limit.filter(|r| *r > 0.0) {
+        eprintln!("  rate limit       : {rps} req/s per host");
     }
     eprintln!(
         "  auto-scan        : {}",

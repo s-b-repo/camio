@@ -8,6 +8,11 @@ versioning once it reaches 1.0.
 
 ### Added
 
+- **Shared rate limiting** (`camio_core::RateLimiter`, plan §4.3/§F02): a
+  per-host (and optional global) token-bucket limiter any send path can share so
+  a target is never hammered faster than allowed. Pure, clock-injectable, and
+  deterministically tested; `RateLimitedForwarder` paces the proxy's upstream
+  sends, wired as `camio proxy --rate-limit <rps>`.
 - **Bounded same-origin crawler** (`camio-active`, `camio crawl`, plan §8/§F10):
   active discovery to complement the history-built site map. From a seed URL it
   fetches pages through the injected scope/policy-gated sender, extracts

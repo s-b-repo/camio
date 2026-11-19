@@ -50,7 +50,7 @@ pub use forward::EngineForwarder;
 
 use camio_core::{
     ActionClass, Body, HeaderList, HttpExchange, HttpRequest, HttpResponse, HttpVersion, Policy,
-    PolicyOutcome, RuleSet, Scope, ScopeDecision, Source,
+    PolicyOutcome, RateLimiter, RuleSet, Scope, ScopeDecision, Source,
 };
 use http1::{
     absolute_url, is_websocket_upgrade, reconstruct_upgrade_request, split_authority,
@@ -92,6 +92,29 @@ where
 {
     fn forward(&self, request: HttpRequest) -> Result<HttpExchange, ForwardError> {
         (self.0)(request)
+    }
+}
+
+/// A [`Forwarder`] decorator that paces upstream sends through a shared
+/// [`RateLimiter`] (plan §4.3): it blocks for a per-host (and/or global) token
+/// before delegating, so no target is hammered faster than the operator allows —
+/// and the same limiter can be shared with other send paths.
+pub struct RateLimitedForwarder {
+    inner: Arc<dyn Forwarder>,
+    limiter: Arc<RateLimiter>,
+}
+
+impl RateLimitedForwarder {
+    pub fn new(inner: Arc<dyn Forwarder>, limiter: Arc<RateLimiter>) -> Self {
+        RateLimitedForwarder { inner, limiter }
+    }
+}
+
+impl Forwarder for RateLimitedForwarder {
+    fn forward(&self, request: HttpRequest) -> Result<HttpExchange, ForwardError> {
+        let host = request.host().unwrap_or_default();
+        self.limiter.acquire(&host);
+        self.inner.forward(request)
     }
 }
 
