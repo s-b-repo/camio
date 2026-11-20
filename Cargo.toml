@@ -27,7 +27,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.9"
+version = "0.3.10"
 edition = "2021"
 # Provisional: Camio builds on Camoufox (MPL-2.0). Final license is decided in
 # plan.md §12 after full dependency review.
