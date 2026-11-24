@@ -3,6 +3,7 @@
 [![CI](https://github.com/s-b-repo/camio/actions/workflows/ci.yml/badge.svg)](https://github.com/s-b-repo/camio/actions/workflows/ci.yml)
 [![Security audit](https://github.com/s-b-repo/camio/actions/workflows/security.yml/badge.svg)](https://github.com/s-b-repo/camio/actions/workflows/security.yml)
 [![License: MPL 2.0](https://img.shields.io/badge/License-MPL%202.0-brightgreen.svg)](./LICENSE)
+[![M8ven Score](https://m8ven.ai/badge/mcp/s-b-repo-camio-4k9o1o)](https://m8ven.ai/mcp/s-b-repo-camio-4k9o1o?s=readme)
 
 A local-first, **fingerprint-transparent** web security testing workbench — the speed
 and UX of Caido, the depth of Burp, and testing traffic that doesn't stand out
