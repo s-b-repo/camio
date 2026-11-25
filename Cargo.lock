@@ -877,7 +877,7 @@ dependencies = [
 
 [[package]]
 name = "camio-active"
-version = "0.3.0"
+version = "0.3.9"
 dependencies = [
  "camio-automate",
  "camio-core",
@@ -890,7 +890,7 @@ dependencies = [
 
 [[package]]
 name = "camio-ai"
-version = "0.3.0"
+version = "0.3.9"
 dependencies = [
  "camio-core",
  "serde",
@@ -901,7 +901,7 @@ dependencies = [
 
 [[package]]
 name = "camio-app"
-version = "0.3.0"
+version = "0.3.9"
 dependencies = [
  "anyhow",
  "camio-active",
@@ -927,7 +927,7 @@ dependencies = [
 
 [[package]]
 name = "camio-automate"
-version = "0.3.0"
+version = "0.3.9"
 dependencies = [
  "camio-core",
  "serde",
@@ -936,7 +936,7 @@ dependencies = [
 
 [[package]]
 name = "camio-cli"
-version = "0.3.0"
+version = "0.3.9"
 dependencies = [
  "anyhow",
  "camio-active",
@@ -962,7 +962,7 @@ dependencies = [
 
 [[package]]
 name = "camio-convert"
-version = "0.3.0"
+version = "0.3.9"
 dependencies = [
  "base64 0.22.1",
  "flate2",
@@ -975,7 +975,7 @@ dependencies = [
 
 [[package]]
 name = "camio-core"
-version = "0.3.0"
+version = "0.3.9"
 dependencies = [
  "base64 0.22.1",
  "regex",
@@ -987,7 +987,7 @@ dependencies = [
 
 [[package]]
 name = "camio-engine"
-version = "0.3.0"
+version = "0.3.9"
 dependencies = [
  "anyhow",
  "camio-core",
@@ -998,7 +998,7 @@ dependencies = [
 
 [[package]]
 name = "camio-import"
-version = "0.3.0"
+version = "0.3.9"
 dependencies = [
  "base64 0.22.1",
  "camio-core",
@@ -1009,7 +1009,7 @@ dependencies = [
 
 [[package]]
 name = "camio-integrations"
-version = "0.3.0"
+version = "0.3.9"
 dependencies = [
  "camio-core",
  "serde",
@@ -1018,7 +1018,7 @@ dependencies = [
 
 [[package]]
 name = "camio-mcp"
-version = "0.3.0"
+version = "0.3.9"
 dependencies = [
  "camio-active",
  "camio-automate",
@@ -1037,7 +1037,7 @@ dependencies = [
 
 [[package]]
 name = "camio-oast"
-version = "0.3.0"
+version = "0.3.9"
 dependencies = [
  "camio-core",
  "httparse",
@@ -1046,7 +1046,7 @@ dependencies = [
 
 [[package]]
 name = "camio-proxy"
-version = "0.3.0"
+version = "0.3.9"
 dependencies = [
  "camio-core",
  "camio-request",
@@ -1058,7 +1058,7 @@ dependencies = [
 
 [[package]]
 name = "camio-request"
-version = "0.3.0"
+version = "0.3.9"
 dependencies = [
  "camio-core",
  "serde",
@@ -1069,7 +1069,7 @@ dependencies = [
 
 [[package]]
 name = "camio-scan"
-version = "0.3.0"
+version = "0.3.9"
 dependencies = [
  "anyhow",
  "camio-automate",
@@ -1083,7 +1083,7 @@ dependencies = [
 
 [[package]]
 name = "camio-sequencer"
-version = "0.3.0"
+version = "0.3.9"
 dependencies = [
  "serde",
  "serde_json",
@@ -1091,7 +1091,7 @@ dependencies = [
 
 [[package]]
 name = "camio-store"
-version = "0.3.0"
+version = "0.3.9"
 dependencies = [
  "anyhow",
  "camio-core",
@@ -1104,14 +1104,14 @@ dependencies = [
 
 [[package]]
 name = "camio-tasks"
-version = "0.3.0"
+version = "0.3.9"
 dependencies = [
  "camio-core",
 ]
 
 [[package]]
 name = "camio-web"
-version = "0.3.0"
+version = "0.3.9"
 dependencies = [
  "anyhow",
  "camio-automate",
