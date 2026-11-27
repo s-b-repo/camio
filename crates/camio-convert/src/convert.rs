@@ -524,8 +524,13 @@ fn gzip_compress(input: &[u8]) -> Result<Vec<u8>, ConvertError> {
         .map_err(|e| ConvertError::Decompress(format!("gzip finish: {e}")))
 }
 
+/// Default decompression cap for the streaming (unbounded) transform path, so a
+/// gzip/deflate bomb cannot exhaust memory (plan §12: protect against
+/// decompression-heavy inputs).
+const DEFAULT_DECOMPRESS_LIMIT: usize = 32 * 1024 * 1024;
+
 fn gzip_decompress(input: &[u8]) -> Result<Vec<u8>, ConvertError> {
-    inflate(GzDecoder::new(input), "gzip", usize::MAX)
+    inflate(GzDecoder::new(input), "gzip", DEFAULT_DECOMPRESS_LIMIT)
 }
 
 fn deflate_compress(input: &[u8]) -> Result<Vec<u8>, ConvertError> {
@@ -539,7 +544,11 @@ fn deflate_compress(input: &[u8]) -> Result<Vec<u8>, ConvertError> {
 }
 
 fn deflate_decompress(input: &[u8]) -> Result<Vec<u8>, ConvertError> {
-    inflate(DeflateDecoder::new(input), "deflate", usize::MAX)
+    inflate(
+        DeflateDecoder::new(input),
+        "deflate",
+        DEFAULT_DECOMPRESS_LIMIT,
+    )
 }
 
 fn inflate(decoder: impl Read, name: &str, limit: usize) -> Result<Vec<u8>, ConvertError> {

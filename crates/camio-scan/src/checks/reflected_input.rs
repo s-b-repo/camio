@@ -5,7 +5,7 @@
 //! sent), so findings are [`Confidence::Tentative`]. Query-string and
 //! `application/x-www-form-urlencoded` body parameters are both considered.
 
-use crate::checks::{finding, form_pairs};
+use crate::checks::{finding, form_pairs, sensitive_key_re};
 use crate::PassiveCheck;
 use camio_core::{Confidence, Finding, HttpExchange, Severity};
 
@@ -37,6 +37,18 @@ impl ReflectedInput {
             params.extend(form_pairs(&ex.request.body.as_text()));
         }
         params
+    }
+}
+
+/// A short redacted preview: enough to recognize the value, never enough to
+/// use it (the treatment the secret/JS checks already give their matches).
+fn redacted_preview(value: &str) -> String {
+    let mut chars = value.chars();
+    let head: String = chars.by_ref().take(4).collect();
+    if chars.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
     }
 }
 
@@ -76,12 +88,20 @@ impl PassiveCheck for ReflectedInput {
                 continue;
             }
             seen.push(key);
+            // A reflected value can be a credential (parameters come from the
+            // query *and* the urlencoded body): never write it into a finding
+            // that is stored, exported, and rendered in reports (plan §16).
+            let preview = if sensitive_key_re().is_some_and(|re| re.is_match(&name)) {
+                "<redacted — sensitive parameter name>".to_string()
+            } else {
+                redacted_preview(&value)
+            };
             out.push(finding(
                 format!("Reflected input in response (`{name}`)"),
                 Severity::Medium,
                 Confidence::Tentative,
                 format!(
-                    "The value of parameter `{name}` (`{value}`) is reflected verbatim in the response body. If it reaches an HTML/script context without contextual output encoding this is a reflected cross-site scripting (XSS) vector. Verify the output context and encoding."
+                    "The value of parameter `{name}` ({preview}) is reflected verbatim in the response body. If it reaches an HTML/script context without contextual output encoding this is a reflected cross-site scripting (XSS) vector. Verify the output context and encoding."
                 ),
                 ex.id,
             ));
@@ -125,7 +145,11 @@ mod tests {
         assert_eq!(f[0].title, "Reflected input in response (`q`)");
         assert_eq!(f[0].severity, Severity::Medium);
         assert_eq!(f[0].confidence, Confidence::Tentative);
-        assert!(f[0].detail.contains("camiomarker"));
+        assert!(f[0].detail.contains("cami…"));
+        assert!(
+            !f[0].detail.contains("camiomarker"),
+            "the value must be redacted"
+        );
     }
 
     #[test]

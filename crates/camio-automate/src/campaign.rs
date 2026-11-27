@@ -170,7 +170,19 @@ fn build_layout(base: &HttpRequest, marker: char) -> Result<Layout, AutomateErro
             let fp = field_positions(text, marker, &mut global)?;
             (true, text.to_string(), fp)
         }
-        Err(_) => (false, String::new(), FieldPositions::empty()),
+        Err(_) => {
+            // A marker on a non-UTF-8 body cannot be resolved. Report it rather
+            // than silently dropping positions (or reporting "no insertion
+            // points" for a request that visibly has them).
+            if marker_count(&String::from_utf8_lossy(base.body.as_bytes()), marker) > 0 {
+                return Err(AutomateError::Marker(
+                    "the request body is not valid UTF-8, so §…§ markers in the body \
+                     cannot be substituted; use a UTF-8 body or move the marker"
+                        .to_string(),
+                ));
+            }
+            (false, String::new(), FieldPositions::empty())
+        }
     };
 
     let total = global;
@@ -212,7 +224,21 @@ fn validate_sets(
     attack: AttackType,
     num_positions: usize,
     set_count: usize,
+    sets: &[PayloadSet],
 ) -> Result<(), AutomateError> {
+    // A payload containing the marker char would leak a marker onto the wire
+    // (and into every derived baseline), breaking the request's invariant.
+    for set in sets {
+        for payload in &set.payloads {
+            if payload.contains(DEFAULT_MARKER) {
+                return Err(AutomateError::Marker(format!(
+                    "payload set `{}` contains the marker character {} — it would be \
+                     substituted again on the wire",
+                    set.name, DEFAULT_MARKER
+                )));
+            }
+        }
+    }
     if attack.needs_one_set_per_position() && set_count != num_positions {
         return Err(AutomateError::SetCountMismatch(format!(
             "{} needs one payload set per position: {num_positions} positions but {set_count} sets",
@@ -226,7 +252,7 @@ fn validate_sets(
 /// generating anything (plan §10: show the count and get approval first).
 pub fn plan(c: &Campaign) -> Result<CampaignPlan, AutomateError> {
     let layout = build_layout(&c.base, DEFAULT_MARKER)?;
-    validate_sets(c.attack, layout.total, c.sets.len())?;
+    validate_sets(c.attack, layout.total, c.sets.len(), &c.sets)?;
 
     let set_sizes: Vec<usize> = c.sets.iter().map(|s| s.len()).collect();
     let projected = count_requests(c.attack, layout.total, &set_sizes);
@@ -250,19 +276,53 @@ pub fn plan(c: &Campaign) -> Result<CampaignPlan, AutomateError> {
 /// returned vector's length equals [`count_requests`] for the same inputs.
 pub fn generate(c: &Campaign) -> Result<Vec<GeneratedRequest>, AutomateError> {
     let layout = build_layout(&c.base, DEFAULT_MARKER)?;
-    validate_sets(c.attack, layout.total, c.sets.len())?;
+    validate_sets(c.attack, layout.total, c.sets.len(), &c.sets)?;
 
     let set_sizes: Vec<usize> = c.sets.iter().map(|s| s.len()).collect();
     let projected = count_requests(c.attack, layout.total, &set_sizes);
-    if let Some(budget) = c.budget {
-        if projected > budget {
-            return Err(AutomateError::BudgetExceeded { projected, budget });
-        }
+    // A hard ceiling regardless of an explicit budget: `budget: None` must not
+    // mean "materialize an unbounded request set in memory" (a ClusterBomb over
+    // a large DB category saturates the count and then OOMs the process).
+    const HARD_CEILING: u64 = 100_000;
+    let effective_budget = c.budget.unwrap_or(HARD_CEILING).min(HARD_CEILING);
+    if projected > effective_budget {
+        return Err(AutomateError::BudgetExceeded {
+            projected,
+            budget: effective_budget,
+        });
+    }
+
+    generate_from(c, 0)
+}
+
+/// Like [`generate`] but materializes only the work items from `start` onward.
+///
+/// This is the resume primitive: a campaign interrupted after `n` requests can
+/// be restarted with `start = n` and executes only its unexecuted remainder. It
+/// never replays uncertain mutating steps, and the caller's approval binding
+/// still covers the plan (any drift changes the plan hash and is refused).
+pub fn generate_from(c: &Campaign, start: usize) -> Result<Vec<GeneratedRequest>, AutomateError> {
+    let layout = build_layout(&c.base, DEFAULT_MARKER)?;
+    validate_sets(c.attack, layout.total, c.sets.len(), &c.sets)?;
+
+    let set_sizes: Vec<usize> = c.sets.iter().map(|s| s.len()).collect();
+    let projected = count_requests(c.attack, layout.total, &set_sizes);
+    const HARD_CEILING: u64 = 100_000;
+    let effective_budget = c.budget.unwrap_or(HARD_CEILING).min(HARD_CEILING);
+    if projected > effective_budget {
+        return Err(AutomateError::BudgetExceeded {
+            projected,
+            budget: effective_budget,
+        });
+    }
+    if start as u64 >= projected {
+        return Ok(Vec::new());
     }
 
     let items = build_items(c, layout.total);
     let generated = items
         .into_iter()
+        .skip(start)
         .map(|item| GeneratedRequest {
             request: render_request(&c.base, &layout, &item.assign),
             payloads: item.payloads,
@@ -270,6 +330,14 @@ pub fn generate(c: &Campaign) -> Result<Vec<GeneratedRequest>, AutomateError> {
         })
         .collect();
     Ok(generated)
+}
+
+/// The total number of requests this campaign would issue (without generating).
+pub fn projected_count(c: &Campaign) -> Result<u64, AutomateError> {
+    let layout = build_layout(&c.base, DEFAULT_MARKER)?;
+    validate_sets(c.attack, layout.total, c.sets.len(), &c.sets)?;
+    let set_sizes: Vec<usize> = c.sets.iter().map(|s| s.len()).collect();
+    Ok(count_requests(c.attack, layout.total, &set_sizes))
 }
 
 /// One generated request's work order: the per-position substitution plus the
@@ -381,19 +449,24 @@ fn build_items(c: &Campaign, p: usize) -> Vec<Item> {
 
 /// Render a base request with one assignment, resolving every marked field.
 fn render_request(base: &HttpRequest, layout: &Layout, assign: &[Option<String>]) -> HttpRequest {
-    let url = render_field(&base.url, &layout.url, assign);
+    let url = render_field(&base.url, &layout.url, assign, FieldEncoding::Url);
 
     let mut headers = HeaderList::new();
     for (i, header) in base.headers.iter().enumerate() {
         let value = match layout.headers.get(i) {
-            Some(fp) => render_field(&header.value, fp, assign),
+            Some(fp) => render_field(&header.value, fp, assign, FieldEncoding::Header),
             None => header.value.clone(),
         };
         headers.push(header.name.clone(), value);
     }
 
     let body = if layout.body_is_utf8 {
-        Body::from_text(render_field(&layout.body_text, &layout.body, assign))
+        Body::from_text(render_field(
+            &layout.body_text,
+            &layout.body,
+            assign,
+            FieldEncoding::Body,
+        ))
     } else {
         base.body.clone()
     };
@@ -409,19 +482,68 @@ fn render_request(base: &HttpRequest, layout: &Layout, assign: &[Option<String>]
 
 /// Rebuild one field string, substituting a payload (or the baseline) into each
 /// of its marked spans. Panic-free: out-of-range slices yield empty strings.
-fn render_field(original: &str, fp: &FieldPositions, assign: &[Option<String>]) -> String {
+/// How a substituted payload is encoded for the field it lands in (plan §10.2:
+/// "Preserve input location/type so mutations round-trip correctly; add
+/// per-context encodings").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FieldEncoding {
+    /// Inside the request URL: percent-encode the payload so `#`, `&`, `=` and
+    /// `%` cannot silently truncate or re-shape the request the URL re-parser
+    /// produces. The wire form then matches the projected probe.
+    Url,
+    /// A header value: never allow CR/LF through (request splitting).
+    Header,
+    /// A body field: the payload is sent verbatim (raw SQLi/XSS strings must
+    /// arrive intact).
+    Body,
+}
+
+fn render_field(
+    original: &str,
+    fp: &FieldPositions,
+    assign: &[Option<String>],
+    encoding: FieldEncoding,
+) -> String {
     let mut out = String::with_capacity(original.len());
     let mut cursor = 0usize;
     for (pos, &global) in fp.positions.iter().zip(fp.globals.iter()) {
         out.push_str(original.get(cursor..pos.start).unwrap_or(""));
         match assign.get(global).and_then(|o| o.as_deref()) {
-            Some(payload) => out.push_str(payload),
+            Some(payload) => out.push_str(&encode_for_field(payload, encoding)),
             None => out.push_str(&pos.baseline),
         }
         cursor = pos.end;
     }
     out.push_str(original.get(cursor..).unwrap_or(""));
     out
+}
+
+/// Percent-encode everything outside the RFC 3986 unreserved set, so a payload
+/// cannot inject URL structure (`#fragment`, `&param`, `=value`) by accident.
+fn percent_encode_payload(payload: &str) -> String {
+    let mut out = String::with_capacity(payload.len() * 3);
+    for b in payload.bytes() {
+        let unreserved = b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~');
+        if unreserved {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+fn encode_for_field(payload: &str, encoding: FieldEncoding) -> String {
+    match encoding {
+        FieldEncoding::Url => percent_encode_payload(payload),
+        // A header value carrying CR/LF is a request-splitting attempt; drop
+        // the control bytes rather than emit an unbounded header.
+        FieldEncoding::Header => payload
+            .chars()
+            .filter(|c| *c != '\r' && *c != '\n')
+            .collect(),
+        FieldEncoding::Body => payload.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -739,5 +861,180 @@ mod tests {
         let json = serde_json::to_string(&plan).unwrap();
         let back: CampaignPlan = serde_json::from_str(&json).unwrap();
         assert_eq!(plan, back);
+    }
+}
+
+#[cfg(test)]
+mod substitution_tests {
+    use super::*;
+    use crate::PayloadSet;
+
+    fn base(url: &str) -> HttpRequest {
+        HttpRequest::get(url)
+    }
+
+    fn set(name: &str, payloads: &[&str]) -> PayloadSet {
+        PayloadSet::from_lines(name, &payloads.join("\n"))
+    }
+
+    #[test]
+    fn url_payloads_are_percent_encoded_so_structure_survives() {
+        // A payload with `#`/`&`/`=` must not truncate or reshape the request:
+        // the wire form has to match the projected probe.
+        let campaign = Campaign {
+            base: base("https://ex.test/s?q=§x§"),
+            attack: AttackType::Sniper,
+            sets: vec![set("edge", &["a#b&c=d"])],
+            budget: Some(10),
+        };
+        let generated = generate(&campaign).unwrap();
+        assert_eq!(generated.len(), 1);
+        let url = &generated[0].request.url;
+        assert!(url.contains("q=a%23b%26c%3Dd"), "url was {url}");
+        // Re-parsing through the canonical parser must still find exactly one
+        // query parameter with the whole payload as its value.
+        let parsed = HttpRequest::get(url);
+        assert_eq!(parsed.query().as_deref(), Some("q=a%23b%26c%3Dd"));
+    }
+
+    #[test]
+    fn body_payloads_stay_verbatim() {
+        let mut req = base("https://ex.test/");
+        req.method = "POST".to_string();
+        req.body = Body::from_text("q=§x§");
+        let campaign = Campaign {
+            base: req,
+            attack: AttackType::Sniper,
+            sets: vec![set("sqli", &["' OR 1=1--"])],
+            budget: Some(10),
+        };
+        let generated = generate(&campaign).unwrap();
+        assert_eq!(
+            generated[0].request.body.as_text(),
+            "q=' OR 1=1--",
+            "body payloads must arrive intact"
+        );
+    }
+
+    #[test]
+    fn a_payload_containing_the_marker_is_refused() {
+        let campaign = Campaign {
+            base: base("https://ex.test/s?q=§x§"),
+            attack: AttackType::Sniper,
+            sets: vec![set("evil", &["ok", "§recursive§"])],
+            budget: Some(10),
+        };
+        let err = generate(&campaign).unwrap_err();
+        assert!(
+            matches!(err, AutomateError::Marker(_)),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn markers_on_a_binary_body_are_reported_not_dropped() {
+        let mut req = base("https://ex.test/");
+        // § in a non-UTF-8 body cannot be substituted.
+        req.body = Body::from_bytes(vec![0xff, 0xfe, 0xc2, 0xa7]);
+        let campaign = Campaign {
+            base: req,
+            attack: AttackType::Sniper,
+            sets: vec![set("x", &["a"])],
+            budget: Some(10),
+        };
+        let err = generate(&campaign).unwrap_err();
+        assert!(
+            matches!(err, AutomateError::Marker(ref m) if m.contains("UTF-8")),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn an_unbounded_campaign_is_ceilinged() {
+        // budget: None must not mean "materialize an unbounded request set".
+        // Two insertion points so ClusterBomb is legal, and 400×400 payloads.
+        let campaign = Campaign {
+            base: base("https://ex.test/s?a=§x§&b=§y§"),
+            attack: AttackType::ClusterBomb,
+            sets: vec![set("a", &["a"; 400]), set("b", &["b"; 400])],
+            budget: None,
+        };
+        let err = generate(&campaign).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                AutomateError::BudgetExceeded { projected, budget } if projected > budget
+            ),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn header_payloads_cannot_inject_crlf() {
+        let mut req = base("https://ex.test/");
+        req.headers.push("X-Test", "§h§");
+        let campaign = Campaign {
+            base: req,
+            attack: AttackType::Sniper,
+            sets: vec![set("crlf", &["a\\r\\nX-Evil: 1"])],
+            budget: Some(10),
+        };
+        let generated = generate(&campaign).unwrap();
+        let value = generated[0].request.headers.get("x-test").unwrap();
+        assert!(
+            !value.contains('\r') && !value.contains('\n'),
+            "header was {value:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod resume_tests {
+    use super::*;
+    use crate::PayloadSet;
+
+    fn campaign() -> Campaign {
+        let set = PayloadSet::from_lines("p", "a\nb\nc");
+        Campaign {
+            base: HttpRequest::get("https://ex.test/?q=§x§"),
+            attack: AttackType::Sniper,
+            sets: vec![set],
+            budget: Some(10),
+        }
+    }
+
+    #[test]
+    fn generate_from_skips_already_sent_work() {
+        let c = campaign();
+        let full = generate(&c).unwrap();
+        let projected = projected_count(&c).unwrap();
+        assert_eq!(full.len() as u64, projected);
+
+        // Resume after the first item: the remainder, in the same order.
+        let rest = generate_from(&c, 1).unwrap();
+        assert_eq!(rest.len(), full.len() - 1);
+        assert_eq!(rest[0].payloads, full[1].payloads);
+
+        // Resuming past the end yields nothing rather than replaying work.
+        assert!(generate_from(&c, full.len()).unwrap().is_empty());
+        assert!(generate_from(&c, full.len() + 5).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_resume_sequence_covers_every_request_exactly_once() {
+        let c = campaign();
+        let total = projected_count(&c).unwrap() as usize;
+        let mut seen: Vec<String> = Vec::new();
+        for chunk_start in (0..total).step_by(2) {
+            for g in generate_from(&c, chunk_start).unwrap().into_iter().take(2) {
+                seen.push(format!("{:?}", g.payloads));
+            }
+        }
+        let all: Vec<String> = generate(&c)
+            .unwrap()
+            .into_iter()
+            .map(|g| format!("{:?}", g.payloads))
+            .collect();
+        assert_eq!(seen, all, "chunked resume must equal one full run");
     }
 }

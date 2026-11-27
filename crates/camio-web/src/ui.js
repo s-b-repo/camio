@@ -973,7 +973,15 @@ function showMessage() {
     output("message-bytes", "");
     return;
   }
-  const buffer = Uint8Array.from(atob(message.body || ""), character => character.charCodeAt(0));
+  // A stored body is base64 by construction, but a corrupt or truncated record
+  // must not throw an uncaught DOMException and stop the inspector rendering.
+  let buffer;
+  try {
+    buffer = Uint8Array.from(atob(message.body || ""), character => character.charCodeAt(0));
+  } catch (_error) {
+    buffer = new Uint8Array(0);
+    output("message-bytes", "(body could not be decoded)");
+  }
   const count = isRequest ? req_len : resp_len;
   output("message-bytes", buffer.length < count ? "Showing " + bytes(buffer.length) + " of " + bytes(count) : bytes(count));
   const version = VERSIONS[message.version] || message.version || "";

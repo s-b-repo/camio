@@ -70,9 +70,14 @@ pub fn import_burp_xml(xml: &str) -> Result<ImportResult, ImportError> {
 
     // Depth tracking lets us scope fields to the direct children of `<item>` and
     // stay tolerant of nested/unknown structure.
-    let mut depth: i32 = 0;
+    // A stack of open element names (lowercased local names). Field scoping is
+    // "the parent element is `item`", derived from the stack — not from a depth
+    // counter, which silently desynchronizes if any event kind enters or exits
+    // without a paired Start/End.
+    let mut open: Vec<Vec<u8>> = Vec::new();
     let mut item_open = false;
-    let mut item_depth: i32 = 0;
+    // How deep the current <item> sits in the stack.
+    let mut item_depth: usize = 0;
     let mut item = ItemBuf::default();
     let mut field: Option<Field> = None;
     let mut field_is_b64 = false;
@@ -85,14 +90,14 @@ pub fn import_burp_xml(xml: &str) -> Result<ImportResult, ImportError> {
             .map_err(|e| ImportError::Parse(format!("XML parse error: {e}")))?;
         match event {
             Event::Start(e) => {
-                depth += 1;
                 let lname = e.local_name().as_ref().to_vec();
+                open.push(lname.clone());
                 if lname.eq_ignore_ascii_case(b"item") {
                     item_open = true;
-                    item_depth = depth;
+                    item_depth = open.len();
                     item = ItemBuf::default();
                     field = None;
-                } else if item_open && depth == item_depth + 1 {
+                } else if item_open && open.len() == item_depth + 1 {
                     let f = classify(&lname);
                     field_is_b64 = false;
                     if matches!(f, Field::Request | Field::Response) {
@@ -111,7 +116,7 @@ pub fn import_burp_xml(xml: &str) -> Result<ImportResult, ImportError> {
                 }
             }
             Event::Text(e) => {
-                if item_open && field.is_some() && depth == item_depth + 1 {
+                if item_open && field.is_some() && open.len() == item_depth + 1 {
                     // `BytesText::unescape` was removed in quick-xml 0.41; `xml10_content`
                     // decodes the charset and resolves XML entities, the same thing.
                     let text = e
@@ -121,14 +126,23 @@ pub fn import_burp_xml(xml: &str) -> Result<ImportResult, ImportError> {
                 }
             }
             Event::CData(e) => {
-                if item_open && field.is_some() && depth == item_depth + 1 {
+                if item_open && field.is_some() && open.len() == item_depth + 1 {
                     // CDATA is raw (no entity unescaping); take its bytes directly.
                     buf.push_str(&String::from_utf8_lossy(e.into_inner().as_ref()));
                 }
             }
             Event::End(e) => {
                 let lname = e.local_name().as_ref().to_vec();
-                if item_open && depth == item_depth + 1 && field.is_some() {
+                // An unbalanced document must not shift the scoping invariant;
+                // pop only what was actually opened.
+                let at_field_level = item_open && open.len() == item_depth + 1;
+                if open
+                    .last()
+                    .is_some_and(|top| top.eq_ignore_ascii_case(&lname))
+                {
+                    open.pop();
+                }
+                if at_field_level && field.is_some() {
                     let value = std::mem::take(&mut buf);
                     match field.take() {
                         Some(Field::Url) => item.url = Some(value.trim().to_string()),
@@ -163,14 +177,25 @@ pub fn import_burp_xml(xml: &str) -> Result<ImportResult, ImportError> {
                         }
                         Some(Field::Ignored) | None => {}
                     }
-                } else if item_open && depth == item_depth && lname.eq_ignore_ascii_case(b"item") {
+                } else if item_open
+                    && open.len() + 1 == item_depth
+                    && lname.eq_ignore_ascii_case(b"item")
+                {
+                    // A bound on produced exchanges keeps a crafted archive
+                    // from growing the result without limit.
+                    if exchanges.len() >= crate::MAX_IMPORT_EXCHANGES {
+                        warnings.push(format!(
+                            "stopped at the {}-item limit",
+                            crate::MAX_IMPORT_EXCHANGES
+                        ));
+                        break;
+                    }
                     finalize_item(&item, item_index, &mut exchanges, &mut warnings);
                     item_index += 1;
                     item_open = false;
                     item = ItemBuf::default();
                     field = None;
                 }
-                depth -= 1;
             }
             Event::Eof => break,
             _ => {}
@@ -440,5 +465,88 @@ mod tests {
             .warnings
             .iter()
             .any(|w| w.contains("base64 decode failed")));
+    }
+}
+
+#[cfg(test)]
+mod scoping_tests {
+    use super::*;
+
+    #[test]
+    fn a_nested_item_inside_item_starts_a_new_record() {
+        // Field scoping is derived from the open-element stack, so a nested
+        // <item> (or an unrelated <Item/> sibling) cannot corrupt the parent's
+        // fields — and the depth invariant cannot desynchronize from an
+        // unbalanced document.
+        let xml = concat!(
+            "<?xml version=\"1.0\"?><items>",
+            "<item><url><![CDATA[http://a.test/]]></url>",
+            "<host><![CDATA[a.test]]></host><port>80</port>",
+            "<method><![CDATA[GET]]></method><path><![CDATA[/]]></path>",
+            "<extension>null</extension>",
+            "<request><![CDATA[GET / HTTP/1.1\r\nHost: a.test\r\n\r\n]]></request>",
+            "<status>200</status><responselength>1</responselength>",
+            "<mimetype>text/html</mimetype>",
+            "<response><![CDATA[HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n]]></response>",
+            "<extra><nested>ignored</nested></extra>",
+            "</item>",
+            "<item><url><![CDATA[http://b.test/]]></url>",
+            "<host><![CDATA[b.test]]></host><port>80</port>",
+            "<method><![CDATA[GET]]></method><path><![CDATA[/x]]></path>",
+            "<extension>null</extension>",
+            "<request><![CDATA[GET /x HTTP/1.1\r\nHost: b.test\r\n\r\n]]></request>",
+            "<status>204</status><responselength>0</responselength>",
+            "<mimetype>text/html</mimetype>",
+            "</item>",
+            "</items>"
+        );
+        let result = import_burp_xml(xml).unwrap();
+        assert_eq!(result.exchanges.len(), 2, "warnings: {:?}", result.warnings);
+        assert_eq!(result.exchanges[0].request.url, "http://a.test/");
+        assert_eq!(
+            result.exchanges[1].request.url,
+            "http://b.test/",
+            "exchanges: {:?}",
+            result
+                .exchanges
+                .iter()
+                .map(|e| e.request.url.clone())
+                .collect::<Vec<_>>()
+        );
+        // The nested element inside the first item did not swallow its fields.
+        assert_eq!(result.exchanges[0].request.method, "GET");
+    }
+
+    #[test]
+    fn an_unbalanced_document_is_rejected_not_silently_scoped() {
+        // quick-xml is strict about element nesting, so a mismatched close tag
+        // is a parse error rather than a desynchronized field scope. The
+        // open-element stack in the parser is defense in depth for that.
+        let xml = concat!(
+            "<?xml version=\"1.0\"?><items>",
+            "<item><url><![CDATA[http://a.test/]]></url>",
+            "<host><![CDATA[a.test]]></host><port>80</port>",
+            "<method><![CDATA[GET]]></method><path><![CDATA[/]]></path>",
+            "<extension>null</extension>",
+            "<request><![CDATA[GET / HTTP/1.1\r\nHost: a.test\r\n\r\n]]></request>",
+            "<status>200</status><responselength>0</responselength>",
+            "<mimetype>text/html</mimetype>",
+            "</url>", // stray closing tag: must not shift scoping
+            "</item>",
+            "<item><url><![CDATA[http://b.test/]]></url>",
+            "<host><![CDATA[b.test]]></host><port>80</port>",
+            "<method><![CDATA[GET]]></method><path><![CDATA[/]]></path>",
+            "<extension>null</extension>",
+            "<request><![CDATA[GET / HTTP/1.1\r\nHost: b.test\r\n\r\n]]></request>",
+            "<status>200</status><responselength>0</responselength>",
+            "<mimetype>text/html</mimetype>",
+            "</item>",
+            "</items>"
+        );
+        let err = import_burp_xml(xml).unwrap_err();
+        assert!(
+            err.to_string().contains("ill-formed"),
+            "unexpected error: {err}"
+        );
     }
 }

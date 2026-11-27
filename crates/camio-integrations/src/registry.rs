@@ -17,6 +17,11 @@ pub struct ToolInfo {
     pub purpose: &'static str,
     /// Args that print the version (and exit).
     pub version_args: &'static [&'static str],
+    /// When set, the version output must contain this marker (case-insensitive)
+    /// for the binary to count as the tool Camio drives — so a *different*
+    /// program squatting on the name is reported as not installed rather than
+    /// shown working (plan §5.1 actionable diagnostics).
+    pub compat_marker: Option<&'static str>,
 }
 
 /// The tools Camio has adapters for.
@@ -26,12 +31,23 @@ pub const KNOWN_TOOLS: &[ToolInfo] = &[
         binary: "nuclei",
         purpose: "template vulnerability scanner",
         version_args: &["-version"],
+        compat_marker: Some("nuclei"),
+    },
+    ToolInfo {
+        name: "httpx",
+        binary: "httpx",
+        purpose: "HTTP prober (reachability + tech metadata)",
+        version_args: &["-version"],
+        // Only ProjectDiscovery's Go tool reports "Current Version: vX.Y.Z";
+        // another `httpx` implementation is not this adapter's tool.
+        compat_marker: Some(crate::httpx::EXPECTED_VERSION_MARKER),
     },
     ToolInfo {
         name: "subfinder",
         binary: "subfinder",
         purpose: "passive subdomain enumeration",
         version_args: &["-version"],
+        compat_marker: None,
     },
 ];
 
@@ -59,10 +75,19 @@ pub fn probe_tool(info: &ToolInfo, timeout: Duration) -> ToolStatus {
         }
         Err(_) => None,
     };
+    // A binary that runs but is not the expected tool is not "installed" for
+    // this adapter's purposes; say so instead of showing a green status.
+    let installed = match (info.compat_marker, version.as_deref()) {
+        (Some(marker), Some(line)) => line
+            .to_ascii_lowercase()
+            .contains(&marker.to_ascii_lowercase()),
+        (Some(_), None) => false,
+        (None, _) => true,
+    };
     ToolStatus {
         name: info.name,
         purpose: info.purpose,
-        installed: true,
+        installed,
         version,
     }
 }
@@ -168,6 +193,7 @@ mod tests {
             binary: "camio-definitely-not-a-real-binary-xyz",
             purpose: "test",
             version_args: &["--version"],
+            compat_marker: None,
         };
         let st = probe_tool(&info, Duration::from_secs(2));
         assert!(!st.installed);

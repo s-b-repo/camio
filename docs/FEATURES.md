@@ -59,6 +59,7 @@ See [PAYLOAD-DB.md](./PAYLOAD-DB.md).
 | **Self-hosted OAST collector** — a local, free Burp-Collaborator analog; mints correlation tokens, records out-of-band callbacks (SSRF, blind XXE, webhooks, DNS-style exfil), ties each hit to its token | `camio-oast` | `camio oast` | (Findings) |
 | **Subdomain enumeration** — passive OSINT via `subfinder` | `camio-integrations` | `camio subfinder` | — |
 | **Nuclei** — run the external scanner against an authorized target; normalize into findings/assets | `camio-integrations` | `camio nuclei` | — |
+| **httpx probing** — ProjectDiscovery's prober for reachability, titles, servers, TLS and technology observations; JSONL parser + bounded runner + `--import` for existing exports; results stored as `httpx` observations, never promoted to findings; a differently-named `httpx` binary is rejected instead of silently probing nothing | `camio-integrations` | `camio probe` | — |
 | **Integrations status** — list external tools and whether each is installed | `camio-integrations` | `camio integrations` | Extensions |
 
 ## 6. Data, evidence & tooling
@@ -67,7 +68,10 @@ See [PAYLOAD-DB.md](./PAYLOAD-DB.md).
 |---|---|---|---|
 | **Storage** — indexed SQLite history with content-addressed, deduplicated body blobs; metadata queries never load body bytes | `camio-store` | `camio review`, `camio query` | HTTP history |
 | **CamioQL** — an HTTPQL-compatible query language for search, filtering, scope | `camio-core` | `camio query` | CamioQL |
-| **Scope + SSRF guard** — one scope-decision path; loopback/link-local/metadata/private blocked unless a lab profile opts in | `camio-core` | `camio scope` | Scope |
+| **Scope + SSRF guard** — one scope-decision path; private/loopback blocked unless a lab profile opts in; **link-local and the cloud-metadata address need their own explicit opt-in** (`--allow-metadata`) even in lab mode | `camio-core` | `camio scope` | Scope |
+| **Explicit targets for automation** — discovery/scan/fuzz/campaigns refuse to run when the project defines no include rule; an empty scope is never read as permission | `camio-core` | (all active cmds) | — |
+| **Approval binding** — an approval is a sha-256 plan hash over targets, action class, tool version, session, request/time/rate limits and policy revision; any drift refuses reuse | `camio-core` | `camio fuzz --approve <hash>` | — |
+| **Durable background tasks** — full task lifecycle with validated transitions and distinct outcomes (success/timeout/cancel/scope-denied/parser/tool/storage), persisted per state change; interrupted runs are reconciled at startup | `camio-core` + `camio-tasks` + `camio-store` | `camio tasks [--reconcile]` | Tasks |
 | **Site map** — host→path tree built from history | `camio-core` | (via review) | Target |
 | **Labels** — organize exchanges (add/remove/list/show) | `camio-store` | `camio label` | — |
 | **Diff** — byte/line Comparer, and unified diff between two stored exchanges | `camio-convert` / `camio-core` | `camio diff` | Comparer |

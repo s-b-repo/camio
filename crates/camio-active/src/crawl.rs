@@ -47,9 +47,16 @@ pub struct CrawlResult {
 /// same-origin (by default), not-yet-seen links are enqueued.
 pub fn crawl(seed: &str, send: &Sender, opts: &CrawlOptions) -> CrawlResult {
     let mut result = CrawlResult::default();
-    let seed_host = Url::parse(seed)
-        .ok()
-        .and_then(|u| u.host_str().map(String::from));
+    // A canonical seed so origin comparison sees scheme + port too.
+    let seed_origin = Url::parse(seed)
+        .map(|u| {
+            let mut s = format!("{}://{}", u.scheme(), u.host_str().unwrap_or(""));
+            if let Some(port) = u.port_or_known_default() {
+                s.push_str(&format!(":{port}"));
+            }
+            s
+        })
+        .unwrap_or_else(|_| seed.to_string());
 
     let mut frontier: VecDeque<String> = VecDeque::new();
     let mut seen: HashSet<String> = HashSet::new();
@@ -75,7 +82,7 @@ pub fn crawl(seed: &str, send: &Sender, opts: &CrawlOptions) -> CrawlResult {
                         if discovered.insert(link.clone()) {
                             // record every discovery
                         }
-                        if opts.same_origin_only && !same_host(&link, seed_host.as_deref()) {
+                        if opts.same_origin_only && !same_origin(&link, &seed_origin) {
                             continue;
                         }
                         if !seen.contains(&link) {
@@ -97,16 +104,24 @@ pub fn crawl(seed: &str, send: &Sender, opts: &CrawlOptions) -> CrawlResult {
 }
 
 /// Whether `url`'s host matches `host` (when both are known).
-fn same_host(url: &str, host: Option<&str>) -> bool {
-    match (
-        Url::parse(url)
-            .ok()
-            .and_then(|u| u.host_str().map(String::from)),
-        host,
-    ) {
-        (Some(h), Some(seed)) => h.eq_ignore_ascii_case(seed),
-        _ => false,
-    }
+/// Same *origin* — scheme, host, and effective port — not merely the same host.
+/// A page seeded at `https://app.test/` must not silently enqueue
+/// `http://app.test/` (a downgrade) or `https://app.test:8443/` (a different
+/// service), which a host-only comparison allows and the `--cross-origin` flag
+/// then claims the operator approved.
+fn same_origin(url: &str, seed: &str) -> bool {
+    let Ok(candidate) = Url::parse(url) else {
+        return false;
+    };
+    let Ok(seed) = Url::parse(seed) else {
+        return false;
+    };
+    candidate.scheme().eq_ignore_ascii_case(seed.scheme())
+        && candidate
+            .host_str()
+            .zip(seed.host_str())
+            .is_some_and(|(a, b)| a.eq_ignore_ascii_case(b))
+        && candidate.port_or_known_default() == seed.port_or_known_default()
 }
 
 /// Extract absolute http(s) links from an HTML body, resolved against `base`.
@@ -306,5 +321,36 @@ mod tests {
         let res = crawl("https://x.test/", send, &CrawlOptions::default());
         assert_eq!(res.fetched.len(), 0);
         assert_eq!(res.skipped, 1);
+    }
+}
+
+#[cfg(test)]
+mod origin_tests {
+    use super::*;
+
+    #[test]
+    fn scheme_and_port_differences_are_cross_origin() {
+        let seed = "https://app.test";
+        assert!(same_origin("https://app.test/a", seed));
+        assert!(same_origin("https://app.test:443/a", seed));
+        // A scheme downgrade to the same host is NOT the same origin.
+        assert!(!same_origin("http://app.test/a", seed));
+        // A different service port is NOT the same origin.
+        assert!(!same_origin("https://app.test:8443/a", seed));
+    }
+
+    #[test]
+    fn explicit_nondefault_ports_match() {
+        let seed = "http://app.test:8080";
+        assert!(same_origin("http://app.test:8080/x", seed));
+        assert!(!same_origin("http://app.test/x", seed));
+        assert!(!same_origin("http://app.test:9090/x", seed));
+    }
+
+    #[test]
+    fn host_case_is_ignored_but_host_name_is_not() {
+        assert!(same_origin("https://APP.test/a", "https://app.test"));
+        assert!(!same_origin("https://other.test/a", "https://app.test"));
+        assert!(!same_origin("not a url", "https://app.test"));
     }
 }

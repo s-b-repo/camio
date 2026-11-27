@@ -18,10 +18,9 @@
 //! CLI can log them live and a GUI can poll [`Collector::all`].
 
 use camio_core::{Body, HeaderList};
-use sha2::{Digest, Sha256};
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -48,12 +47,57 @@ pub struct Interaction {
     pub body: Body,
 }
 
+/// Maximum concurrently-open callback connections (the OAST collector faces
+/// the target, so a connection flood must not become a thread flood).
+const MAX_CONCURRENT: usize = 64;
+
+/// Maximum interactions retained (a ring buffer keeps the most recent). The
+/// collector faces the target, so an unbounded `Vec` is a memory DoS: each
+/// interaction can carry up to 1 MiB of body.
+const MAX_INTERACTIONS: usize = 10_000;
+
+/// Summarise an interaction's body for durable storage (bounded, control
+/// characters removed), or `None` when empty.
+pub fn trim_for_store(interaction: &Interaction) -> StoredTrim {
+    let body = interaction.body.as_text();
+    let body_summary = if body.is_empty() {
+        None
+    } else {
+        let cleaned: String = body
+            .chars()
+            .take(200)
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect();
+        Some(cleaned.trim().to_string())
+    };
+    StoredTrim {
+        token: interaction.token.clone(),
+        method: interaction.method.clone(),
+        target: interaction.target.clone(),
+        host: interaction.host.clone(),
+        source: interaction.source.clone(),
+        received_at_ms: interaction.received_at_ms,
+        body_summary,
+    }
+}
+
+/// The store-facing projection of an interaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredTrim {
+    pub token: Option<String>,
+    pub method: String,
+    pub target: String,
+    pub host: Option<String>,
+    pub source: String,
+    pub received_at_ms: i64,
+    pub body_summary: Option<String>,
+}
+
 /// Records interactions and mints/correlates tokens. Cheap to share via `Arc`.
 pub struct Collector {
     base: String,
     items: Mutex<Vec<Interaction>>,
     next_id: AtomicU64,
-    token_seed: AtomicU64,
 }
 
 impl Collector {
@@ -65,7 +109,6 @@ impl Collector {
             base: base.into(),
             items: Mutex::new(Vec::new()),
             next_id: AtomicU64::new(1),
-            token_seed: AtomicU64::new(0),
         })
     }
 
@@ -74,20 +117,18 @@ impl Collector {
         &self.base
     }
 
-    /// Mint a fresh, hard-to-guess correlation token.
+    /// Mint a fresh correlation token from the OS CSPRNG. Hashing a
+    /// timestamp/counter/pid is *structured*, largely predictable input — the
+    /// "hard-to-guess" property the token relies on must come from a secret
+    /// source, not from state an attacker can estimate.
     pub fn new_token(&self) -> String {
-        let seed = self.token_seed.fetch_add(1, Ordering::Relaxed);
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let mut hasher = Sha256::new();
-        hasher.update(nanos.to_le_bytes());
-        hasher.update(seed.to_le_bytes());
-        hasher.update(std::process::id().to_le_bytes());
-        let digest = hasher.finalize();
-        // 14 hex chars is plenty of entropy for correlation and keeps URLs short.
-        digest.iter().take(7).map(|b| format!("{b:02x}")).collect()
+        let mut random = [0u8; 9];
+        if getrandom::fill(&mut random).is_err() {
+            // Never fall back to something predictable: fail loudly instead.
+            panic!("could not read random bytes for an OAST token");
+        }
+        // 18 hex chars keeps URLs short while carrying 72 bits of entropy.
+        random.iter().map(|b| format!("{b:02x}")).collect()
     }
 
     /// A path-style callback URL: `http://<base>/<token>`. Works whenever the
@@ -101,6 +142,16 @@ impl Collector {
     /// exfiltration, like a DNS lookup).
     pub fn dns_callback_url(&self, token: &str) -> String {
         format!("http://{token}.{}", self.base)
+    }
+
+    /// Record a pre-built interaction (the durable collector mirrors it into a
+    /// store; the network path builds its own through [`Collector::push`]).
+    pub(crate) fn record_for_test(&self, interaction: &Interaction) {
+        let mut items = self.items.lock().unwrap_or_else(|e| e.into_inner());
+        if items.len() >= MAX_INTERACTIONS {
+            items.remove(0);
+        }
+        items.push(interaction.clone());
     }
 
     fn push(
@@ -124,23 +175,29 @@ impl Collector {
             headers,
             body,
         };
-        self.items
-            .lock()
-            .expect("oast collector poisoned")
-            .push(interaction.clone());
+        {
+            // A poisoned lock must not turn every later interaction into a
+            // panic (the collector is polled from UI/MCP paths); recover the
+            // inner value instead.
+            let mut items = self.items.lock().unwrap_or_else(|e| e.into_inner());
+            if items.len() >= MAX_INTERACTIONS {
+                items.remove(0);
+            }
+            items.push(interaction.clone());
+        }
         interaction
     }
 
-    /// All interactions recorded so far.
+    /// All interactions recorded so far (bounded by [`MAX_INTERACTIONS`]).
     pub fn all(&self) -> Vec<Interaction> {
-        self.items.lock().expect("oast collector poisoned").clone()
+        self.items.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Interactions whose token matches `token`.
     pub fn for_token(&self, token: &str) -> Vec<Interaction> {
         self.items
             .lock()
-            .expect("oast collector poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .iter()
             .filter(|i| i.token.as_deref() == Some(token))
             .cloned()
@@ -149,13 +206,16 @@ impl Collector {
 
     /// How many interactions have been recorded.
     pub fn len(&self) -> usize {
-        self.items.lock().expect("oast collector poisoned").len()
+        self.items.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 }
+
+pub mod dns;
+pub mod durable;
 
 type Hook = Box<dyn Fn(&Interaction) + Send + Sync>;
 
@@ -210,6 +270,7 @@ impl OastServer {
 
     fn accept_loop(self: &Arc<Self>, listener: &TcpListener, shutdown: Option<Arc<AtomicBool>>) {
         let polling = shutdown.is_some();
+        let inflight = Arc::new(AtomicUsize::new(0));
         if polling {
             let _ = listener.set_nonblocking(true);
         }
@@ -219,16 +280,32 @@ impl OastServer {
                     break;
                 }
             }
+            // Cap concurrent handlers: one thread per connection with no
+            // ceiling lets a SYN flood of slow callbacks exhaust the process.
+            if inflight.load(Ordering::Acquire) >= MAX_CONCURRENT {
+                std::thread::sleep(Duration::from_millis(20));
+                continue;
+            }
             match listener.accept() {
                 Ok((stream, peer)) => {
                     let _ = stream.set_nonblocking(false);
                     let server = self.clone();
-                    std::thread::spawn(move || server.handle(stream, peer));
+                    let counter = inflight.clone();
+                    counter.fetch_add(1, Ordering::AcqRel);
+                    std::thread::spawn(move || {
+                        server.handle(stream, peer);
+                        counter.fetch_sub(1, Ordering::AcqRel);
+                    });
                 }
                 Err(ref e) if polling && e.kind() == io::ErrorKind::WouldBlock => {
                     std::thread::sleep(Duration::from_millis(50));
                 }
-                Err(_) => {
+                Err(e) => {
+                    // Any other accept error (EMFILE, ECONNABORTED, …) backs
+                    // off; looping without a sleep would spin the CPU at 100%.
+                    if e.kind() != io::ErrorKind::WouldBlock {
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
                     if !polling {
                         continue;
                     }
@@ -310,7 +387,7 @@ fn extract_token(target: &str, host: Option<&str>) -> Option<String> {
 
 /// A token is a run of hex-ish chars of a plausible length; this keeps random
 /// scans and favicons from being misread as correlations.
-fn is_token(s: &str) -> bool {
+pub(crate) fn is_token(s: &str) -> bool {
     let len = s.len();
     (8..=64).contains(&len) && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
@@ -376,7 +453,7 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -462,5 +539,46 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].body.as_text(), "stolen=data");
         handle.stop_and_join();
+    }
+}
+
+#[cfg(test)]
+mod hardening_tests {
+    use super::*;
+
+    #[test]
+    fn tokens_are_unique_and_not_derived_from_clock_state() {
+        let c = Collector::new("127.0.0.1:0");
+        let tokens: Vec<String> = (0..200).map(|_| c.new_token()).collect();
+        let unique: std::collections::HashSet<&String> = tokens.iter().collect();
+        assert_eq!(unique.len(), tokens.len(), "tokens must not collide");
+        // Enough length that the token is not a truncated clock hash.
+        assert!(tokens.iter().all(|t| t.len() >= 14));
+    }
+
+    #[test]
+    fn retention_is_bounded() {
+        let c = Collector::new("127.0.0.1:0");
+        // Two tokens so correlation still has something to find.
+        let tok = c.new_token();
+        // The path token must be the whole first segment, so carry the counter
+        // in the query (which does not participate in correlation).
+        for i in 0..(MAX_INTERACTIONS + 50) {
+            let base = Arc::clone(&c);
+            base.push(
+                "GET".to_string(),
+                format!("/{tok}?n={i}"),
+                None,
+                "-".to_string(),
+                HeaderList::default(),
+                Body::empty(),
+            );
+        }
+        assert_eq!(c.len(), MAX_INTERACTIONS);
+        // The most recent interactions are retained.
+        let last = c.for_token(&tok).last().cloned().unwrap();
+        assert!(last
+            .target
+            .contains(&format!("n={}", MAX_INTERACTIONS + 49)));
     }
 }

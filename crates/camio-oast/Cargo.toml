@@ -8,8 +8,12 @@ description = "Camio's self-hosted OAST collector: a local-first analog of Burp 
 
 [dependencies]
 camio-core.workspace = true
+camio-store.workspace = true
 httparse.workspace = true
 sha2.workspace = true
+# OS CSPRNG for correlation tokens (already in the tree via wreq).
+getrandom = "0.3"
 
 [dev-dependencies]
 camio-core.workspace = true
+camio-store.workspace = true

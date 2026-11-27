@@ -47,6 +47,13 @@ pub fn download_url() -> Result<String> {
 ///
 /// `dest` should be a fresh, dedicated directory (the zip is a large upstream
 /// artifact; keep it isolated from Camio's own code).
+/// Total uncompressed size an engine archive may expand to (1 GiB). A zip bomb
+/// must fill no disk (plan §12: protect against decompression-heavy inputs).
+const MAX_UNPACKED_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// Maximum entries in an engine archive.
+const MAX_UNPACK_ENTRIES: usize = 50_000;
+
 pub fn unpack(zip_path: &Path, dest: &Path) -> Result<PathBuf> {
     let file =
         fs::File::open(zip_path).with_context(|| format!("opening {}", zip_path.display()))?;
@@ -54,12 +61,25 @@ pub fn unpack(zip_path: &Path, dest: &Path) -> Result<PathBuf> {
 
     fs::create_dir_all(dest).with_context(|| format!("creating {}", dest.display()))?;
 
+    let mut total: u64 = 0;
     for i in 0..archive.len() {
+        if i >= MAX_UNPACK_ENTRIES {
+            bail!("archive has more than {MAX_UNPACK_ENTRIES} entries; refusing to unpack");
+        }
         let mut entry = archive.by_index(i)?;
         let Some(rel) = entry.enclosed_name() else {
             // Skip entries with unsafe paths (traversal / absolute).
             continue;
         };
+        // The declared size bounds this entry, and the running total bounds the
+        // archive, before anything is written.
+        let declared = entry.size();
+        total = total
+            .checked_add(declared)
+            .filter(|t| *t <= MAX_UNPACKED_BYTES)
+            .with_context(|| {
+                format!("archive would expand past the {MAX_UNPACKED_BYTES}-byte limit")
+            })?;
         let out = dest.join(rel);
 
         if entry.is_dir() {
@@ -73,12 +93,15 @@ pub fn unpack(zip_path: &Path, dest: &Path) -> Result<PathBuf> {
             fs::File::create(&out).with_context(|| format!("writing {}", out.display()))?;
         io::copy(&mut entry, &mut out_file)?;
 
-        // Preserve the executable bit from the archive on unix.
+        // Preserve the executable bit from the archive on unix, but never
+        // setuid/setgid: an engine install must not gain privileges the
+        // operator did not grant.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             if let Some(mode) = entry.unix_mode() {
-                fs::set_permissions(&out, fs::Permissions::from_mode(mode)).ok();
+                let cleaned = mode & 0o777;
+                fs::set_permissions(&out, fs::Permissions::from_mode(cleaned)).ok();
             }
         }
     }
@@ -98,11 +121,18 @@ pub fn locate_binary(root: &Path) -> Option<PathBuf> {
         if depth > 6 {
             return None;
         }
-        let entries = fs::read_dir(dir).ok()?;
+        // An unreadable entry (odd permissions, a broken symlink) must not abort
+        // the whole search and make a valid install look "not found".
+        let entries = match fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(_) => return None,
+        };
         let mut subdirs = Vec::new();
         for entry in entries.flatten() {
             let path = entry.path();
-            let ft = entry.file_type().ok()?;
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
             let name = entry.file_name().to_string_lossy().into_owned();
             if ft.is_file() && is_candidate(&name) {
                 return Some(path);

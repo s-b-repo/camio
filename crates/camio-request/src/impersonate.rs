@@ -13,6 +13,12 @@
 //! [`prepare_request`](crate::engine::prepare_request) produced, in order, and
 //! disable the client's own default-header injection.
 
+/// Hard cap on a buffered response body (64 MiB). A timeout bounds time, not
+/// size; without this a hostile or compromised target could stream gigabytes
+/// inside the request deadline and OOM the workbench (plan §16: "bounded
+/// response handling").
+const MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+
 use crate::engine::{prepare_request, RequestEngine, RequestError};
 use crate::spec::FingerprintSpec;
 use camio_core::{
@@ -150,10 +156,28 @@ impl ImpersonatingEngine {
             );
         }
 
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|e| RequestError::Transport(format!("reading body: {e}")))?;
+        // Bound the body by size as well as time: a hostile or compromised
+        // target could otherwise stream gigabytes inside the 30 s window and
+        // OOM the workbench (plan §16: "bounded response handling").
+        if let Some(len) = resp.content_length() {
+            if len > MAX_RESPONSE_BYTES as u64 {
+                return Err(RequestError::Transport(format!(
+                    "response body of {len} bytes exceeds the {MAX_RESPONSE_BYTES}-byte cap"
+                )));
+            }
+        }
+        let mut body = Vec::new();
+        let mut stream = resp.bytes_stream();
+        use futures_util::StreamExt as _;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| RequestError::Transport(format!("reading body: {e}")))?;
+            if body.len() + chunk.len() > MAX_RESPONSE_BYTES {
+                return Err(RequestError::Transport(format!(
+                    "response body exceeds the {MAX_RESPONSE_BYTES}-byte cap"
+                )));
+            }
+            body.extend_from_slice(&chunk);
+        }
         let roundtrip_ms = t0.elapsed().as_millis() as i64;
 
         let response = HttpResponse {
@@ -161,7 +185,7 @@ impl ImpersonatingEngine {
             version,
             reason,
             headers,
-            body: CoreBody::from_bytes(body.to_vec()),
+            body: CoreBody::from_bytes(body),
         };
 
         let mut ex = HttpExchange::new(prepared, source).with_response(response);
@@ -181,7 +205,10 @@ impl RequestEngine for ImpersonatingEngine {
     }
 
     fn is_fingerprint_matched(&self) -> bool {
-        true
+        // A preset that only *approximates* the pinned Camoufox build is a
+        // different JA3/JA4/H2 fingerprint, so it must not report itself as
+        // matched (plan §6.3). `parity_note` carries the measured gap.
+        self.exact_preset
     }
 
     fn spec(&self) -> &FingerprintSpec {

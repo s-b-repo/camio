@@ -28,6 +28,19 @@ pub struct PayloadSet {
     pub payloads: Vec<String>,
 }
 
+/// Whether a raw wordlist line is a comment (`# …` or `#`), as opposed to a
+/// payload that legitimately starts with `#` (`#<script>`, `#!`).
+fn is_comment_line(line: &str) -> bool {
+    let mut chars = line.chars();
+    match chars.next() {
+        Some('#') => match chars.next() {
+            None => true,
+            Some(c) => c.is_whitespace(),
+        },
+        _ => false,
+    }
+}
+
 impl PayloadSet {
     /// Build a set from an explicit list.
     pub fn new(name: impl Into<String>, payloads: Vec<String>) -> Self {
@@ -41,11 +54,15 @@ impl PayloadSet {
     /// (so CRLF files load cleanly), and drop blank lines and `#` comment lines.
     /// Whitespace inside a payload is preserved — only the line terminator is
     /// trimmed — so payloads that are themselves spaces/tabs survive.
+    ///
+    /// A line is a comment only when it *starts* with `#` followed by whitespace
+    /// or nothing: `#<script>…` and `#!` are legitimate payloads (fragment-based
+    /// probes), not comments, and dropping them silently loses test coverage.
     pub fn from_lines(name: &str, text: &str) -> Self {
         let payloads = text
             .split('\n')
             .map(|line| line.trim_end_matches('\r'))
-            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .filter(|line| !line.is_empty() && !is_comment_line(line))
             .map(|line| line.to_string())
             .collect();
         PayloadSet {
@@ -226,8 +243,14 @@ mod tests {
 
     #[test]
     fn from_lines_drops_comment_and_blank_only_lines() {
-        let set = PayloadSet::from_lines("w", "#x\n#y\n\n\n");
-        assert!(set.is_empty());
+        // `#` alone and `# …` are comments; `#x` is a payload.
+        let set = PayloadSet::from_lines("w", "#\n# a comment\n\n#<script>\n#!\n");
+        assert_eq!(
+            set.payloads,
+            vec!["#<script>".to_string(), "#!".to_string()],
+            "a `#`-leading payload must not be dropped as a comment"
+        );
+        assert!(PayloadSet::from_lines("w", "#\n# only comments\n\n\n").is_empty());
     }
 
     #[test]

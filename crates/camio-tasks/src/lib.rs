@@ -2,13 +2,16 @@
 //!
 //! Long operations (campaigns, scans, imports, external-tool runs) must return a
 //! task ID immediately and report ordered progress, be cancellable cooperatively,
-//! and record a distinct terminal outcome — success, failure, or cancellation —
-//! rather than blocking a UI thread or swallowing errors.
+//! and record a distinct terminal outcome — success, timeout, cancellation,
+//! scope denial, parser/tool/storage failure — rather than blocking a UI thread
+//! or swallowing errors.
 //!
 //! This is the in-process core of that contract: a [`TaskManager`] spawns each
-//! job on its own thread, tracks a [`TaskRecord`] (state + progress + result),
-//! and hands the job a [`TaskContext`] to report progress and poll for
-//! cancellation. It is storage-agnostic — a caller can snapshot [`TaskRecord`]s
+//! job on its own thread, tracks a [`TaskRecord`] (state + progress + result +
+//! outcome), and hands the job a [`TaskContext`] to report progress and poll for
+//! cancellation. Transitions are validated with [`TaskState::can_transition_to`]
+//! and a cancellation request moves the task through `Cancelling` while the job
+//! winds down. It is storage-agnostic — a caller can snapshot [`TaskRecord`]s
 //! into the store for durability — and reuses [`camio_core::TaskState`] so the
 //! UI, CLI, and MCP all speak the same lifecycle.
 //!
@@ -20,6 +23,67 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Why a task ended (plan §4.2: "Record success, timeout, cancellation, parser
+/// failure, scope denial, tool failure, and storage failure distinctly. Remove
+/// silent error swallowing from execution paths.").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskOutcome {
+    Success,
+    /// The task hit its time limit.
+    Timeout,
+    /// The operator cancelled it.
+    Cancelled,
+    /// A destination was denied by scope/policy.
+    ScopeDenied,
+    /// Tool or artifact output could not be parsed.
+    ParserFailure,
+    /// The external tool failed.
+    ToolFailure,
+    /// The store could not persist results.
+    StorageFailure,
+    /// Anything else.
+    Failed,
+}
+
+impl TaskOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TaskOutcome::Success => "success",
+            TaskOutcome::Timeout => "timeout",
+            TaskOutcome::Cancelled => "cancelled",
+            TaskOutcome::ScopeDenied => "scope_denied",
+            TaskOutcome::ParserFailure => "parser_failure",
+            TaskOutcome::ToolFailure => "tool_failure",
+            TaskOutcome::StorageFailure => "storage_failure",
+            TaskOutcome::Failed => "failed",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+            "success" => Some(TaskOutcome::Success),
+            "timeout" => Some(TaskOutcome::Timeout),
+            "cancelled" | "canceled" => Some(TaskOutcome::Cancelled),
+            "scope_denied" => Some(TaskOutcome::ScopeDenied),
+            "parser_failure" => Some(TaskOutcome::ParserFailure),
+            "tool_failure" => Some(TaskOutcome::ToolFailure),
+            "storage_failure" => Some(TaskOutcome::StorageFailure),
+            "failed" => Some(TaskOutcome::Failed),
+            _ => None,
+        }
+    }
+
+    pub fn is_success(self) -> bool {
+        matches!(self, TaskOutcome::Success)
+    }
+}
+
+impl std::fmt::Display for TaskOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 /// A snapshot of one task's lifecycle.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,6 +101,8 @@ pub struct TaskRecord {
     pub result: Option<String>,
     /// Reason on failure.
     pub error: Option<String>,
+    /// The distinct terminal reason, once finished.
+    pub outcome: Option<TaskOutcome>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
 }
@@ -74,6 +140,15 @@ struct Entry {
 struct Shared {
     tasks: HashMap<i64, Entry>,
     next_id: i64,
+    sink: Option<Arc<dyn TaskSink>>,
+}
+
+/// A persistence sink for task records (plan §4.2 durable jobs + restart
+/// recovery). Implemented by callers over their storage handle; a failed save
+/// must never take down the running job, so implementations report problems
+/// without panicking.
+pub trait TaskSink: Send + Sync + 'static {
+    fn save(&self, rec: &TaskRecord);
 }
 
 /// A thread-backed manager for background tasks.
@@ -85,6 +160,28 @@ pub struct TaskManager {
 impl TaskManager {
     pub fn new() -> Self {
         TaskManager::default()
+    }
+
+    /// A manager that mirrors every state change into `sink` (plan §4.2).
+    pub fn with_sink<S: TaskSink>(sink: S) -> Self {
+        TaskManager {
+            shared: Arc::new(Mutex::new(Shared {
+                tasks: HashMap::new(),
+                next_id: 0,
+                sink: Some(Arc::new(sink)),
+            })),
+        }
+    }
+
+    /// Persist one record through the configured sink, if any.
+    fn persist(&self, rec: &TaskRecord) {
+        let sink = {
+            let g = self.shared.lock().expect("task manager poisoned");
+            g.sink.clone()
+        };
+        if let Some(sink) = sink {
+            sink.save(rec);
+        }
     }
 
     /// Spawn `job` as a background task of the given `kind`. Returns the task ID
@@ -109,12 +206,13 @@ impl TaskManager {
                     record: TaskRecord {
                         id: TaskId(id),
                         kind: kind.clone(),
-                        state: TaskState::Pending,
+                        state: TaskState::Queued,
                         progress_done: 0,
                         progress_total: None,
                         message: String::new(),
                         result: None,
                         error: None,
+                        outcome: None,
                         created_at_ms: now,
                         updated_at_ms: now,
                     },
@@ -124,45 +222,116 @@ impl TaskManager {
             id
         };
 
-        let shared = self.shared.clone();
+        let mgr = self.clone();
         let ctx = TaskContext {
             id: TaskId(id),
             cancel: cancel.clone(),
-            shared: shared.clone(),
+            mgr: mgr.clone(),
         };
+        // Persist the queued record so the task exists durably before it runs.
+        let queued = mgr.status(TaskId(id));
+        if let Some(rec) = queued {
+            mgr.persist(&rec);
+        }
         std::thread::Builder::new()
             .name(format!("camio-task-{id}"))
             .spawn(move || {
-                set_state(&shared, id, TaskState::Running);
+                mgr.set_state(id, TaskState::Running);
                 let outcome = job(&ctx);
                 let cancelled = cancel.load(Ordering::Acquire);
-                finish(&shared, id, outcome, cancelled);
+                mgr.finish(id, outcome, cancelled);
             })
             // If the OS refuses a thread, fail the task rather than panic.
             .unwrap_or_else(|e| {
-                finish(
-                    &self.shared,
-                    id,
-                    Err(format!("could not start task thread: {e}")),
-                    false,
-                );
+                self.finish(id, Err(format!("could not start task thread: {e}")), false);
                 std::thread::spawn(|| {})
             });
 
         TaskId(id)
     }
 
+    /// Apply `state` (validated) and mirror the change to the sink.
+    fn set_state(&self, id: i64, state: TaskState) {
+        let snapshot = {
+            let mut g = self.shared.lock().expect("task manager poisoned");
+            let Some(e) = g.tasks.get_mut(&id) else {
+                return;
+            };
+            set_record_state(e, state);
+            Some(e.record.clone())
+        };
+        if let Some(rec) = snapshot {
+            self.persist(&rec);
+        }
+    }
+
+    /// Record the terminal state and outcome, then mirror to the sink.
+    fn finish(&self, id: i64, outcome: Result<String, String>, cancelled: bool) {
+        let snapshot = {
+            let mut g = self.shared.lock().expect("task manager poisoned");
+            let Some(e) = g.tasks.get_mut(&id) else {
+                return;
+            };
+            let declared = e.record.outcome;
+            let (state, kind, detail) = if cancelled {
+                (
+                    TaskState::Cancelled,
+                    TaskOutcome::Cancelled,
+                    "cancelled".to_string(),
+                )
+            } else {
+                match outcome {
+                    Ok(summary) => (
+                        TaskState::Completed,
+                        declared.unwrap_or(TaskOutcome::Success),
+                        summary,
+                    ),
+                    Err(err) => (
+                        TaskState::Failed,
+                        declared.unwrap_or(TaskOutcome::Failed),
+                        err,
+                    ),
+                }
+            };
+            e.record.state = state;
+            e.record.outcome = Some(kind);
+            match kind {
+                TaskOutcome::Success => e.record.result = Some(detail),
+                _ => e.record.error = Some(detail),
+            }
+            if e.record.message.is_empty() {
+                e.record.message = kind.as_str().to_string();
+            }
+            e.record.updated_at_ms = now_ms();
+            Some(e.record.clone())
+        };
+        if let Some(rec) = snapshot {
+            self.persist(&rec);
+        }
+    }
+
     /// Request cooperative cancellation. The job observes it via
-    /// [`TaskContext::is_cancelled`] and should stop promptly; the final state
-    /// becomes [`TaskState::Cancelled`] unless it already finished.
+    /// [`TaskContext::is_cancelled`] and should stop promptly; the task moves
+    /// through [`TaskState::Cancelling`] while it winds down and ends as
+    /// [`TaskState::Cancelled`] (unless it already finished).
     pub fn cancel(&self, id: TaskId) -> bool {
-        let g = self.shared.lock().expect("task manager poisoned");
-        match g.tasks.get(&id.0) {
-            Some(e) if !e.record.is_terminal() => {
-                e.cancel.store(true, Ordering::Release);
+        let snapshot = {
+            let mut g = self.shared.lock().expect("task manager poisoned");
+            match g.tasks.get_mut(&id.0) {
+                Some(e) if !e.record.is_terminal() => {
+                    e.cancel.store(true, Ordering::Release);
+                    set_record_state(e, TaskState::Cancelling);
+                    Some(e.record.clone())
+                }
+                _ => None,
+            }
+        };
+        match snapshot {
+            Some(rec) => {
+                self.persist(&rec);
                 true
             }
-            _ => false,
+            None => false,
         }
     }
 
@@ -197,7 +366,7 @@ impl TaskManager {
 pub struct TaskContext {
     id: TaskId,
     cancel: Arc<AtomicBool>,
-    shared: Arc<Mutex<Shared>>,
+    mgr: TaskManager,
 }
 
 impl TaskContext {
@@ -213,53 +382,67 @@ impl TaskContext {
 
     /// Report progress (`done` of optional `total`).
     pub fn set_progress(&self, done: u64, total: Option<u64>) {
-        let mut g = self.shared.lock().expect("task manager poisoned");
-        if let Some(e) = g.tasks.get_mut(&self.id.0) {
-            e.record.progress_done = done;
-            e.record.progress_total = total;
-            e.record.updated_at_ms = now_ms();
+        let snapshot = {
+            let mut g = self.mgr.shared.lock().expect("task manager poisoned");
+            if let Some(e) = g.tasks.get_mut(&self.id.0) {
+                e.record.progress_done = done;
+                e.record.progress_total = total;
+                e.record.updated_at_ms = now_ms();
+                Some(e.record.clone())
+            } else {
+                None
+            }
+        };
+        if let Some(rec) = snapshot {
+            self.mgr.persist(&rec);
         }
     }
 
     /// Set the latest status message.
     pub fn set_message(&self, msg: impl Into<String>) {
-        let mut g = self.shared.lock().expect("task manager poisoned");
+        let snapshot = {
+            let mut g = self.mgr.shared.lock().expect("task manager poisoned");
+            if let Some(e) = g.tasks.get_mut(&self.id.0) {
+                e.record.message = msg.into();
+                e.record.updated_at_ms = now_ms();
+                Some(e.record.clone())
+            } else {
+                None
+            }
+        };
+        if let Some(rec) = snapshot {
+            self.mgr.persist(&rec);
+        }
+    }
+
+    /// Declare the distinct reason this task is ending (plan §4.2). Use before
+    /// returning, so `Ok`/`Err` alone does not flatten a timeout, tool
+    /// failure, parser failure, scope denial, or storage failure into a
+    /// generic "failed".
+    pub fn set_outcome(&self, outcome: TaskOutcome) {
+        let mut g = self.mgr.shared.lock().expect("task manager poisoned");
         if let Some(e) = g.tasks.get_mut(&self.id.0) {
-            e.record.message = msg.into();
-            e.record.updated_at_ms = now_ms();
+            if !e.record.is_terminal() {
+                e.record.outcome = Some(outcome);
+                e.record.updated_at_ms = now_ms();
+            }
         }
+    }
+
+    /// Convenience: declare `outcome` and return it as the job's error.
+    pub fn fail(&self, outcome: TaskOutcome, msg: impl Into<String>) -> Result<String, String> {
+        self.set_outcome(outcome);
+        Err(msg.into())
     }
 }
 
-fn set_state(shared: &Arc<Mutex<Shared>>, id: i64, state: TaskState) {
-    let mut g = shared.lock().expect("task manager poisoned");
-    if let Some(e) = g.tasks.get_mut(&id) {
-        e.record.state = state;
-        e.record.updated_at_ms = now_ms();
-    }
-}
-
-fn finish(shared: &Arc<Mutex<Shared>>, id: i64, outcome: Result<String, String>, cancelled: bool) {
-    let mut g = shared.lock().expect("task manager poisoned");
-    if let Some(e) = g.tasks.get_mut(&id) {
-        match outcome {
-            // Cancellation wins even if the job returned a value/error.
-            _ if cancelled => {
-                e.record.state = TaskState::Cancelled;
-                if e.record.message.is_empty() {
-                    e.record.message = "cancelled".to_string();
-                }
-            }
-            Ok(summary) => {
-                e.record.state = TaskState::Completed;
-                e.record.result = Some(summary);
-            }
-            Err(err) => {
-                e.record.state = TaskState::Failed;
-                e.record.error = Some(err);
-            }
-        }
-        e.record.updated_at_ms = now_ms();
+/// Apply `state` only if the transition is valid (plan §4.2 validated
+/// transitions); an invalid transition is refused rather than corrupting the
+/// record. Timestamps refresh on every accepted change.
+fn set_record_state(entry: &mut Entry, state: TaskState) {
+    if entry.record.state == state || entry.record.state.can_transition_to(state) {
+        entry.record.state = state;
+        entry.record.updated_at_ms = now_ms();
     }
 }
 
@@ -356,5 +539,125 @@ mod tests {
         let id = mgr.spawn("x", |_| Ok("done".into()));
         wait_terminal(&mgr, id);
         assert!(!mgr.cancel(id)); // already terminal
+    }
+
+    #[test]
+    fn declared_outcomes_stay_distinct() {
+        let mgr = TaskManager::new();
+        let timeout = mgr.spawn("tool", |ctx| {
+            ctx.fail(TaskOutcome::Timeout, "exceeded the 30s limit".to_string())
+        });
+        let parser = mgr.spawn("import", |ctx| {
+            ctx.fail(
+                TaskOutcome::ParserFailure,
+                "malformed JSONL at line 4".to_string(),
+            )
+        });
+        let denied = mgr.spawn("campaign", |ctx| {
+            ctx.fail(TaskOutcome::ScopeDenied, "host not in scope".to_string())
+        });
+        let rec_t = wait_terminal(&mgr, timeout);
+        let rec_p = wait_terminal(&mgr, parser);
+        let rec_d = wait_terminal(&mgr, denied);
+        for rec in [&rec_t, &rec_p, &rec_d] {
+            assert_eq!(rec.state, TaskState::Failed);
+        }
+        assert_eq!(rec_t.outcome, Some(TaskOutcome::Timeout));
+        assert_eq!(rec_p.outcome, Some(TaskOutcome::ParserFailure));
+        assert_eq!(rec_d.outcome, Some(TaskOutcome::ScopeDenied));
+        assert!(rec_t.error.as_deref().unwrap().contains("30s"));
+    }
+
+    #[test]
+    fn success_defaults_to_success_outcome() {
+        let mgr = TaskManager::new();
+        let id = mgr.spawn("scan", |_| Ok("12 checks".into()));
+        let rec = wait_terminal(&mgr, id);
+        assert_eq!(rec.outcome, Some(TaskOutcome::Success));
+        assert!(rec.outcome.map(|o| o.is_success()).unwrap_or(false));
+        assert_eq!(rec.result.as_deref(), Some("12 checks"));
+    }
+
+    #[test]
+    fn cancellation_winds_down_through_cancelling() {
+        let mgr = TaskManager::new();
+        let id = mgr.spawn("long", |ctx| {
+            for i in 0..10_000 {
+                if ctx.is_cancelled() {
+                    return Ok("stopped early".to_string());
+                }
+                ctx.set_progress(i, Some(10_000));
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Ok("finished".to_string())
+        });
+        std::thread::sleep(Duration::from_millis(30));
+        assert!(mgr.cancel(id));
+        // The wind-down state is observable before the terminal record.
+        let mut saw_cancelling = false;
+        for _ in 0..100 {
+            if let Some(r) = mgr.status(id) {
+                if r.state == TaskState::Cancelling {
+                    saw_cancelling = true;
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(saw_cancelling, "cancel must move the task to cancelling");
+        let rec = wait_terminal(&mgr, id);
+        assert_eq!(rec.state, TaskState::Cancelled);
+        assert_eq!(rec.outcome, Some(TaskOutcome::Cancelled));
+    }
+
+    #[test]
+    fn terminal_states_never_transition() {
+        use camio_core::TaskState as S;
+        for t in [S::Completed, S::Cancelled, S::Failed, S::Interrupted] {
+            for n in [S::Queued, S::Running, S::Completed, S::Failed] {
+                assert!(!t.can_transition_to(n), "{t} -> {n} must be refused");
+            }
+        }
+        assert!(S::Running.can_transition_to(S::Cancelling));
+        assert!(!S::Running.can_transition_to(S::AwaitingApproval));
+        assert!(S::Cancelling.can_transition_to(S::Completed));
+    }
+
+    /// A recording sink (what a durable store would implement).
+    #[derive(Clone, Default)]
+    struct Recorder {
+        seen: Arc<Mutex<Vec<TaskRecord>>>,
+    }
+
+    impl TaskSink for Recorder {
+        fn save(&self, rec: &TaskRecord) {
+            self.seen.lock().unwrap().push(rec.clone());
+        }
+    }
+
+    #[test]
+    fn sink_mirrors_the_lifecycle_for_durability() {
+        let sink = Recorder::default();
+        let mgr = TaskManager::with_sink(sink.clone());
+        let id = mgr.spawn("scan", |ctx| {
+            ctx.set_progress(1, Some(2));
+            Ok("checks passed".into())
+        });
+        wait_terminal(&mgr, id);
+        let seen = sink.seen.lock().unwrap();
+        // The record exists durably before the job starts, every accepted
+        // transition is mirrored, and progress updates ride along.
+        let states: Vec<TaskState> = seen.iter().map(|r| r.state).collect();
+        assert_eq!(states.first(), Some(&TaskState::Queued), "got {states:?}");
+        assert!(states.contains(&TaskState::Running), "got {states:?}");
+        assert_eq!(states.last(), Some(&TaskState::Completed), "got {states:?}");
+        assert!(
+            states.len() >= 3,
+            "progress should be mirrored too, got {states:?}"
+        );
+        let last = seen.last().unwrap();
+        assert_eq!(last.outcome, Some(TaskOutcome::Success));
+        assert_eq!(last.result.as_deref(), Some("checks passed"));
+        assert_eq!(last.progress_done, 1);
     }
 }

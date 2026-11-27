@@ -44,7 +44,16 @@ pub fn parse_raw_request(bytes: &[u8], url: &str) -> Result<HttpRequest, ImportE
     let rest: Vec<&str> = tokens.collect();
     let version = rest.last().map(|t| map_http_version(t)).unwrap_or_default();
 
-    let headers = parse_header_lines(lines);
+    let mut unsafe_headers = Vec::new();
+    let headers = parse_header_lines(lines, &mut unsafe_headers);
+    if !unsafe_headers.is_empty() {
+        // Replay-safety: the header was dropped, not stored. Report it so the
+        // import is not silently narrower than the archive claimed.
+        return Err(ImportError::Parse(format!(
+            "unsafe header(s) with control characters: {}",
+            unsafe_headers.join(", ")
+        )));
+    }
 
     Ok(HttpRequest {
         method,
@@ -84,7 +93,14 @@ pub fn parse_raw_response(bytes: &[u8]) -> Result<HttpResponse, ImportError> {
         }
     };
 
-    let headers = parse_header_lines(lines);
+    let mut unsafe_headers = Vec::new();
+    let headers = parse_header_lines(lines, &mut unsafe_headers);
+    if !unsafe_headers.is_empty() {
+        return Err(ImportError::Parse(format!(
+            "unsafe response header(s) with control characters: {}",
+            unsafe_headers.join(", ")
+        )));
+    }
 
     Ok(HttpResponse {
         status,
@@ -168,7 +184,10 @@ fn strip_cr(line: &str) -> &str {
 /// duplicates. Only the optional leading whitespace after the colon is removed
 /// (RFC 7230 OWS); the name is kept byte-for-byte. Lines without a colon are
 /// tolerated and skipped.
-fn parse_header_lines<'a>(lines: impl Iterator<Item = &'a str>) -> HeaderList {
+fn parse_header_lines<'a>(
+    lines: impl Iterator<Item = &'a str>,
+    unsafe_headers: &mut Vec<String>,
+) -> HeaderList {
     let mut headers = HeaderList::new();
     for line in lines {
         if line.is_empty() {
@@ -176,6 +195,12 @@ fn parse_header_lines<'a>(lines: impl Iterator<Item = &'a str>) -> HeaderList {
         }
         if let Some((name, value)) = line.split_once(':') {
             let value = value.trim_start_matches([' ', '\t']);
+            // Replay-safety: a header carrying CR/LF/NUL would split the
+            // request at the origin (plan §12: protect imports).
+            if !crate::header_is_safe(name, value) {
+                unsafe_headers.push(name.to_string());
+                continue;
+            }
             headers.push(name, value);
         }
     }

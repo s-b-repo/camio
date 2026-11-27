@@ -62,6 +62,15 @@ pub struct ProxyArgs {
     /// Write the CA certificate to this path and exit (for browser/OS import).
     #[arg(long)]
     export_ca: Option<PathBuf>,
+    /// Rotate the intercept CA: mint a new key + certificate and exit. Anything
+    /// that imported the old CA must re-import this one.
+    #[arg(long)]
+    rotate_ca: bool,
+    /// Remove the persisted intercept CA (cert + key) and exit. Stops Camio from
+    /// minting leaves as that identity; the browser trust store keeps what it
+    /// already imported, so also remove it there to revoke trust.
+    #[arg(long)]
+    remove_ca: bool,
     /// Automatically run the passive scanner on every IN-SCOPE captured exchange
     /// and store its findings. Out-of-scope traffic is recorded but never tested.
     #[arg(long)]
@@ -99,6 +108,34 @@ pub fn run(args: ProxyArgs) -> Result<()> {
         return Ok(());
     }
 
+    // Rotate: a new key + cert; prior imports no longer match.
+    if args.rotate_ca {
+        let _ca = CertAuthority::rotate(&ca_dir, &ca_name)
+            .with_context(|| format!("rotating the CA in {}", ca_dir.display()))?;
+        println!("Rotated the Camio proxy CA in {}.", ca_dir.display());
+        println!("Re-import the new certificate into the browser/OS trust store;");
+        println!("the previous CA no longer matches any leaf this proxy mints.");
+        print_import_hint();
+        return Ok(());
+    }
+
+    // Remove: stop minting leaves as this identity.
+    if args.remove_ca {
+        let removed = CertAuthority::remove(&ca_dir)
+            .with_context(|| format!("removing the CA in {}", ca_dir.display()))?;
+        if removed {
+            println!(
+                "Removed the Camio proxy CA (certificate + key) from {}.",
+                ca_dir.display()
+            );
+            println!("Camio can no longer intercept TLS as this identity. Also remove it from");
+            println!("the browser/OS trust store to revoke trust fully.");
+        } else {
+            println!("No Camio proxy CA found in {}.", ca_dir.display());
+        }
+        return Ok(());
+    }
+
     let scope = crate::build_scope(&args.scope_include, &args.scope_exclude, args.allow_private)?;
     let rules = crate::build_ruleset(&args.rewrites)?;
     let profile = crate::profile_for(args.preset);
@@ -109,11 +146,18 @@ pub fn run(args: ProxyArgs) -> Result<()> {
         require_confirmation: false,
         ..Policy::safe()
     };
+    // One limiter shared by the forwarder and the raw-relayed `ws://` path, so
+    // `--rate-limit` paces the whole proxy rather than only HTTP requests.
+    let limiter = args
+        .rate_limit
+        .filter(|rps| *rps > 0.0)
+        .map(|rps| Arc::new(camio_core::RateLimiter::new(Some(rps), None)));
     let config = ProxyConfig {
         scope,
         policy,
         rules,
         tls_intercept: args.tls_intercept,
+        ws_rate_limit: limiter.clone(),
         ..ProxyConfig::default()
     };
 
@@ -121,12 +165,12 @@ pub fn run(args: ProxyArgs) -> Result<()> {
         EngineForwarder::spawn_with_proxy(profile, args.upstream_proxy.clone())
             .map_err(|e| anyhow::anyhow!("{e}"))?,
     );
-    let forwarder: Arc<dyn Forwarder> = match args.rate_limit {
-        Some(rps) if rps > 0.0 => Arc::new(camio_proxy::RateLimitedForwarder::new(
+    let forwarder: Arc<dyn Forwarder> = match limiter {
+        Some(limiter) => Arc::new(camio_proxy::RateLimitedForwarder::new(
             engine_forwarder,
-            Arc::new(camio_core::RateLimiter::new(Some(rps), None)),
+            limiter,
         )),
-        _ => engine_forwarder,
+        None => engine_forwarder,
     };
     let store = Store::open(&args.db).with_context(|| format!("opening {}", args.db.display()))?;
     let sink = Arc::new(StoreSink::new(store, !args.quiet, args.auto_scan));

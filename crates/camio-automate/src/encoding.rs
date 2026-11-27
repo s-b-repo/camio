@@ -39,6 +39,13 @@ pub enum Encoding {
     Raw,
     /// RFC 3986 percent-encoding of every non-unreserved byte.
     UrlEncoded,
+    /// Like [`Encoding::UrlEncoded`] but keeps `/` unencoded — for URL *path*
+    /// positions, where encoding `/` to `%2F` would defeat traversal probes.
+    UrlEncodedPath,
+    /// The path-preserving encoding applied twice.
+    UrlEncodedPathDouble,
+    /// The path-preserving encoding applied three times.
+    UrlEncodedPathTriple,
     /// Percent-encoded twice. Reaches sinks that URL-decode in two hops.
     UrlEncodedDouble,
     /// Percent-encoded three times. For nested proxies.
@@ -107,6 +114,9 @@ impl Encoding {
         match self {
             Encoding::Raw => "raw",
             Encoding::UrlEncoded => "url",
+            Encoding::UrlEncodedPath => "url-path-encoded",
+            Encoding::UrlEncodedPathDouble => "url-path-double",
+            Encoding::UrlEncodedPathTriple => "url-path-triple",
             Encoding::UrlEncodedDouble => "url-double",
             Encoding::UrlEncodedTriple => "url-triple",
             Encoding::HtmlEntity => "html",
@@ -149,6 +159,9 @@ impl Encoding {
         &[
             Encoding::Raw,
             Encoding::UrlEncoded,
+            Encoding::UrlEncodedPath,
+            Encoding::UrlEncodedPathDouble,
+            Encoding::UrlEncodedPathTriple,
             Encoding::UrlEncodedDouble,
             Encoding::UrlEncodedTriple,
             Encoding::HtmlEntity,
@@ -185,9 +198,14 @@ impl Encoding {
         match self {
             Encoding::Raw => value.to_string(),
             Encoding::UrlEncoded => url_encode(value, false),
+            Encoding::UrlEncodedPath => url_encode(value, true),
             Encoding::UrlEncodedDouble => url_encode(&url_encode(value, false), false),
+            Encoding::UrlEncodedPathDouble => url_encode(&url_encode(value, true), false),
             Encoding::UrlEncodedTriple => {
                 url_encode(&url_encode(&url_encode(value, false), false), false)
+            }
+            Encoding::UrlEncodedPathTriple => {
+                url_encode(&url_encode(&url_encode(value, true), false), false)
             }
             Encoding::HtmlEntity => html_entity_escape(value),
             Encoding::HtmlEntityNumeric => {
@@ -325,7 +343,19 @@ impl InputContext {
 pub fn compatible_encodings(ctx: InputContext) -> Vec<Encoding> {
     use Encoding::*;
     match ctx {
-        InputContext::UrlPath | InputContext::UrlQuery | InputContext::FormUrlencoded => vec![
+        // A path position keeps `/` (a null prefix is not wire-valid in any
+        // URL/form context, and encoding `/` to `%2F` would defeat traversal).
+        InputContext::UrlPath => vec![
+            Raw,
+            UrlEncodedPath,
+            UrlEncodedPathDouble,
+            UrlEncodedPathTriple,
+            OverlongSlash,
+            NullSuffix,
+            Hex,
+            Base32,
+        ],
+        InputContext::UrlQuery | InputContext::FormUrlencoded => vec![
             Raw,
             UrlEncoded,
             UrlEncodedDouble,
@@ -333,7 +363,6 @@ pub fn compatible_encodings(ctx: InputContext) -> Vec<Encoding> {
             MixedCase,
             OverlongSlash,
             NullSuffix,
-            NullPrefix,
             Hex,
             Base32,
         ],
@@ -451,15 +480,16 @@ pub fn expand_for_context(set: &PayloadSet, ctx: InputContext) -> Vec<EncodedPay
 /// (so callers can promote the cheapest encodings) and dedups by `(body, encoding)`.
 pub fn expand_with_encodings(set: &PayloadSet, encodings: &[Encoding]) -> Vec<EncodedPayload> {
     let mut out: Vec<EncodedPayload> = Vec::new();
-    let mut seen: BTreeSet<(String, Encoding)> = BTreeSet::new();
+    // Dedup on the *body*: two encodings that produce the same bytes are the
+    // same request on the wire, and sending both wastes a probe slot.
+    let mut seen: BTreeSet<String> = BTreeSet::new();
     for raw in &set.payloads {
         for &enc in encodings {
             let body = enc.apply(raw);
             if body.is_empty() {
                 continue;
             }
-            let key = (body.clone(), enc);
-            if seen.insert(key) {
+            if seen.insert(body.clone()) {
                 out.push(EncodedPayload {
                     body,
                     encoding: enc,
@@ -919,11 +949,10 @@ mod tests {
     #[test]
     fn expand_dedups_identical_encodings() {
         let s = set("same", &["abc"]);
-        // UpperCase of "abc" == Raw of "ABC". Not same, but UpperCase of "ABC"
-        // would equal Raw of "ABC". Check that the dedup key is (body, encoding).
+        // Two encodings that produce the same bytes are the same request.
         let out = expand_with_encodings(&s, &[Encoding::Raw, Encoding::LowerCase]);
-        // "abc" raw and "abc" lower-case produce same body but different enc.
-        assert_eq!(out.len(), 2);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].body, "abc");
     }
 
     #[test]
@@ -1066,5 +1095,45 @@ mod tests {
         let encs = compatible_encodings(InputContext::HttpHeaderValue);
         assert!(encs.contains(&Encoding::Rot13));
         assert!(encs.contains(&Encoding::Base32));
+    }
+}
+
+#[cfg(test)]
+mod encoding_fix_tests {
+    use super::*;
+
+    #[test]
+    fn path_positions_keep_slashes() {
+        // `../` must stay `../` (encoded only where needed): `%2e%2e%2f` is a
+        // different byte stream than `../`.
+        let path = Encoding::UrlEncodedPath.apply("../../etc/passwd");
+        assert_eq!(path, "../../etc/passwd");
+        // Query positions still encode the slash.
+        assert_eq!(Encoding::UrlEncoded.apply("a b/c"), "a%20b%2Fc");
+    }
+
+    #[test]
+    fn url_contexts_have_no_null_prefix() {
+        // A null prefix is not a wire-valid probe in a URL/form context.
+        for ctx in [
+            InputContext::UrlPath,
+            InputContext::UrlQuery,
+            InputContext::FormUrlencoded,
+        ] {
+            let encodings = compatible_encodings(ctx);
+            assert!(
+                !encodings.contains(&Encoding::NullPrefix),
+                "{ctx:?} must not include a null prefix"
+            );
+        }
+    }
+
+    #[test]
+    fn identical_bodies_are_not_emitted_twice() {
+        // `Raw` and `LowerCase` of "abc" are the same bytes: one request, not two.
+        let set = PayloadSet::new("x", vec!["abc".to_string()]);
+        let expanded = expand_with_encodings(&set, &[Encoding::Raw, Encoding::LowerCase]);
+        let bodies: Vec<&str> = expanded.iter().map(|e| e.body.as_str()).collect();
+        assert_eq!(bodies, vec!["abc"], "got {bodies:?}");
     }
 }

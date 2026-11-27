@@ -79,6 +79,9 @@ pub fn parse_chat_response(json: &str) -> Result<String, AiError> {
 }
 
 /// A ready-to-use chat client for one [`AiConfig`].
+/// Hard cap on a buffered AI response (8 MiB).
+const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+
 pub struct AiClient {
     config: AiConfig,
     client: Client,
@@ -163,10 +166,32 @@ impl AiClient {
             .map_err(|e| AiError::Transport(e.to_string()))?;
 
         let status = resp.status().as_u16();
-        let text = resp
-            .text()
-            .await
-            .map_err(|e| AiError::Transport(format!("reading response: {e}")))?;
+
+        // Bound the response by size, not just by the 90 s timeout: a
+        // misconfigured or hostile OpenAI-compatible endpoint could otherwise
+        // OOM the process with one oversized completion.
+        let mut text = String::new();
+        {
+            use futures_util::StreamExt as _;
+            if let Some(len) = resp.content_length() {
+                if len > MAX_RESPONSE_BYTES as u64 {
+                    return Err(AiError::Transport(format!(
+                        "response of {len} bytes exceeds the {MAX_RESPONSE_BYTES}-byte cap"
+                    )));
+                }
+            }
+            let mut stream = resp.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk =
+                    chunk.map_err(|e| AiError::Transport(format!("reading response: {e}")))?;
+                if text.len() + chunk.len() > MAX_RESPONSE_BYTES {
+                    return Err(AiError::Transport(format!(
+                        "response exceeds the {MAX_RESPONSE_BYTES}-byte cap"
+                    )));
+                }
+                text.push_str(&String::from_utf8_lossy(&chunk));
+            }
+        }
 
         if !(200..300).contains(&status) {
             return Err(AiError::Api {

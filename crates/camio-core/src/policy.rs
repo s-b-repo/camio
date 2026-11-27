@@ -4,7 +4,8 @@
 //! mutating actions through [`Policy::gate`] so none of them can bypass scope or
 //! the confirmation requirement.
 
-use crate::model::ScopeDecision;
+use crate::model::{HttpExchange, ScopeDecision};
+use crate::scope::Scope;
 
 /// How impactful an action is. Drives confirmation and enablement requirements
 /// (plan §10: "Default to safe checks; active/destructive require explicit
@@ -45,6 +46,26 @@ pub struct Policy {
 }
 
 impl Policy {
+    /// A revision number for this posture, used to bind approvals to the
+    /// policy they were granted under (plan §4.3). Any change to the posture
+    /// changes the revision, so a stored approval cannot outlive it.
+    pub fn revision(&self) -> u32 {
+        let mut h: u32 = 0;
+        for (i, on) in [
+            self.allow_active,
+            self.allow_destructive,
+            self.require_confirmation,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if on {
+                h |= 1 << i;
+            }
+        }
+        h
+    }
+
     /// The safe default: read freely, confirm anything that sends, and keep
     /// active/destructive testing disabled until explicitly enabled.
     pub fn safe() -> Self {
@@ -128,11 +149,178 @@ impl Policy {
 
         PolicyOutcome::Allow
     }
+
+    /// Decide an action against a full [`Scope`] (plan §4.3). This is the
+    /// authoritative authorization path shared by every entry point: the
+    /// SSRF/scope guard wins absolutely, then automated classes require
+    /// explicit project targets (an empty include list is not permission to
+    /// discover or scan), then class enablement and confirmation apply.
+    pub fn gate_action(
+        &self,
+        class: ActionClass,
+        scope: &Scope,
+        ex: &HttpExchange,
+        confirmed: bool,
+    ) -> PolicyOutcome {
+        let decision = scope.decide(ex);
+        self.gate_action_with(class, scope, decision, confirmed)
+    }
+
+    /// [`Policy::gate_action`] with a precomputed scope decision (for callers
+    /// already deciding, e.g. iterating many exchanges of one campaign).
+    pub fn gate_action_with(
+        &self,
+        class: ActionClass,
+        scope: &Scope,
+        decision: ScopeDecision,
+        confirmed: bool,
+    ) -> PolicyOutcome {
+        // The safety guard is absolute and applies to every non-read action.
+        if decision == ScopeDecision::Blocked {
+            return PolicyOutcome::Deny("destination blocked by the SSRF/safety guard".to_string());
+        }
+
+        // Explicit targets are required before automated network tasks.
+        if matches!(class, ActionClass::Active | ActionClass::Destructive)
+            && !scope.has_explicit_targets()
+        {
+            return PolicyOutcome::Deny(
+                "automated testing requires explicit project targets — add an include rule \
+                 to the project scope before running discovery, scans, or campaigns"
+                    .to_string(),
+            );
+        }
+
+        self.gate(class, decision, confirmed)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::HttpExchange;
+    use crate::model::{HttpRequest, Source};
+    use crate::scope::ScopeRule;
+
+    fn ex(url: &str) -> HttpExchange {
+        HttpExchange::new(HttpRequest::get(url), Source::Automate)
+    }
+
+    #[test]
+    fn revision_changes_with_posture() {
+        assert_ne!(
+            Policy::safe().revision(),
+            Policy::default().revision().wrapping_add(1)
+        );
+        let mut p = Policy::safe();
+        let base = p.revision();
+        p.allow_active = true;
+        assert_ne!(p.revision(), base);
+    }
+
+    #[test]
+    fn automation_requires_explicit_targets() {
+        let p = Policy {
+            allow_active: true,
+            require_confirmation: false,
+            ..Policy::safe()
+        };
+        // Empty include list is not permission to scan (plan §4.3).
+        let bare = Scope::new();
+        assert!(matches!(
+            p.gate_action(
+                ActionClass::Active,
+                &bare,
+                &ex("https://target.test/"),
+                true
+            ),
+            PolicyOutcome::Deny(_)
+        ));
+        // Exclude-only scope is still no explicit target.
+        let excl =
+            Scope::new().with_rule(ScopeRule::exclude(r#"req.path.cont:"/logout""#).unwrap());
+        assert!(matches!(
+            p.gate_action(
+                ActionClass::Destructive,
+                &excl,
+                &ex("https://target.test/"),
+                true
+            ),
+            PolicyOutcome::Deny(_)
+        ));
+    }
+
+    #[test]
+    fn automation_allowed_once_targets_are_explicit() {
+        let p = Policy {
+            allow_active: true,
+            require_confirmation: false,
+            ..Policy::safe()
+        };
+        let scoped =
+            Scope::new().with_rule(ScopeRule::include(r#"req.host.cont:"target.test""#).unwrap());
+        assert!(p
+            .gate_action(
+                ActionClass::Active,
+                &scoped,
+                &ex("https://target.test/a"),
+                true
+            )
+            .is_allow());
+    }
+
+    #[test]
+    fn guard_wins_over_targets_and_confirmation() {
+        let p = Policy {
+            allow_active: true,
+            require_confirmation: false,
+            ..Policy::safe()
+        };
+        // An include rule matching a loopback host does not unlock it: the
+        // SSRF guard beats even an explicit target unless a lab profile opts in.
+        let scoped = Scope::new().with_rule(ScopeRule::include("req.host.cont:127").unwrap());
+        let outcome = p.gate_action(ActionClass::Active, &scoped, &ex("http://127.0.0.1/"), true);
+        assert!(
+            matches!(outcome, PolicyOutcome::Deny(ref m) if m.contains("SSRF")),
+            "unexpected outcome: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn lab_profile_can_scan_an_explicit_private_target() {
+        let p = Policy {
+            allow_active: true,
+            require_confirmation: false,
+            ..Policy::safe()
+        };
+        let scoped = Scope::new()
+            .allowing_private()
+            .with_rule(ScopeRule::include(r#"req.host.cont:"127.0.0.1""#).unwrap());
+        assert!(p
+            .gate_action(
+                ActionClass::Active,
+                &scoped,
+                &ex("http://127.0.0.1:3000/app"),
+                true
+            )
+            .is_allow());
+    }
+
+    #[test]
+    fn mutating_sends_still_work_without_include_rules() {
+        // Manual Replay is not "automated network tasks"; one confirmed send is
+        // still permitted by the plain gate.
+        let p = Policy::safe();
+        let bare = Scope::new();
+        assert!(p
+            .gate_action(
+                ActionClass::Mutating,
+                &bare,
+                &ex("https://target.test/"),
+                true
+            )
+            .is_allow());
+    }
 
     #[test]
     fn reads_always_allowed_in_or_out_of_scope() {

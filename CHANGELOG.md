@@ -4,226 +4,255 @@ All notable changes to Camio are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project uses semantic
 versioning once it reaches 1.0.
 
-## [Unreleased]
+## [0.4.0] — 2026-11-27
 
 ### Added
 
-- **Black & blue theme + browser branding:** the native app defaults to the
-  "Sentinel Blue" theme (black surfaces, `#1e80ff` **blue buttons**, light-blue
-  text — matching the Camio site palette), fully recolorable via the existing
-  color picker. The managed-browser launcher now also writes a black/blue
-  `chrome/userChrome.css` (`camio_app::browser::write_profile`) + enables legacy
-  stylesheets, so a launched LibreWolf/Camoufox shows the Camio theme. A
-  **`browser/`** fork scaffold (`build.sh` + `branding/{userChrome.css,theme.json,
-  camio.cfg}`) assembles a LibreWolf-base + Camoufox-stealth + Camio-branded fork
-  (tooling only — no binary is built/committed here).
-- **OS personas** (`camio_core::BrowserOs`, `--os windows|macos|linux`, plan §6):
-  Camoufox/`camofox-browser`-style OS selection — `camio fingerprint show --os`
-  and `camio launch --os` present a consistent UA / `navigator.platform` / WebGL
-  persona for the chosen OS. Plus extra Camoufox-aligned stealth prefs under RFP
-  (disable Battery / Geolocation / Network-Information / Gamepad APIs, DNS
-  prefetch/predictor/beacon, `WEBGL_debug_renderer_info`).
-- **SBOM** (plan §F26): `scripts/gen-sbom.sh` generates a dependency + license
-  inventory (`docs/SBOM.md`, 574 packages) from `cargo metadata`; the Security CI
-  workflow regenerates it and uploads it as an artifact each run. Licenses stay
-  audited across all shipped platforms by cargo-deny.
-- **Organizer labels** (`camio-store`, `camio label`, plan §F18): tag exchanges
-  with labels (schema migration **v6→v7**, `exchange_label` table). `camio label
-  --add/--remove/--show/--list`. Store API: `add_label` / `remove_label` /
-  `labels_for` / `exchanges_with_label` / `all_labels`.
-- **Exchange diff** (`camio diff <id1> <id2>`, plan §F09): a unified line diff
-  between two stored exchanges' responses (or `--request`), over the existing
-  Comparer — e.g. a replay against a baseline.
-- **Workspace backup** (`camio backup <dest>`, plan §F01): a consistent compacted
-  copy of a workspace database (SQLite `VACUUM INTO`, WAL-safe, refuses to
-  overwrite) — verified reopenable with history and saved searches intact.
-- **More MCP coverage** (plan §F21): `findings_set_status` (triage a finding via
-  MCP) and `saved_searches` (list stored CamioQL searches).
-- **Saved searches** (`camio-store`, `camio query`, plan §F07): name and store a
-  CamioQL query (`--save <name>`), run one (`--saved <name>`), list
-  (`--list-saved`), or delete (`--delete-saved <name>`) — in a new `saved_search`
-  table (schema migration **v5→v6**). Store API: `save_search` / `saved_search` /
-  `list_saved_searches` / `delete_saved_search`.
-- **Findings triage** (`camio-store`, `camio findings`, plan §F14): a finding
-  lifecycle status (`open`/`confirmed`/`false_positive`/`fixed`/`ignored`) + note,
-  in a new additive `finding_status` table (schema migration **v4→v5**). `camio
-  findings` lists findings with their status; `camio findings --set <id> --status
-  <s> --note <n>` triages one. Store API: `set_finding_status` /
-  `finding_status` / `list_findings_with_status`.
-- **Scan profiles** (`camio-scan`, plan §F13): `ScanProfile` selects a subset of
-  passive checks by id (`--only`/`--exclude`) and a severity floor
-  (`--min-severity`); `scan_all_with_profile` reuses the same dedup/sort as the
-  full scan. `camio scan --list-checks` prints the available check ids.
-  (`camio_core::Severity` gains `as_str`/`parse`.)
-- **Shared rate limiting** (`camio_core::RateLimiter`, plan §4.3/§F02): a
-  per-host (and optional global) token-bucket limiter any send path can share so
-  a target is never hammered faster than allowed. Pure, clock-injectable, and
-  deterministically tested; `RateLimitedForwarder` paces the proxy's upstream
-  sends, wired as `camio proxy --rate-limit <rps>`.
-- **Bounded same-origin crawler** (`camio-active`, `camio crawl`, plan §8/§F10):
-  active discovery to complement the history-built site map. From a seed URL it
-  fetches pages through the injected scope/policy-gated sender, extracts
-  `href`/`src`/`action` links (pure, tested; resolves relatives, drops
-  `javascript:`/`mailto:`/fragments, ignores `data-*` attrs), and follows
-  same-origin links breadth-first up to a page budget. `camio crawl <url>` is
-  gated (`--confirm`, `--max-pages`, `--cross-origin`) and stores pages as
-  `source=crawler` — feeding `camio sitemap`.
-- **Background-task runtime** (`camio-tasks`, plan §4.2/§F03): a thread-backed
-  `TaskManager` that returns a task ID immediately and tracks each job's state
-  (`camio_core::TaskState`), progress, status message, and distinct terminal
-  outcome (completed / failed / cancelled) with cooperative cancellation via a
-  `TaskContext`. The native app now runs **Nuclei as a tracked task** —
-  `run_nuclei_cancellable` kills the process on cancel — shown on the Tasks
-  surface with live progress and a Cancel button. (`TaskState` gains
-  `as_str`/`is_terminal`/`Display`.) Honest scope: in-process only; cross-restart
-  persistence/reconciliation builds on these records next.
-- **External-tool integrations** (`camio-integrations`): the start of the
-  integration layer (plan §F16), with a **subfinder** adapter too — passive
-  subdomain enumeration (`camio subfinder <domain>`) normalized to a deduplicated
-  host list (bounded runner, fixture-tested parser; also exposed as the MCP
-  `subfinder_enum` tool for agent recon). A **Nuclei** adapter runs
-  ProjectDiscovery's template scanner as a *bounded* subprocess — overall timeout with process kill,
-  16 MiB stdout cap, update-check and public OOB server disabled — and normalizes
-  its JSONL into Camio findings (severity mapped, matched-URL/template/tags in
-  the detail; no fabricated exchange evidence). The parser is pure and
-  fixture-tested; `camio nuclei <url>` is scope- and policy-gated (active,
-  `--confirm`) and can `--save` findings. A missing binary is reported, never a
-  crash. The native app's **Integrations** surface can also run Nuclei on a
-  background thread (scope-gated) and save the normalized findings.
-- **Self-hosted OAST collector** (`camio-oast`, `camio oast`): a local-first
-  analog of Burp's (paid, cloud) Collaborator. A small HTTP listener mints
-  hard-to-guess correlation tokens, records every out-of-band callback (SSRF,
-  blind XXE, webhook, DNS-style host exfil), and correlates each hit back to the
-  token you planted — path-style (`/<token>`) or DNS-style (`<token>.<base>`).
-  Interactions are kept in memory and exposed for live logging / polling;
-  `camio oast` logs them, `camio oast --tokens N` prints sample callback URLs.
-  Honest scope: it only sees callbacks that can reach the address you bind.
-- **OAST-driven blind-SSRF detection** (`camio-active::run_oast_ssrf`): injects a
-  correlated OAST callback URL into each discovered input, sends the probe
-  through the scope/policy-gated engine, and reports a High/Firm finding when the
-  target calls back — catching SSRF that leaves no trace in the response. Wired
-  into `camio activescan --oast-listen <addr>` (with `--oast-base` and
-  `--oast-settle-ms`), which starts a live collector for the run.
-- **Intercepting HTTP/HTTPS proxy** (`camio-proxy`, `camio proxy`): a Burp-style
-  proxy a browser points at. Each request is scope-decided and policy-gated
-  through the shared `Scope`/`Policy` path (out-of-scope and SSRF-guarded targets
-  are refused and recorded as attempts); **Match & Replace** runs in-flight
-  (request rules before the send, response rules after, via the new
-  `RuleSet::apply_to_response`); and every exchange is captured to the store as
-  `source=proxy`. HTTPS is **blind-relayed** by default (the browser's own TLS
-  stays end-to-end, fingerprint-true, host-only capture) or **terminated** with
-  `--tls-intercept` using Camio's own operator-trusted CA (`--export-ca`,
-  persisted with the private key `0600`), after which the decrypted request is
-  re-sent through the fingerprint-matched engine and tagged fingerprint-changing.
-  A UI-agnostic intercept queue (`QueueInterceptor`) supports pause/edit/drop of
-  requests and responses. The upstream send is the injected matched engine, so no
-  second HTTP client is added and all destination policy stays in one place. New
-  CLI response-side rewrite targets: `resp-header=NAME`, `resp-body`,
-  `status-reason`.
-  - **Hard to fingerprint:** when intercepting, the upstream request is
-    re-originated through the fingerprint-matched engine, so the *target* sees the
-    matched JA3/JA4/H2 fingerprint, not a tool tell. The intercepted request is
-    now forwarded **verbatim** — new `RequestEngine::send_faithful` skips the
-    browser-header synthesis/reordering that tool traffic uses, so a captured
-    request's exact header set and order go out unchanged (indistinguishable at
-    the header layer from the browser's own). Proxy-generated replies carry no
-    identifying header; the intercept CA's name is neutral by default
-    (`Internal Root CA`) and operator-settable (`--ca-name`); minted
-    certificates use **realistic validity windows** (CA ~10y, leaf ~90d) instead
-    of rcgen's telltale 1975→4096 default; and the TLS server advertises
-    `http/1.1` via ALPN.
-  - **Scope-aware automation:** `--auto-scan` runs the passive scanner on every
-    **in-scope** captured exchange and stores its findings as traffic flows;
-    out-of-scope traffic is still recorded but never scanned or attacked.
-  - **Upstream (chained) proxy:** `--upstream-proxy http://… | socks5://…` routes
-    engine-forwarded traffic through another proxy (chain through Burp/ZAP or a
-    corporate egress) without changing the fingerprint. New
-    `camio_request::matched_engine_with_proxy` /
-    `EngineForwarder::spawn_with_proxy`. Blind-relay and WebSocket go direct.
-  - **WebSocket:** a plain `ws://` upgrade is scope-gated, recorded as metadata,
-    then raw-relayed to the origin so the connection works through the proxy;
-    `wss://` is preserved by the default blind-relay, and under `--tls-intercept`
-    a WebSocket is refused honestly (501) rather than broken, since relaying it
-    would require a second, non-matched TLS client.
-  - **Native app:** a new **Proxy** surface starts/stops the proxy on a background
-    thread (via the new `ProxyServer::spawn`/`ProxyHandle`), toggles TLS
-    interception and auto-scan, exports the CA, shows a live capture table, and
-    drives an **interactive intercept** (Burp's Proxy ▸ Intercept): toggle
-    Intercept to hold a request, edit its method/URL/headers/body, then Forward or
-    Drop. Response interception is gated off by default
-    (`QueueInterceptor::set_intercept_responses`) so a request-only UI never hangs.
+- **Security hardening pass 3 (all deferred findings closed):**
+  - **Upstream chaining for raw relays** (`camio-proxy::upstream`): blind CONNECT
+    tunnels and `ws://` relays now dial through an upstream HTTP (`CONNECT`) or
+    SOCKS5 proxy instead of always going direct, mirroring the engine-forwarded
+    path. Unknown schemes are refused rather than silently downgraded to a direct
+    connection.
+  - **WebSocket frame decoding and in-flight editing** (`camio-proxy::ws`): RFC
+    6455 frames are decoded in both directions, a `FrameEditor` can rewrite text
+    payloads in flight, partial frames are held correctly, and non-frame bytes
+    after the upgrade are relayed verbatim.
+  - **HTTP/2 prior-knowledge is refused honestly**: the connection preface is
+    detected in both the plain and TLS-intercepted paths and answered with an
+    explicit 501 + capture record, instead of being dropped as a malformed
+    HTTP/1.1 request.
+  - **Bounded connection worker pools** (`camio-proxy`, `camio-web`): the proxy
+    serves at most `max_connections` (default 64) and the web API runs an
+    `available_parallelism`-bounded pool, so one slow or hostile client no longer
+    blocks everyone else.
+  - **`ws://` rate limiting**: the configured `--rate-limit` now paces WebSocket
+    handshakes too (bounded wait, then 429), not just HTTP requests.
+  - **CA rotation/removal** (`camio-proxy`: `CertAuthority::rotate`/`remove`;
+    CLI `camio proxy --rotate-ca` / `--remove-ca`), verified end-to-end.
+  - **Bounded TLS leaf cache**: per-host leaf configs are a bounded LRU (256), so
+    a client cannot force unbounded keygen + map growth.
+  - **DNS TOCTOU closed**: relays resolve the host and re-check every candidate
+    address against the SSRF guard before connecting.
+  - **Durable OAST storage + retention** (`camio-oast::durable`, store schema v9,
+    `camio oast --db --retain --retain-for`): interactions survive a restart and
+    are pruned by count and age.
+  - **DNS responder for pure-DNS exfiltration** (`camio-oast::dns`,
+    `camio oast --dns-listen`): answers `A` queries for `<token>.<base>` with the
+    collector's address and records the lookup as a correlated interaction —
+    verified end-to-end over a real UDP socket.
+  - **Resumable campaigns** (`camio-automate::generate_from`,
+    `camio fuzz --resume-from N`): an interrupted campaign executes only its
+    unexecuted remainder, never replaying sent work, still bound to the plan's
+    approval hash.
+  - **Approval surface beyond the CLI**: `/api/fuzz_run` returns and verifies
+    `plan_hash`/`approval`; MCP `fuzz_plan` returns the plan hash and
+    `active_scan` binds to it — the same binding semantics as
+    `camio fuzz --approve`.
+  - **Probe target seeding and caps** (`camio probe --from-sitemap`,
+    `--from-saved`, `--max-probes`, `--max-response-bytes`): targets come from the
+    project's own inventory or a saved CamioQL search, and both the run and each
+    observation are bounded.
+  - **Measured transport status** (native app overview, `/api/meta`): the
+    transport panel reports *matched* vs *not matched* with the parity note,
+    instead of a hardcoded "unverified" claim; the proxy also appears as a
+    durable task whose stop is its cancellation.
+
+- **httpx integration** (`camio-integrations::httpx`, `camio probe`, plan §6/F16):
+  ProjectDiscovery's HTTP prober now has a real adapter — a tolerant JSONL parser
+  (both `status-code` and `status_code` spellings, `cdn: false|string`, Go-style
+  durations, TLS subject CN/SANs), a bounded runner (rate, concurrency,
+  per-probe timeout, wall-clock kill, 16 MiB stdout cap, cooperative
+  cancellation), and defaults that never follow redirects or expand hosts
+  unless the operator opts in. Results are stored as `source=httpx`
+  observations (raw artifact kept separately), never promoted to findings;
+  unreachable targets stay visible as outcomes. `camio probe --import
+  <file.jsonl>` is the import-only path. The adapter also refuses to run
+  against a differently-named `httpx` binary (it checks ProjectDiscovery's
+  `Current Version` marker first) instead of silently producing no results —
+  and `camio integrations` now reports compatibility the same way.
+- **Durable background tasks** (`camio-core`, `camio-tasks`, `camio-store`,
+  `camio tasks`, plan §4.2/F03): the full persisted task lifecycle
+  (queued / awaiting_approval / running / paused / cancelling / cancelled /
+  completed / failed / interrupted) with validated transitions
+  (`TaskState::can_transition_to`), distinct terminal outcomes
+  (`TaskOutcome`: success, timeout, cancelled, scope_denied, parser_failure,
+  tool_failure, storage_failure), a `task_record` table (schema migration
+  v7→v8) that mirrors every lifecycle change through a `TaskSink`, restart
+  reconciliation (non-terminal records become `interrupted`, never replayed),
+  and `camio tasks [--reconcile]`. The native app spawns its background tasks
+  through the sink and surfaces interrupted runs on the Tasks surface.
+- **Approval binding** (`camio_core::Approval`, `camio fuzz --approve`,
+  plan §4.3): an approval is bound to a sha-256 plan hash over the exact
+  target set, action class, tool version, session reference, request/time/rate
+  limits, and policy revision; reuse is refused on any drift, on a new target,
+  on larger limits, or after expiry. `camio fuzz` prints the plan hash in its
+  preview and refuses a stale `--approve <hash>`.
+- **Security hardening pass 1** (external review of 20 crates):
+  - **Request-smuggling / body corruption fixed** (`camio-proxy`): the proxy
+    re-frames bodies, so the client's `Content-Length`/`Transfer-Encoding` are
+    no longer forwarded verbatim; a Match & Replace body rewrite could
+    otherwise desynchronize the origin (truncated bodies, hanging requests).
+  - **Intercept-queue re-gate** (`camio-proxy`): an operator *edit* to a queued
+    request is a new destination, so it is re-decided through the shared
+    scope/policy path before forwarding — the queue no longer bypasses the
+    SSRF guard (metadata/loopback targets are refused).
+  - **Intercept-queue timeouts + cap** (`camio-proxy::QueueInterceptor`): a
+    parked request/response now resolves after `set_park_timeout` (default
+    5 minutes, forwarded unchanged) and at most 512 items may be parked, so a
+    forgotten front-end cannot pin threads/sockets forever.
+  - **CA key permissions** (`camio-proxy`): the CA private key is created
+    `0600` from the start (no world-readable window) and repaired on load.
+  - **Accept-loop backoff** (`camio-proxy`, `camio-oast`): a non-`WouldBlock`
+    accept error no longer busy-spins the CPU at 100% under fd exhaustion.
+  - **Bounded tool input** (`camio-engine`): engine unpacking caps total
+    uncompressed size (1 GiB) and entries (50 000), and drops setuid/setgid
+    bits; `locate_binary` no longer aborts its search on one unreadable entry.
+  - **Import hardening** (`camio-import`): input size (32 MiB) and entry-count
+    (50 000) caps inside the parser, and header names/values carrying
+    CR/LF/NUL are refused with a reported warning — an imported archive can no
+    longer inject request headers on replay.
+  - **Decompression cap** (`camio-convert`): `Transform::apply` decompression
+    is bounded (32 MiB), so a gzip bomb cannot OOM the CLI/MCP/app convert path.
+  - **Bounded response reads** (`camio-request`, `camio-ai`): response bodies
+    are read under a hard cap (64 MiB engine / 8 MiB AI) on top of the timeout,
+    so a hostile target cannot OOM the workbench inside the request deadline.
+  - **Transport honesty** (`camio-request`, `camio-web`, `camio-app`): the
+    impersonating engine only reports `fingerprint_matched` when its preset
+    actually matches the pinned browser build, tool-originated POST/PUT now
+    send `Content-Length` with the browser's casing instead of a lowercase
+    stack default, and a dry-run fallback announces itself (once at startup,
+    on every send response) instead of silently swapping transport.
+  - **OAST hardening** (`camio-oast`): correlation tokens come from the OS CSPRNG
+    (not a hash of the clock/pid/counter), retention is bounded (10 000 most
+    recent interactions), concurrent handlers are capped (64), and the
+    poisoned-mutex panics are gone.
+  - **Web API** (`camio-web`): `/api/fuzz_run` reports sent/failed/out-of-scope/
+    unsaved counts instead of collapsing them into `sent: 0`, `/api/send`
+    surfaces persistence failures and transport status, `/api/tasks` lists
+    durable task records (read-only), `/api/sitemap` bounds its row limit and
+    reads metadata without allocating padded bodies, sequencer tokens must be
+    strings, the bearer scheme is case-insensitive per RFC 7235, the Host check
+    is case-insensitive, and error responses no longer echo the DB path or raw
+    SQL.
+  - **MCP** (`camio-mcp`): `subfinder_enum` runs the shared scope/policy gate,
+    `active_scan` no longer reports `done` when every probe failed,
+    `import_file`/`send_request` surface store failures, argument types are
+    validated (a numeric `method` is an error, not a silent `GET`), stdio
+    messages are size-bounded, and `tasks_list` was added.
+- **Security hardening pass 2** (the remaining findings):
+  - **Indexed query planning** (`camio-store`, plan §5): `query_metadata` and
+    the new `query_for_scan` push the query's required-metadata conjunct
+    (host, method, source, status) into SQL, so a filtered query is answered by
+    the `exchanges` indexes (`EXPLAIN QUERY PLAN` → `SEARCH … USING INDEX
+    idx_exchanges_host`) instead of walking the table in Rust, with a 100
+    000-row scan window as a bound. The Rust-side match still applies, so
+    results stay exact (regression-tested for exact counts and non-pushable
+    free-text queries).
+  - **Bounded web scan** (`camio-web`, `camio-store`): `/api/scan` loads bodies
+    under a cumulative 64 MiB byte budget as well as a row cap, reports
+    `skipped_oversize` instead of silently dropping them, and loads no padded
+    placeholder bodies.
 
 ### Changed
 
-- **Native app layout is now Burp-style.** The left sidebar is replaced by a
-  horizontal **top tool-tab bar** (active tab accent-underlined) with full-width
-  content, and the tools are reordered/renamed to Burp's names (Dashboard,
-  Target, Proxy, Repeater, Intruder, Scanner, Decoder, Extensions, HTTP history,
-  …) so the muscle memory carries over.
-- **AI assistant** (`camio-ai`): optional, BYO-key, OpenAI-compatible client for
-  NVIDIA NIM, OpenAI, or a local Ollama — explain an exchange, suggest next tests,
-  or translate natural language to CamioQL. Off by default; the API key is read
-  from env and never logged, serialized, or carried in errors. CLI `camio ai`,
-  and an "AI assistant" surface in the native app (calls run on a background
-  thread so the window stays responsive).
-- **Active scanner** (`camio-active`): opt-in reflected-XSS, error-based SQLi and
-  open-redirect probes. The checks are pure; the caller injects a scope- and
-  policy-gated sender, so active testing stays in-scope, confirmed and bounded.
-  CLI `camio activescan`, native-app "Active scan" surface, and a policy-gated
-  `active_scan` MCP tool.
-- **Automated passive API / JavaScript / web-domain testing** (`camio-scan`):
-  seven new passive checks — hard-coded secret leaks (redacted), JS endpoint
-  discovery, exposed Swagger/OpenAPI docs, GraphQL introspection, exposed source
-  maps, sensitive JSON fields, and sensitive-path exposure — plus a reusable
-  `analyze_js` helper and an `analyze_js` MCP tool (17 passive checks total).
-- Native UI: a bottom status bar (DB, AI status, active-check state) and the three
-  new surfaces above.
+- **Automated testing requires explicit targets** (plan §4.3):
+  `Scope::has_explicit_targets` + `Policy::gate_action`/`gate_action_with`
+  are now the gate on every ACTIVE path (native app, CLI fuzz/activescan/
+  scan/crawl/nuclei/probe, web, MCP). An empty or exclude-only scope is no
+  longer read as permission to discover, scan, or fuzz; manual one-shot Replay
+  sends (confirmed, `Mutating`) still work as before.
+
+### Fixed
+
+- **Full indexed query planning** (`camio-store`, plan §5): every *required*
+  conjunct is pushed into SQL (`required_metadata_all`) with indexes on
+  host/method/source/status, so a multi-predicate query is narrowed by all of
+  them instead of only the first — verified by `EXPLAIN QUERY PLAN` and by exact
+  result counts.
+- **Crawler origin correctness** (`camio-active`): `same_origin` compares scheme,
+  host, *and* effective port, so a page seeded on `https://app.test/` no longer
+  silently enqueues `http://app.test/` (a downgrade) or `:8443` (another service).
+- **Multipart input discovery** (`camio-automate`): `multipart/form-data` bodies
+  are parsed by boundary into `(name, value)` inputs (a file part's position is
+  its filename), so upload forms no longer yield zero inputs.
+- **HAR status validation** (`camio-import`): only 100–599 is a status; 0 means
+  "no response" and anything else is reported instead of stored as if real.
+- **`input_echo` bound** (`camio-scan`): bodies over 2 MiB are skipped by the
+  signature scan (it runs on the proxy's capture hot path).
+- **Content-Length casing** (`camio-request`): tool-originated POST/PUT now emits
+  `Content-Length` with the browser's casing rather than letting the HTTP stack
+  inject a lowercase one.
+
+- **SSRF guard bypass for cloud metadata** (`camio-core::scope`): lab mode
+  (`--allow-private`) previously un-blocked link-local and the cloud-metadata
+  address (`169.254.169.254`, `fe80::/10`, `metadata.google.internal`), so a
+  "lab profile" silently allowed SSRF to the host's own infrastructure. These
+  are now a separate, explicit opt-in (`Scope::allow_metadata` /
+  `--allow-metadata`), blocked by default even in lab mode. Regression-tested
+  against allowed lab targets, blocked metadata, and unapproved destinations.
+- **httpx tool-name confusion**: a non-ProjectDiscovery `httpx` on PATH used
+  to make `camio probe` print "no probe results" as if nothing answered; the
+  adapter now verifies the binary before running and reports an actionable
+  incompatibility (and keeps a bounded stderr snippet when a run yields no
+  records).
+- **Classifier false positives** (`camio-automate`): a 1-2 character payload
+  (`'`/`"` and their hex encodings) no longer marks every response as
+  `reflected` — the classifier applies the same minimum-length and
+  structural-character guard the passive reflected-input check uses.
+- **Campaign payload framing** (`camio-automate`): URL-position payloads are
+  percent-encoded (a payload's `#`/`&`/`=` cannot truncate or reshape the
+  request the URL re-parser sends), header values cannot inject CRLF, a `§`
+  marker on a non-UTF-8 body is reported instead of silently dropped, a payload
+  containing the marker char is refused, and a budget-less campaign is
+  ceilinged at 100 000 requests.
+- **Body preservation** (`camio-automate`): a chain substitution on a request
+  with no `${…}` in its body no longer rewrites a binary body through the
+  lossy text view (multipart/gzip bodies survive byte-for-byte).
+- **Encoding correctness** (`camio-automate`): a URL *path* position keeps `/`
+  unencoded (traversal probes are not defeated by `%2F`), null prefixes are
+  not offered in URL/form contexts, and two encodings that produce identical
+  bytes no longer emit the same request twice.
+- **Input discovery** (`camio-automate`): JSON arrays of objects and nested
+  scalar objects are discovered with `items.0.id`-style paths, every value of
+  a repeated header is reported, `;`-separated legacy form bodies are split,
+  JSON *string* slots that look numeric are no longer mis-encoded as numbers,
+  and a payload starting with `#` (`#<script>`, `#!`) is no longer dropped as
+  a comment.
+- **Scanner accuracy** (`camio-scan`): "introspection disabled" errors are no
+  longer reported as *enabled* introspection; CORS `null`-origin and
+  suffix-reflection misconfigurations are detected; exposed-API-doc paths
+  require a successful response (a 404 at `/swagger.json` is normal, not a
+  finding); reflected-input findings redact credential-shaped values; the
+  sensitive-key set covers `JSESSIONID`/`PHPSESSID`/`sid`/`jwt`/`auth`; and the
+  bare `odbc` token requires an error context.
+- **Panics on ordinary target data** (`camio-automate::chain`,
+  `camio-scan::input_echo`): truncating a 1 MiB+ response body (or a long
+  needle) at a raw byte offset now floors to a char boundary.
+- **Import scoping** (`camio-import`): Burp XML field scoping is derived from
+  a stack of open element names rather than a depth counter (defense in depth
+  against a desynchronized invariant), and control characters in headers are
+  refused with a reported warning rather than stored for replay.
+- **Proxy relays and upgrades** (`camio-proxy`): blind relays and `ws://`
+  relays now have a 15-minute idle deadline instead of pinning two threads +
+  two sockets forever; Match & Replace request rules apply to a WebSocket
+  handshake; and a TLS (`wss://`/`https://`) upgrade is refused honestly
+  instead of being rebuilt as a cleartext request to port 80.
+- **Active checks** (`camio-active`): the OAST blind-SSRF check waits one settle
+  window for the whole run instead of `settle` per probe (N× blocking removed).
+- **CLI enforcement** (`camio-cli`): `camio subfinder` and `camio launch --url`
+  run the shared scope/policy path, `camio crawl` is gated as an ACTIVE action
+  (so it requires explicit targets like the scanner), store failures on
+  fuzz/activescan/nuclei are propagated instead of printed as "saved 0", and
+  observed URLs/hosts after an httpx or Nuclei run are re-decided so a redirect
+  or certificate name cannot quietly widen scope.
+- **Storage** (`camio-store`): metadata queries have a no-body variant
+  (`query_metadata`) that replaces the zero-filled length-sized placeholder
+  bodies (the app site map and the CLI summary path use it), batch writes take
+  the write lock up front, labels/saved searches are length-bounded, and task
+  records saturate their `u64 → i64` casts with a bounded list limit.
 
 ## [0.1.0] — 2026-11-12
 
 First tagged release: a working, local-first web-security workbench with
 best-in-class fingerprint transparency.
-
-### Added
-
-- **Managed Camoufox engine** (`camio-engine`): pinned build, download/unpack/
-  locate/launch — no Node.js/Playwright server.
-- **Fingerprint policy** (`camio-core`): Chameleon-inspired anti-detection policy
-  rendered to Firefox `about:config` prefs and Camoufox engine config.
-- **Matched request engine** (`camio-request`): BoringSSL-based impersonating
-  client whose JA3/JA4 · HTTP-2 · header-order fingerprint is derived from and
-  pinned to the browser profile. Parity is *measured*, not asserted.
-- **CamioQL** (`camio-core`): HTTPQL-compatible query language used everywhere.
-- **Storage** (`camio-store`): indexed SQLite history + content-addressed,
-  deduplicated body blobs.
-- **Scope + policy** (`camio-core`): one scope-decision path with an SSRF guard,
-  one shared authorization policy (reads free; sends in-scope + confirmed;
-  active/destructive off by default).
-- **Convert / Decoder / Comparer** (`camio-convert`): encodings, hashes, JWT
-  decode, byte/line diff.
-- **Passive scanner** (`camio-scan`): ten checks → deduplicated, ranked findings.
-- **Automate / Intruder** (`camio-automate`): insertion points, payload packs,
-  four attack types, bounded campaigns, input discovery, result classification.
-- **Importers** (`camio-import`): Burp items XML and HAR.
-- **Sequencer** (`camio-sequencer`): token entropy/randomness estimate.
-- **Site map + Match & Replace** (`camio-core`).
-- **Native desktop app** (`camio-app`, egui/eframe): 21 surfaces, seven themes
-  (incl. Antigravity, LibreWolf), live theme editor + background image, a
-  process-based plugin system, a fingerprint view, and an "Open in browser"
-  launcher that applies Camio's fingerprint to a LibreWolf/Camoufox browser with
-  the Marionette automation channel enabled.
-- **Local web UI** (`camio-web`): the same workbench over a loopback JSON API.
-- **MCP server** (`camio-mcp`): 14 tools + resources under the shared policy.
-- **CLI** (`camio`): engine, fingerprint, launch, send, query, history, scope,
-  convert, compare, scan, fuzz, discover, import, sequencer, sitemap, payloads,
-  app, ui, mcp.
-- **Supply-chain CI**: `cargo-deny` config + GitHub Actions (`ci.yml`,
-  `security.yml`). Upgraded rusqlite, quick-xml and zip to patched versions.
-
-### Security
-
-- Fixed SQLite (RUSTSEC-2026-0459), quick-xml XML-parser DoS
-  (RUSTSEC-2026-0194/0195, relevant to Burp-XML import) and zip symlink/SUID
-  extraction advisories by upgrading the affected dependencies.
-
-[0.1.0]: https://github.com/s-b-repo/camio/releases/tag/v0.1.0

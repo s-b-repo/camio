@@ -17,8 +17,8 @@ use anyhow::{anyhow, Result};
 use camio_automate::{AttackType, Baseline, Campaign, PayloadSet};
 use camio_convert::Transform;
 use camio_core::{
-    ActionClass, Body, FingerprintProfile, HttpExchange, HttpRequest, Policy, PolicyOutcome, Scope,
-    SiteMap, Source,
+    ActionClass, Approval, Body, FingerprintProfile, HttpExchange, HttpRequest, PlanSummary,
+    Policy, PolicyOutcome, Scope, SiteMap, Source,
 };
 use camio_request::{matched_engine, DryRunEngine, FingerprintSpec, RequestEngine};
 use camio_store::{Store, ARTIFACT_BYTES};
@@ -56,23 +56,69 @@ pub fn serve(cfg: WebConfig) -> Result<()> {
     let access = LocalAccess::new(socket)?;
     open(&cfg).map_err(|error| anyhow!(error))?;
     let spec = FingerprintSpec::from_profile(&cfg.profile);
-    // Best available engine; falls back to a no-network dry-run that is honest
-    // about not being fingerprint-matched.
-    let engine: Box<dyn RequestEngine> =
-        matched_engine(&cfg.profile).unwrap_or_else(|_| Box::new(DryRunEngine::new(spec)));
+    // The matched engine is the only transport that preserves the browser
+    // fingerprint. If it cannot be built (no backend, bad upstream proxy), fall
+    // back to the honest no-network dry-run engine and say so loudly — never
+    // silently swap the transport a user believes they are testing through.
+    let mut engine_error: Option<String> = None;
+    let engine: Box<dyn RequestEngine> = match matched_engine(&cfg.profile) {
+        Ok(engine) => engine,
+        Err(e) => {
+            let note = format!(
+                "fingerprint-matched engine unavailable ({e}); sends will not leave this machine"
+            );
+            eprintln!("camio: {note}");
+            engine_error = Some(note.clone());
+            Box::new(DryRunEngine::new(spec))
+        }
+    };
 
     println!(
         "Camio web workbench (Ctrl-C to stop)\n{}",
         access.open_url()
     );
+    if let Some(note) = &engine_error {
+        println!("WARNING: {note}");
+    }
 
-    for mut request in server.incoming_requests() {
-        let method = request.method().clone();
-        let url = request.url().to_string();
-        let path = url.split('?').next().unwrap_or("").to_string();
-
-        let response = route(&cfg, engine.as_ref(), &access, &mut request, &method, &path);
-        let _ = request.respond(access::secure_headers(response));
+    // A bounded worker pool: handling connections sequentially means a single
+    // slow or hostile client (a stalled body read, a huge scan) blocks every
+    // other request, including the UI's status poll. Each worker pulls from the
+    // shared queue, so total in-flight work is bounded and isolation is real.
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .clamp(2, 16);
+    let server = std::sync::Arc::new(server);
+    let engine: std::sync::Arc<dyn RequestEngine> = engine.into();
+    let access = std::sync::Arc::new(access);
+    let cfg = std::sync::Arc::new(cfg);
+    let mut handles = Vec::with_capacity(workers);
+    for id in 0..workers {
+        let (server, engine, access, cfg) =
+            (server.clone(), engine.clone(), access.clone(), cfg.clone());
+        handles.push(
+            std::thread::Builder::new()
+                .name(format!("camio-web-{id}"))
+                .spawn(move || loop {
+                    // A bounded wait so a worker can be joined on shutdown.
+                    match server.recv_timeout(std::time::Duration::from_secs(1)) {
+                        Ok(Some(mut request)) => {
+                            let method = request.method().clone();
+                            let path = request.url().split('?').next().unwrap_or("").to_string();
+                            let response =
+                                route(&cfg, engine.as_ref(), &access, &mut request, &method, &path);
+                            let _ = request.respond(access::secure_headers(response));
+                        }
+                        Ok(None) => continue,
+                        Err(_) => break,
+                    }
+                })
+                .expect("spawning a web worker"),
+        );
+    }
+    for handle in handles {
+        let _ = handle.join();
     }
     Ok(())
 }
@@ -101,6 +147,21 @@ fn route(
     }
     if method == &Method::Get && path == "/api/meta" {
         return json_response(&meta(cfg, engine));
+    }
+    // Durable background-task records (plan §4.2): read-only, so it stays a GET
+    // like /api/meta. The web server runs jobs in its request loop; the durable
+    // rows let the UI show runs that finished — or were interrupted by a
+    // restart — rather than pretending they never happened.
+    if method == &Method::Get && path == "/api/tasks" {
+        return match open(cfg).and_then(|store| {
+            let rows = store
+                .tasks(50)
+                .map_err(|e| format!("reading task records: {e}"))?;
+            serde_json::to_value(rows).map_err(|e| e.to_string())
+        }) {
+            Ok(v) => json_response(&v),
+            Err(e) => error_response(500, &e),
+        };
     }
     if method != &Method::Post {
         return error_response(404, "not found");
@@ -132,8 +193,38 @@ fn route(
 
     match result {
         Ok(v) => json_response(&v),
-        Err(e) => error_response(400, &e),
+        Err(e) => {
+            // Log the detail server-side; the client gets a stable class of
+            // error rather than the database path or raw SQL diagnostics.
+            eprintln!("api error on {path}: {e}");
+            error_response(400, &sanitized_error(&e))
+        }
     }
+}
+
+/// Strip local filesystem paths and raw store diagnostics from an error before
+/// it leaves the process. The bearer token lives in the URL fragment, terminal
+/// scrollback and pasted links, so a leaked path is reconnaissance.
+fn sanitized_error(message: &str) -> String {
+    let mut out = message.to_string();
+    // Absolute paths (POSIX and home-relative) → a placeholder.
+    let mut cleaned = String::with_capacity(out.len());
+    for token in out.split_whitespace() {
+        if token.starts_with('/') || token.starts_with("~/") {
+            cleaned.push_str("<path> ");
+        } else {
+            cleaned.push_str(token);
+            cleaned.push(' ');
+        }
+    }
+    out = cleaned.trim().to_string();
+    // rusqlite/anyhow diagnostics carry SQL text.
+    for needle in ["SQLite", "rusqlite", "no such column", "syntax error"] {
+        if out.contains(needle) {
+            return "internal error (see the Camio log)".to_string();
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -166,8 +257,12 @@ fn api_scan(cfg: &WebConfig, args: &Value) -> Result<Value, String> {
     let save = args.get("save").and_then(|s| s.as_bool()).unwrap_or(false);
     let compiled = workbench::compile(q).map_err(|e| format!("{e:#}"))?;
     let mut store = open(cfg)?;
-    let rows = store
-        .query_with_bodies(&compiled, limit.min(1000))
+    // Bounded by a cumulative body-byte budget as well as a row count: loading
+    // 1000 exchanges' real bodies inside one single-threaded request can be
+    // gigabytes, and oversized bodies are skipped (and reported) instead.
+    const SCAN_BODY_BUDGET: usize = 64 * 1024 * 1024;
+    let (rows, skipped_oversize) = store
+        .query_for_scan(&compiled, limit.min(1000), SCAN_BODY_BUDGET)
         .map_err(|e| e.to_string())?;
     let report = camio_scan::scan_all(&rows);
     let saved = if save {
@@ -181,6 +276,7 @@ fn api_scan(cfg: &WebConfig, args: &Value) -> Result<Value, String> {
         "exchanges_scanned": report.exchanges_scanned,
         "checks_run": report.checks_run,
         "finding_count": report.findings.len(),
+        "skipped_oversize": skipped_oversize,
         "saved": saved,
         "findings": serde_json::to_value(&report.findings).unwrap_or(json!([])),
     }))
@@ -188,10 +284,18 @@ fn api_scan(cfg: &WebConfig, args: &Value) -> Result<Value, String> {
 
 fn api_sitemap(cfg: &WebConfig, args: &Value) -> Result<Value, String> {
     let q = args.get("query").and_then(|q| q.as_str()).unwrap_or("");
-    let limit = args.get("limit").and_then(|l| l.as_u64()).unwrap_or(5000) as usize;
+    // A bound on rows (the site map only needs URL metadata) — an unbounded
+    // user limit would let one request walk the whole store.
+    let limit = args
+        .get("limit")
+        .and_then(|l| l.as_u64())
+        .unwrap_or(5000)
+        .clamp(1, 20_000) as usize;
     let compiled = workbench::compile(q).map_err(|e| format!("{e:#}"))?;
     let store = open(cfg)?;
-    let rows = store.query(&compiled, limit).map_err(|e| e.to_string())?;
+    let rows = store
+        .query_metadata(&compiled, limit)
+        .map_err(|e| e.to_string())?;
     let map = SiteMap::build(&rows);
     Ok(
         json!({ "origin_count": map.origin_count(), "url_count": map.url_count(), "tree": map.render_tree() }),
@@ -241,9 +345,16 @@ fn api_jwt(args: &Value) -> Result<Value, String> {
 
 fn api_sequencer(args: &Value) -> Result<Value, String> {
     let tokens: Vec<String> = if let Some(arr) = args.get("tokens").and_then(|t| t.as_array()) {
+        // A non-string entry must be an error: silently dropping it would make
+        // the entropy estimate quietly disagree with the operator's input.
         arr.iter()
-            .filter_map(|t| t.as_str().map(|s| s.to_string()))
-            .collect()
+            .enumerate()
+            .map(|(i, t)| {
+                t.as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| format!("token #{i} must be a string"))
+            })
+            .collect::<Result<Vec<_>, _>>()?
     } else if let Some(text) = args.get("text").and_then(|t| t.as_str()) {
         text.lines()
             .map(|l| l.trim().to_string())
@@ -356,9 +467,20 @@ fn api_send(cfg: &WebConfig, engine: &dyn RequestEngine, args: &Value) -> Result
                 .send(req, Source::Replay)
                 .map_err(|e| format!("send failed: {e}"))?;
             let mut store = open(cfg)?;
-            let id = store.insert(&ex).ok().map(|i| i.0);
+            let id = store
+                .insert(&ex)
+                .map(|i| i.0)
+                .map_err(|e| format!("storing the exchange: {e}"))?;
             let mut s = summary(&ex);
             s["stored_id"] = json!(id);
+            s["engine"] = json!(engine.label());
+            s["fingerprint_matched"] = json!(engine.is_fingerprint_matched());
+            if !engine.is_fingerprint_matched() {
+                s["transport_warning"] = json!(format!(
+                    "sends used {}: no traffic left this machine",
+                    engine.label()
+                ));
+            }
             s["response_headers"] = ex
                 .response
                 .as_ref()
@@ -378,6 +500,32 @@ fn api_send(cfg: &WebConfig, engine: &dyn RequestEngine, args: &Value) -> Result
             Ok(s)
         }
     }
+}
+
+/// Build the approval-bearing plan summary for a campaign (plan §4.3).
+///
+/// Covers the same facts as the CLI: target set, action class, request budget,
+/// and policy revision. Any drift changes the hash, so a stale approval is
+/// refused instead of silently reused.
+fn fuzz_plan_summary(url: &str, budget: u64, policy: &Policy) -> PlanSummary {
+    PlanSummary::new(ActionClass::Active, vec![url.trim().to_string()])
+        .with_max_requests(budget)
+        .with_policy(policy)
+}
+
+/// Verify an approval hash against the current plan (fails closed).
+fn verify_approval(approved: &str, summary: &PlanSummary) -> Result<(), String> {
+    let approval =
+        Approval::bind(summary.clone(), camio_core::approval::now_ms()).granted_by("camio web");
+    if approved.trim() != approval.plan_hash {
+        return Err(format!(
+            "this approval does not cover the current plan (approved {approved}, plan is {})",
+            approval.plan_hash
+        ));
+    }
+    approval
+        .allows(summary, camio_core::approval::now_ms())
+        .map_err(|reason| format!("approval does not cover this plan: {reason}"))
 }
 
 fn api_fuzz_run(
@@ -410,15 +558,25 @@ fn api_fuzz_run(
         .scope
         .decide(&HttpExchange::new(clean.clone(), Source::Automate));
 
-    match cfg.policy.gate(ActionClass::Active, decision, confirm) {
+    // The plan hash an operator must approve (plan §4.3), identical in meaning
+    // to the CLI's preview hash.
+    let summary = fuzz_plan_summary(&base.url, budget, &cfg.policy);
+    let plan_hash = summary.plan_hash();
+
+    match cfg
+        .policy
+        .gate_action_with(ActionClass::Active, &cfg.scope, decision, confirm)
+    {
         PolicyOutcome::Deny(reason) => return Err(format!("refused: {reason}")),
         PolicyOutcome::NeedsConfirmation(reason) => {
             return Ok(json!({
                 "status": "confirmation_required",
                 "reason": reason,
+                "plan_hash": plan_hash,
                 "plan": { "attack": attack.as_str(), "num_positions": plan.num_positions,
                           "projected_requests": plan.projected_requests, "within_budget": plan.within_budget,
                           "scope": decision.as_str() },
+                "note": "re-call with confirm:true and approval:<plan_hash>",
             }));
         }
         PolicyOutcome::Allow => {}
@@ -430,32 +588,77 @@ fn api_fuzz_run(
         ));
     }
 
+    // Approval binding (plan §4.3): the operator must approve the printed plan
+    // hash; any drift is refused rather than executed under a stale approval.
+    match args.get("approval").and_then(Value::as_str) {
+        Some(approved) => verify_approval(approved, &summary)?,
+        None => {
+            return Ok(json!({
+                "status": "approval_required",
+                "plan_hash": plan_hash,
+                "plan": {
+                    "attack": attack.as_str(),
+                    "num_positions": plan.num_positions,
+                    "projected_requests": plan.projected_requests,
+                    "within_budget": plan.within_budget,
+                    "scope": decision.as_str(),
+                },
+                "note": "re-call with approval:<plan_hash> to bind this run to the approved plan",
+            }));
+        }
+    }
+
     let generated = camio_automate::generate(&campaign).map_err(|e| e.to_string())?;
-    let baseline = engine.send(clean, Source::Automate).ok().and_then(|ex| {
-        ex.response.as_ref().map(|r| Baseline {
+    // A failed baseline send is reported, not silently dropped: classification
+    // without a baseline answers a different question than the operator asked.
+    let baseline_error = match engine.send(clean, Source::Automate) {
+        Ok(ex) => ex.response.as_ref().map(|r| Baseline {
             status: r.status,
             body_len: r.body.len(),
-        })
-    });
+        }),
+        Err(e) => {
+            return Err(format!("baseline request failed: {e}"));
+        }
+    };
     let mut store = open(cfg)?;
     let mut results = Vec::new();
+    let mut sent = 0u64;
+    let mut failed = 0u64;
+    let mut out_of_scope = 0u64;
+    let mut unsaved = 0u64;
     for g in &generated {
         if !cfg
             .scope
             .decide(&HttpExchange::new(g.request.clone(), Source::Automate))
             .is_sendable()
         {
+            // A payload that injects an out-of-scope host never leaves the box.
+            out_of_scope += 1;
             continue;
         }
-        if let Ok(ex) = engine.send(g.request.clone(), Source::Automate) {
-            let _ = store.insert(&ex);
-            results.push((g.payloads.clone(), ex));
+        match engine.send(g.request.clone(), Source::Automate) {
+            Ok(ex) => {
+                sent += 1;
+                if store.insert(&ex).is_err() {
+                    unsaved += 1;
+                }
+                results.push((g.payloads.clone(), ex));
+            }
+            Err(e) => {
+                failed += 1;
+                eprintln!("campaign send failed: {e}");
+            }
         }
     }
-    let classified = camio_automate::classify(&results, baseline.as_ref(), None);
-    Ok(
-        json!({ "status": "done", "sent": results.len(), "results": serde_json::to_value(&classified).unwrap_or(json!([])) }),
-    )
+    let classified = camio_automate::classify(&results, baseline_error.as_ref(), None);
+    Ok(json!({
+        "status": "done",
+        "sent": sent,
+        "failed": failed,
+        "out_of_scope": out_of_scope,
+        "unsaved": unsaved,
+        "results": serde_json::to_value(&classified).unwrap_or(json!([])),
+    }))
 }
 
 // ---------------------------------------------------------------------------

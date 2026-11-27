@@ -9,6 +9,18 @@ use crate::checks::finding;
 use crate::PassiveCheck;
 use camio_core::{Confidence, Finding, HttpExchange, Severity};
 
+/// Whether an ACAO value is the tail of the request Origin — the
+/// `evil-test.target.com` vs allow-listed `target.com` reflection bug, which a
+/// strict equality check misses.
+fn reflects_suffix(acao: &str, origin: &str) -> bool {
+    if acao.is_empty() || acao.len() >= origin.len() {
+        return false;
+    }
+    origin
+        .to_ascii_lowercase()
+        .ends_with(&acao.to_ascii_lowercase())
+}
+
 /// Flags permissive CORS response headers.
 pub struct CorsMisconfig;
 
@@ -58,12 +70,35 @@ impl PassiveCheck for CorsMisconfig {
             )];
         }
 
+        // `Access-Control-Allow-Origin: null` is wildcard-equivalent for a
+        // sandboxed iframe / `data:` document (the browser sends
+        // `Origin: null`), and with credentials it is fully exploitable.
+        if acao.eq_ignore_ascii_case("null") {
+            if credentials {
+                return vec![finding(
+                    "CORS: `null` origin allowed with credentials",
+                    Severity::High,
+                    Confidence::Firm,
+                    "The response sets `Access-Control-Allow-Origin: null` with credentials. A sandboxed iframe or `data:` document is treated as the `null` origin, so an attacker-controlled page can read authenticated responses. Allow-list concrete origins instead.",
+                    ex.id,
+                )];
+            }
+            return vec![finding(
+                "CORS: `null` origin allowed",
+                Severity::Low,
+                Confidence::Firm,
+                "The response sets `Access-Control-Allow-Origin: null`, which any sandboxed document can claim. Restrict the allowed origins to a concrete allow-list.",
+                ex.id,
+            )];
+        }
+
         // Non-wildcard ACAO that exactly reflects the request Origin, with
-        // credentials, is as dangerous as a wildcard-with-credentials.
+        // credentials, is as dangerous as a wildcard-with-credentials. A
+        // reflection that *suffix-matches* an attacker origin is the same bug.
         if credentials {
             if let Some(origin) = ex.request.headers.get("Origin") {
                 let origin = origin.trim();
-                if !origin.is_empty() && acao == origin {
+                if !origin.is_empty() && (acao == origin || reflects_suffix(acao, origin)) {
                     return vec![finding(
                         "CORS: reflected Origin with credentials",
                         Severity::High,
@@ -179,11 +214,56 @@ mod tests {
         assert_eq!(CorsMisconfig.check(&ex)[0].severity, Severity::High);
     }
 
+    fn ex(origin: &str, resp_headers: &[(&str, &str)]) -> HttpExchange {
+        exchange(Some(origin), resp_headers)
+    }
+
     #[test]
     fn no_acao_or_no_response_no_findings() {
         let ex = exchange(None, &[("Content-Type", "application/json")]);
         assert!(CorsMisconfig.check(&ex).is_empty());
         let none = HttpExchange::new(HttpRequest::get("https://api.test/"), Source::Scanner);
         assert!(CorsMisconfig.check(&none).is_empty());
+    }
+
+    #[test]
+    fn null_origin_with_credentials_is_high() {
+        let e = ex(
+            "null",
+            &[
+                ("Access-Control-Allow-Origin", "null"),
+                ("Access-Control-Allow-Credentials", "true"),
+            ],
+        );
+        let f = CorsMisconfig.check(&e);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].severity, Severity::High);
+    }
+
+    #[test]
+    fn suffix_reflection_with_credentials_is_high() {
+        // The server allow-lists target.com but reflects evil-test.target.com.
+        let e = ex(
+            "https://evil-test.target.com",
+            &[
+                ("Access-Control-Allow-Origin", "test.target.com"),
+                ("Access-Control-Allow-Credentials", "true"),
+            ],
+        );
+        let f = CorsMisconfig.check(&e);
+        assert_eq!(f.len(), 1, "suffix reflection must be flagged");
+        assert_eq!(f[0].severity, Severity::High);
+    }
+
+    #[test]
+    fn unrelated_origin_is_not_flagged() {
+        let e = ex(
+            "https://attacker.test",
+            &[
+                ("Access-Control-Allow-Origin", "https://target.com"),
+                ("Access-Control-Allow-Credentials", "true"),
+            ],
+        );
+        assert!(CorsMisconfig.check(&e).is_empty());
     }
 }

@@ -212,12 +212,7 @@ impl Extractor {
             Extractor::StatusCode { .. } => Some(resp.status.to_string()),
             Extractor::Body { .. } => {
                 let text = resp.body.as_text();
-                const MAX: usize = 1024 * 1024;
-                if text.len() > MAX {
-                    Some(text[..MAX].to_string())
-                } else {
-                    Some(text.to_string())
-                }
+                Some(truncate_chars(&text, 1024 * 1024))
             }
             Extractor::JsonPath { path, .. } => {
                 let text = resp.body.as_text();
@@ -257,6 +252,21 @@ fn scalar_to_string(v: &serde_json::Value) -> Option<String> {
         serde_json::Value::Null => Some("null".to_string()),
         _ => None,
     }
+}
+
+/// Truncate to at most `max` bytes, ending on a char boundary. Slicing a
+/// `String` at a raw byte offset panics when the boundary lands mid-character,
+/// and response bodies are attacker-controlled — so this always floors to a
+/// valid boundary.
+fn truncate_chars(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_string();
+    }
+    let mut end = max;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_string()
 }
 
 fn regex_capture_1(pattern: &str, body: &str) -> Option<String> {
@@ -460,9 +470,21 @@ fn substitute(
         );
     }
     out.headers = hdrs;
+    // A body is only rebuilt through text when it actually is text *and* the
+    // substitution changed something: `Body::as_text()` is lossy, so round-
+    // tripping a binary body (multipart, gzip, protobuf) through it would
+    // replace every invalid byte with U+FFFD even with no `${…}` present.
     let body_text = req.body.as_text();
     let body = subst(&body_text, state, payload_value)?;
-    out.body = camio_core::Body::from_text(body);
+    out.body = if body == body_text {
+        req.body.clone()
+    } else if std::str::from_utf8(req.body.as_bytes()).is_ok() {
+        camio_core::Body::from_text(body)
+    } else {
+        // The template substituted into a binary body: the result is text, so
+        // it is stored as text — the caller asked for a textual substitution.
+        camio_core::Body::from_text(body)
+    };
     Ok(out)
 }
 
@@ -808,5 +830,70 @@ mod tests {
         assert!(errs
             .iter()
             .any(|e| matches!(e, ChainError::UnresolvedVariable(s) if s.contains("duplicate"))));
+    }
+}
+
+#[cfg(test)]
+mod truncate_tests {
+    use super::truncate_chars;
+
+    #[test]
+    fn truncates_on_char_boundaries() {
+        // "é" is 2 bytes: a naive byte slice at max would panic.
+        let text = "é".repeat(10);
+        let out = truncate_chars(&text, 5);
+        assert!(out.len() <= 5, "len was {}", out.len());
+        assert_eq!(out, "é".repeat(2));
+        assert_eq!(truncate_chars("hello", 60), "hello");
+        // A 4-byte emoji straddling the boundary must also floor cleanly.
+        let emoji = "😀".repeat(5);
+        let out = truncate_chars(&emoji, 10);
+        assert!(out.len() <= 10);
+        assert!(out.chars().count() == 2);
+    }
+}
+
+#[cfg(test)]
+mod body_tests {
+    use super::*;
+    use camio_core::{Body, HeaderList, HttpRequest, HttpVersion};
+
+    fn req(url: &str) -> HttpRequest {
+        HttpRequest {
+            method: "POST".into(),
+            url: url.into(),
+            version: HttpVersion::Http11,
+            headers: HeaderList::new(),
+            body: Body::empty(),
+        }
+    }
+
+    #[test]
+    fn a_binary_body_survives_an_unrelated_substitution() {
+        // A multipart body with binary parts and no `${…}` must round-trip
+        // byte-for-byte: `Body::as_text()` is lossy, so rebuilding it from the
+        // text view would replace invalid bytes with U+FFFD.
+        let binary: Vec<u8> = vec![0x89, 0x50, 0x4e, 0x47, 0xff, 0xfe, 0x00, 0x80];
+        let mut r = req("https://ex.test/upload?ref=${ref}");
+        r.body = Body::from_bytes(binary.clone());
+        let mut state = ChainState::new();
+        state.insert("ref".into(), "b".into());
+        let out = substitute(&r, &state, None).unwrap();
+        assert_eq!(out.url, "https://ex.test/upload?ref=b");
+        assert_eq!(
+            out.body.as_bytes(),
+            binary.as_slice(),
+            "body must be untouched"
+        );
+    }
+
+    #[test]
+    fn a_template_substitution_changes_the_body() {
+        let mut r = req("https://ex.test/?t=1");
+        r.body = Body::from_text("A=${t}");
+        let mut state = ChainState::new();
+        state.insert("t".into(), "2".into());
+        let out = substitute(&r, &state, None).unwrap();
+        assert_eq!(out.body.as_text(), "A=2");
     }
 }

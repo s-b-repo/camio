@@ -93,7 +93,9 @@ fn sql_error_re() -> Option<&'static Regex> {
     static RE: OnceLock<Option<Regex>> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(
-            r"(?i)(you have an error in your sql syntax|sqlstate|ora-\d+|unclosed quotation|pg_query|sqlite3::|mysql_fetch|odbc|syntax error at or near)",
+            // `odbc` must appear in an error context — the bare token shows up
+            // in ordinary prose and would flag any page mentioning it.
+            r"(?i)(you have an error in your sql syntax|sqlstate|ora-\d+|unclosed quotation|pg_query|sqlite3::|mysql_fetch|odbc[^a-z]{0,8}(error|fail)|syntax error at or near)",
         )
         .ok()
     })

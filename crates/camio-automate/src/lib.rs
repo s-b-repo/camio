@@ -40,7 +40,8 @@ pub mod positions;
 pub use ai_chain::{authorize_chain_steps, authorize_next_url, AiChainError};
 
 pub use campaign::{
-    count_requests, generate, plan, AttackType, Campaign, CampaignPlan, GeneratedRequest,
+    count_requests, generate, generate_from, plan, projected_count, AttackType, Campaign,
+    CampaignPlan, GeneratedRequest,
 };
 pub use chain::{
     materialize as materialize_chain, validate as validate_chain, Chain, ChainError, ChainState,

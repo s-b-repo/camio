@@ -65,6 +65,58 @@ pub fn run(cfg: AppConfig) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
+/// The durable sink for background tasks (plan §4.2): every task lifecycle
+/// change is mirrored into the workspace SQLite store, so a task that is still
+/// running at shutdown is reconciled to `interrupted` on the next open instead
+/// of disappearing. The store handle is opened once and reused (progress
+/// updates are frequent); if it cannot be opened or used, that save is skipped
+/// rather than failing the running job.
+struct TaskStoreSink {
+    db: PathBuf,
+    store: Option<std::sync::Mutex<Store>>,
+}
+
+impl TaskStoreSink {
+    fn new(db: PathBuf) -> Self {
+        let store = Store::open(&db).ok().map(std::sync::Mutex::new);
+        TaskStoreSink { db, store }
+    }
+
+    fn save(&self, rec: &camio_tasks::TaskRecord) {
+        let row = camio_store::TaskRow {
+            id: rec.id.0,
+            kind: rec.kind.clone(),
+            state: rec.state,
+            progress_done: rec.progress_done,
+            progress_total: rec.progress_total,
+            message: rec.message.clone(),
+            result: rec.result.clone(),
+            error: rec.error.clone(),
+            outcome: rec.outcome.map(|o| o.as_str().to_string()),
+            created_at_ms: rec.created_at_ms,
+            updated_at_ms: rec.updated_at_ms,
+        };
+        if let Some(lock) = self.store.as_ref() {
+            if let Ok(store) = lock.lock() {
+                let _ = store.save_task(&row);
+                return;
+            }
+        }
+        // No usable handle (open failed at startup, or the mutex is poisoned):
+        // retry once by opening, then give up quietly — the task itself and
+        // its in-memory record are unaffected.
+        if let Ok(store) = Store::open(&self.db) {
+            let _ = store.save_task(&row);
+        }
+    }
+}
+
+impl camio_tasks::TaskSink for TaskStoreSink {
+    fn save(&self, rec: &camio_tasks::TaskRecord) {
+        TaskStoreSink::save(self, rec);
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Surface {
     Status,
@@ -225,6 +277,8 @@ struct CamioApp {
     proxy_queue: std::sync::Arc<QueueInterceptor>,
     proxy_ca_dir: PathBuf,
     proxy_status: String,
+    /// Durable task record id for the running proxy (plan §4.2).
+    proxy_task: Option<i64>,
     // intercept editor (the request currently held in the queue)
     icept_id: Option<u64>,
     icept_method: String,
@@ -239,8 +293,23 @@ struct CamioApp {
 impl CamioApp {
     fn new(cfg: AppConfig) -> Self {
         let spec = FingerprintSpec::from_profile(&cfg.profile);
-        let engine: Box<dyn RequestEngine> =
-            matched_engine(&cfg.profile).unwrap_or_else(|_| Box::new(DryRunEngine::new(spec)));
+        let mut engine_error: Option<String> = None;
+        // The matched engine is the only transport that preserves the browser
+        // fingerprint. If it cannot be built (no backend, bad upstream proxy),
+        // fall back to the honest no-network dry-run engine and say so rather
+        // than silently swapping transport (plan §16: explicit send failure
+        // when the real transport is unavailable).
+        let engine: Box<dyn RequestEngine> = match matched_engine(&cfg.profile) {
+            Ok(engine) => engine,
+            Err(e) => {
+                let note = format!(
+                    "fingerprint-matched engine unavailable ({e}); sends will not leave this machine"
+                );
+                eprintln!("camio: {note}");
+                *engine_error.get_or_insert(String::new()) = note;
+                Box::new(DryRunEngine::new(spec))
+            }
+        };
         let plugins_dir = "plugins".to_string();
         let plugins = plugins::discover(std::path::Path::new(&plugins_dir));
         // Optional deep-link / theme override via env (also handy for scripting).
@@ -260,6 +329,8 @@ impl CamioApp {
             .ok()
             .and_then(|s| surface_from_name(&s))
             .unwrap_or(Surface::Status);
+        // The durable task sink writes to the same workspace DB the UI reads.
+        let task_sink_db = cfg.db.clone();
         let mut app = CamioApp {
             cfg,
             engine,
@@ -307,7 +378,10 @@ impl CamioApp {
             js_blob: String::new(),
             active_save: true,
             nuclei_url: String::new(),
-            tasks: camio_tasks::TaskManager::new(),
+            // Background tasks are durable (plan §4.2): their records mirror
+            // into the workspace store and interrupted runs are reconciled at
+            // startup rather than silently dropped.
+            tasks: camio_tasks::TaskManager::with_sink(TaskStoreSink::new(task_sink_db)),
             proxy_listen: "127.0.0.1:8080".to_string(),
             proxy_tls: false,
             proxy_auto_scan: true,
@@ -317,6 +391,7 @@ impl CamioApp {
             proxy_queue: std::sync::Arc::new(QueueInterceptor::new()),
             proxy_ca_dir: default_proxy_ca_dir(),
             proxy_status: String::new(),
+            proxy_task: None,
             icept_id: None,
             icept_method: String::new(),
             icept_url: String::new(),
@@ -326,6 +401,24 @@ impl CamioApp {
             surface_outputs: HashMap::new(),
         };
         app.enter_workbench(surface);
+        // Restart recovery (plan §4.2): background tasks that were still
+        // running when the app last exited are reconciled to `interrupted`
+        // now, so their partial records stay visible on the Tasks surface
+        // instead of being silently forgotten or blindly replayed.
+        if let Ok(store) = Store::open(&app.cfg.db) {
+            match store.reconcile_interrupted_tasks() {
+                Ok(0) => {}
+                Ok(n) => {
+                    app.out = Output::Error(format!(
+                        "{n} background task(s) were still running at the last exit; \
+                         they were marked interrupted. Partial results stay on the Tasks surface."
+                    ));
+                }
+                Err(e) => {
+                    app.out = Output::Error(format!("could not reconcile background tasks: {e}"));
+                }
+            }
+        }
         app
     }
 
@@ -375,7 +468,12 @@ impl CamioApp {
         let res = (|| {
             let q =
                 Query::compile(self.query.trim()).map_err(|e| format!("invalid CamioQL: {e}"))?;
-            let rows = self.open()?.query(&q, 5000).map_err(|e| e.to_string())?;
+            // The site map only needs URL metadata: the metadata path avoids
+            // allocating length-sized placeholder bodies for every row.
+            let rows = self
+                .open()?
+                .query_metadata(&q, 5000)
+                .map_err(|e| e.to_string())?;
             Ok::<_, String>(SiteMap::build(&rows))
         })();
         self.out = match res {
@@ -701,11 +799,12 @@ impl CamioApp {
                 .cfg
                 .scope
                 .decide(&HttpExchange::new(clean.clone(), Source::Automate));
-            match self
-                .cfg
-                .policy
-                .gate(ActionClass::Active, decision, self.confirm)
-            {
+            match self.cfg.policy.gate_action_with(
+                ActionClass::Active,
+                &self.cfg.scope,
+                decision,
+                self.confirm,
+            ) {
                 PolicyOutcome::Deny(r) => return Err(format!("refused: {r}")),
                 PolicyOutcome::NeedsConfirmation(r) => {
                     return Err(format!(
@@ -1402,9 +1501,9 @@ impl CamioApp {
 
         match server.spawn(listener) {
             Ok(handle) => {
+                let local_addr = handle.local_addr();
                 self.proxy_status = format!(
-                    "Listening on {}{}. Set your browser proxy to it.",
-                    handle.local_addr(),
+                    "Listening on {local_addr}{}. Set your browser proxy to it.",
                     if self.proxy_tls {
                         " — TLS interception ON (fingerprint-changing)"
                     } else {
@@ -1412,6 +1511,27 @@ impl CamioApp {
                     }
                 );
                 self.proxy_handle = Some(handle);
+                // Durable record (plan §4.2): the proxy is a long-running task
+                // with visible state, and stopping it is its cancellation.
+                let db = self.cfg.db.clone();
+                let now = camio_core::approval::now_ms();
+                if let Ok(store) = Store::open(&db) {
+                    let row = camio_store::TaskRow {
+                        id: 9_000_001,
+                        kind: "proxy".into(),
+                        state: camio_core::TaskState::Running,
+                        progress_done: 0,
+                        progress_total: None,
+                        message: format!("listening on {local_addr}"),
+                        result: None,
+                        error: None,
+                        outcome: None,
+                        created_at_ms: now,
+                        updated_at_ms: now,
+                    };
+                    let _ = store.save_task(&row);
+                }
+                self.proxy_task = Some(9_000_001);
             }
             Err(e) => self.proxy_status = format!("Could not serve: {e}"),
         }
@@ -1424,6 +1544,25 @@ impl CamioApp {
         if let Some(handle) = self.proxy_handle.take() {
             handle.stop_and_join();
             self.proxy_status = "Proxy stopped.".to_string();
+        }
+        // Reflect the stop in the durable task record (plan §4.2).
+        if let Some(id) = self.proxy_task.take() {
+            let db = self.cfg.db.clone();
+            if let Ok(store) = Store::open(&db) {
+                let _ = store.save_task(&camio_store::TaskRow {
+                    id,
+                    kind: "proxy".into(),
+                    state: camio_core::TaskState::Completed,
+                    progress_done: 0,
+                    progress_total: None,
+                    message: "proxy stopped".into(),
+                    result: Some("proxy stopped".into()),
+                    error: None,
+                    outcome: Some("success".into()),
+                    created_at_ms: 0,
+                    updated_at_ms: 0,
+                });
+            }
         }
     }
 
@@ -1673,11 +1812,12 @@ impl CamioApp {
                 .cfg
                 .scope
                 .decide(&HttpExchange::new(base.clone(), Source::Scanner));
-            match self
-                .cfg
-                .policy
-                .gate(ActionClass::Active, decision, self.confirm)
-            {
+            match self.cfg.policy.gate_action_with(
+                ActionClass::Active,
+                &self.cfg.scope,
+                decision,
+                self.confirm,
+            ) {
                 PolicyOutcome::Deny(r) => return Err(format!("refused: {r}")),
                 PolicyOutcome::NeedsConfirmation(r) => {
                     return Err(format!(
@@ -2297,4 +2437,67 @@ fn strip_clean(req: &HttpRequest) -> HttpRequest {
         out.body = Body::from_text(camio_automate::strip_markers(t, m));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The durable sink must mirror a task's full lifecycle into the workspace
+    /// store so a restart can reconcile interrupted runs (plan §4.2).
+    #[test]
+    fn task_sink_persists_the_lifecycle_for_restart_recovery() {
+        let dir = std::env::temp_dir().join(format!("camio-app-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("workspace.db");
+        let _ = std::fs::remove_file(&db);
+
+        let mgr = camio_tasks::TaskManager::with_sink(TaskStoreSink::new(db.clone()));
+        let id = mgr.spawn("nuclei", |ctx| {
+            ctx.set_progress(1, Some(2));
+            Ok("template matched".into())
+        });
+        for _ in 0..200 {
+            if mgr.status(id).map(|r| r.is_terminal()).unwrap_or(false) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let store = Store::open(&db).unwrap();
+        let rows = store.tasks(10).unwrap();
+        let row = rows
+            .iter()
+            .find(|r| r.id == id.0)
+            .expect("task record persisted");
+        assert_eq!(row.kind, "nuclei");
+        assert_eq!(row.state, camio_core::TaskState::Completed);
+        assert_eq!(row.outcome.as_deref(), Some("success"));
+        assert_eq!(row.result.as_deref(), Some("template matched"));
+        assert_eq!(row.progress_done, 1);
+
+        // A simulated restart: non-terminal rows become `interrupted`.
+        store
+            .save_task(&camio_store::TaskRow {
+                id: 99,
+                kind: "scan".into(),
+                state: camio_core::TaskState::Running,
+                progress_done: 4,
+                progress_total: Some(9),
+                message: "probing".into(),
+                result: None,
+                error: None,
+                outcome: None,
+                created_at_ms: 1,
+                updated_at_ms: 1,
+            })
+            .unwrap();
+        assert_eq!(store.reconcile_interrupted_tasks().unwrap(), 1);
+        assert_eq!(
+            store.task(99).unwrap().unwrap().state,
+            camio_core::TaskState::Interrupted
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

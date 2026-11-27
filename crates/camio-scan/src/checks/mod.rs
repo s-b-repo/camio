@@ -213,7 +213,7 @@ pub(crate) fn sensitive_key_re() -> Option<&'static Regex> {
     // `passwordless`, `tokenizer`) do not.
     RE.get_or_init(|| {
         Regex::new(
-            r"(?i)(?:^|[-_])(?:password|passwd|pwd|token|api[_-]?key|secret|access_key|sessionid)(?:$|[-_=])",
+            r"(?i)(?:^|[-_])(?:password|passwd|pwd|token|api[_-]?key|secret|access_key|sessionid|session|sid|jwt|bearer|auth|credentials?)(?:$|[-_=])",
         )
         .ok()
     })

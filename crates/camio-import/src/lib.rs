@@ -69,12 +69,41 @@ pub struct ImportResult {
     pub warnings: Vec<String>,
 }
 
+/// Whether a header name/value is safe to store and later replay.
+///
+/// Imported archives are replayed through the request engine, so a value
+/// carrying CR/LF (or NUL) is a request-splitting primitive: the origin would
+/// see headers the archive never declared. Reject control characters rather
+/// than storing them.
+pub fn header_is_safe(name: &str, value: &str) -> bool {
+    let no_control = |s: &str| !s.chars().any(|c| c.is_control() || c == '\u{7f}');
+    !name.is_empty()
+        && !name.contains(':')
+        && !name.contains(' ')
+        && !name.contains('\t')
+        && no_control(name)
+        && no_control(value)
+}
+
+/// Maximum import input size (32 MiB). Callers cap further (the web API allows
+/// 4 MiB), but the parser itself must never accept an unbounded file.
+pub const MAX_IMPORT_BYTES: usize = 32 * 1024 * 1024;
+
+/// Maximum exchanges one import may produce.
+pub const MAX_IMPORT_EXCHANGES: usize = 50_000;
+
 /// Import a byte buffer by sniffing its format, then dispatching.
 ///
 /// Sniffing: a leading `{` (after optional whitespace) means HAR JSON; otherwise
 /// the presence of `<items` or `<?xml` means a Burp XML export; anything else is
 /// [`ImportError::Unsupported`].
 pub fn import_bytes(data: &[u8]) -> Result<ImportResult, ImportError> {
+    if data.len() > MAX_IMPORT_BYTES {
+        return Err(ImportError::Parse(format!(
+            "input is {} bytes, over the {MAX_IMPORT_BYTES}-byte limit",
+            data.len()
+        )));
+    }
     let data = data.strip_prefix(b"\xef\xbb\xbf").unwrap_or(data);
     let first_non_ws = data.iter().position(|b| !b.is_ascii_whitespace());
     match first_non_ws {
@@ -185,5 +214,66 @@ mod tests {
             decode_base64("!!!not base64!!!"),
             Err(ImportError::Decode(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod hardening_tests {
+    use super::*;
+
+    #[test]
+    fn oversized_input_is_refused() {
+        let huge = vec![b'<'; 10];
+        // A guard bigger than the cap is what matters; use the cap constant so
+        // the test stays cheap.
+        let mut data = Vec::new();
+        data.extend_from_slice(b"<?xml version=\"1.0\"?><items>");
+        data.resize(MAX_IMPORT_BYTES + 1, b' ');
+        let _ = huge;
+        let err = import_bytes(&data).unwrap_err();
+        assert!(err.to_string().contains("limit"), "{err}");
+    }
+
+    #[test]
+    fn control_characters_in_headers_are_rejected() {
+        assert!(header_is_safe("X-Ok", "value"), "a normal header is safe");
+        assert!(!header_is_safe("X-Ok", "a\r\nX-Evil: b"));
+        assert!(!header_is_safe("X\u{0}Nul", "v"));
+        assert!(!header_is_safe("Name: x", "v"));
+        assert!(header_is_safe(
+            "Content-Type",
+            "application/json; charset=utf-8"
+        ));
+    }
+
+    #[test]
+    fn a_crlf_header_value_in_har_is_dropped_with_a_warning() {
+        // HAR gives headers as name/value pairs, so a single value can carry
+        // CRLF — that is request splitting on replay, so it is refused and
+        // reported rather than silently stored.
+        let har = serde_json::json!({
+            "log": { "entries": [ {
+                "request": {
+                    "method": "GET",
+                    "url": "https://ex.test/",
+                    "headers": [
+                        { "name": "Host", "value": "ex.test" },
+                        { "name": "X-Evil", "value": "a\r\nX-Injected: b" }
+                    ]
+                },
+                "response": { "status": 200, "headers": [] }
+            } ] }
+        });
+        let result = import_har(&har.to_string()).unwrap();
+        let ex = &result.exchanges[0];
+        assert!(
+            ex.request.headers.get("X-Injected").is_none(),
+            "no split header"
+        );
+        assert!(
+            result.warnings.iter().any(|w| w.contains("unsafe header")),
+            "warnings: {:?}",
+            result.warnings
+        );
     }
 }

@@ -17,7 +17,7 @@
 use camio_core::{HttpRequest, HttpResponse};
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// What to do with an intercepted request.
 #[derive(Debug, Clone)]
@@ -98,6 +98,10 @@ struct Inner {
     /// When false, responses are never parked (requests only) — so a front-end
     /// that only drives request interception can't leave responses hanging.
     intercept_responses: bool,
+    /// How long a parked request/response may wait for a decision before it is
+    /// released unchanged. A queued item must never pin a thread + socket
+    /// forever (plan §12: "a durable intercept queue with timeouts").
+    park_timeout: Duration,
 }
 
 /// A thread-safe intercept queue a front-end drives.
@@ -113,6 +117,11 @@ impl Default for QueueInterceptor {
 }
 
 impl QueueInterceptor {
+    /// Default park timeout: an operator has 5 minutes to act on a queued item
+    /// before it is released unchanged, so nothing is lost to a timeout nobody
+    /// could observe.
+    pub const DEFAULT_PARK_TIMEOUT: Duration = Duration::from_secs(300);
+
     pub fn new() -> Self {
         QueueInterceptor {
             inner: Mutex::new(Inner {
@@ -121,9 +130,18 @@ impl QueueInterceptor {
                 next_id: 1,
                 active: true,
                 intercept_responses: false,
+                park_timeout: Self::DEFAULT_PARK_TIMEOUT,
             }),
             cv: Condvar::new(),
         }
+    }
+
+    /// Set how long a parked item may wait for an operator decision.
+    pub fn set_park_timeout(&self, timeout: Duration) {
+        self.inner
+            .lock()
+            .expect("intercept queue poisoned")
+            .park_timeout = timeout;
     }
 
     /// Turn interception on or off. Turning it off releases nothing already
@@ -200,15 +218,21 @@ impl QueueInterceptor {
         ok
     }
 
+    /// Maximum items parked at once. Beyond it, further requests are forwarded
+    /// unchanged rather than pinning unbounded threads/sockets on a queue
+    /// nobody is draining.
+    const MAX_PENDING: usize = 512;
+
     fn park_request(&self, request: HttpRequest) -> RequestDecision {
         let mut g = self.inner.lock().expect("intercept queue poisoned");
-        if !g.active {
+        if !g.active || g.queue.len() >= Self::MAX_PENDING {
             return RequestDecision::Forward(request);
         }
         let id = g.next_id;
         g.next_id += 1;
         g.slots.insert(id, Slot::WaitingRequest(request));
         g.queue.push_back(id);
+        let deadline = Instant::now() + g.park_timeout;
         self.cv.notify_all();
         loop {
             // Poll so a `set_active(false)` toggle can release waiters too.
@@ -229,6 +253,14 @@ impl QueueInterceptor {
                     return RequestDecision::Forward(req);
                 }
             }
+            if Instant::now() >= deadline {
+                // Nobody acted in time: release the request unchanged instead
+                // of holding its connection (and thread) forever.
+                if let Some(Slot::WaitingRequest(req)) = g.slots.remove(&id) {
+                    g.queue.retain(|q| *q != id);
+                    return RequestDecision::Forward(req);
+                }
+            }
         }
     }
 
@@ -239,9 +271,13 @@ impl QueueInterceptor {
         }
         let id = g.next_id;
         g.next_id += 1;
+        if g.queue.len() >= Self::MAX_PENDING {
+            return ResponseDecision::Forward(response);
+        }
         g.slots
             .insert(id, Slot::WaitingResponse(request.clone(), response));
         g.queue.push_back(id);
+        let deadline = Instant::now() + g.park_timeout;
         self.cv.notify_all();
         loop {
             let (guard, _timeout) = self
@@ -255,6 +291,12 @@ impl QueueInterceptor {
                 }
             }
             if !g.active {
+                if let Some(Slot::WaitingResponse(_, resp)) = g.slots.remove(&id) {
+                    g.queue.retain(|q| *q != id);
+                    return ResponseDecision::Forward(resp);
+                }
+            }
+            if Instant::now() >= deadline {
                 if let Some(Slot::WaitingResponse(_, resp)) = g.slots.remove(&id) {
                     g.queue.retain(|q| *q != id);
                     return ResponseDecision::Forward(resp);
@@ -359,6 +401,50 @@ mod tests {
                 break p.id();
             }
             thread::yield_now();
+        };
+        assert!(q.resolve_request(id, RequestDecision::Drop));
+        assert!(matches!(handle.join().unwrap(), RequestDecision::Drop));
+    }
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+    use camio_core::HttpRequest;
+    use std::thread;
+    use std::time::Duration;
+
+    #[test]
+    fn parked_request_is_released_after_the_timeout() {
+        let q = Arc::new(QueueInterceptor::new());
+        // A short leash for the test; the default is 5 minutes.
+        q.set_park_timeout(Duration::from_millis(50));
+        let parked = Arc::clone(&q);
+        let handle =
+            thread::spawn(
+                move || match parked.on_request(HttpRequest::get("http://h/")) {
+                    RequestDecision::Forward(r) => r.url,
+                    RequestDecision::Drop => "dropped".to_string(),
+                },
+            );
+        // Nobody resolves it: the queue must release the request unchanged
+        // instead of pinning the thread forever.
+        let url = handle.join().unwrap();
+        assert_eq!(url, "http://h/");
+        assert_eq!(q.pending_count(), 0, "the slot must be reclaimed");
+    }
+
+    #[test]
+    fn an_operator_decision_still_wins_over_the_timeout() {
+        let q = Arc::new(QueueInterceptor::new());
+        q.set_park_timeout(Duration::from_secs(30));
+        let parked = Arc::clone(&q);
+        let handle = thread::spawn(move || parked.on_request(HttpRequest::get("http://h/")));
+        let id = loop {
+            if let Some(pending) = q.next_pending() {
+                break pending.id();
+            }
+            thread::sleep(Duration::from_millis(2));
         };
         assert!(q.resolve_request(id, RequestDecision::Drop));
         assert!(matches!(handle.join().unwrap(), RequestDecision::Drop));

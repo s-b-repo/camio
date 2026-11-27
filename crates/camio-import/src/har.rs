@@ -30,6 +30,14 @@ pub fn import_har(json: &str) -> Result<ImportResult, ImportError> {
     let mut exchanges: Vec<HttpExchange> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
 
+    if entries.len() > crate::MAX_IMPORT_EXCHANGES {
+        return Err(ImportError::Parse(format!(
+            "HAR lists {} entries, over the {}-entry limit",
+            entries.len(),
+            crate::MAX_IMPORT_EXCHANGES
+        )));
+    }
+
     for (idx, entry) in entries.iter().enumerate() {
         let request_value = match entry.get("request") {
             Some(r) => r,
@@ -57,7 +65,11 @@ pub fn import_har(json: &str) -> Result<ImportResult, ImportError> {
             .and_then(|h| h.as_str())
             .map(map_http_version)
             .unwrap_or_default();
-        let headers = json_headers(request_value.get("headers"));
+        let mut dropped_headers = Vec::new();
+        let headers = json_headers(request_value.get("headers"), &mut dropped_headers);
+        for name in &dropped_headers {
+            warnings.push(format!("entry {idx}: dropped unsafe header `{name}`"));
+        }
         let body = request_value
             .get("postData")
             .and_then(|p| p.get("text"))
@@ -97,13 +109,19 @@ pub fn import_har(json: &str) -> Result<ImportResult, ImportError> {
 
 /// Map a HAR `headers` array (`[{name, value}, ...]`) to a [`HeaderList`],
 /// preserving order and casing. Entries missing `name` or `value` are skipped.
-fn json_headers(value: Option<&Value>) -> HeaderList {
+fn json_headers(value: Option<&Value>, dropped: &mut Vec<String>) -> HeaderList {
     let mut headers = HeaderList::new();
     if let Some(array) = value.and_then(|v| v.as_array()) {
         for header in array {
             let name = header.get("name").and_then(|n| n.as_str());
             let val = header.get("value").and_then(|v| v.as_str());
             if let (Some(name), Some(val)) = (name, val) {
+                // Replay-safety: reject control characters in imported headers
+                // (a CRLF value would split the request on replay).
+                if !crate::header_is_safe(name, val) {
+                    dropped.push(name.to_string());
+                    continue;
+                }
                 headers.push(name, val);
             }
         }
@@ -117,8 +135,17 @@ fn json_headers(value: Option<&Value>) -> HeaderList {
 fn build_response(value: &Value, idx: usize, warnings: &mut Vec<String>) -> Option<HttpResponse> {
     let status_raw = value.get("status").and_then(|s| s.as_u64());
     let status = match status_raw {
-        Some(s) if (1..1000).contains(&s) => s as u16,
-        _ => return None,
+        // A real HTTP status is 100-599. HAR also uses 0 for a failed capture;
+        // anything else (999, 1000, negative) is not a status and must not be
+        // stored as if it were one.
+        Some(s) if (100..=599).contains(&s) => s as u16,
+        Some(0) | None => return None,
+        Some(other) => {
+            warnings.push(format!(
+                "entry {idx}: status {other} is not a valid HTTP status; response skipped"
+            ));
+            return None;
+        }
     };
 
     let version = value
@@ -131,7 +158,13 @@ fn build_response(value: &Value, idx: usize, warnings: &mut Vec<String>) -> Opti
         .and_then(|s| s.as_str())
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
-    let headers = json_headers(value.get("headers"));
+    let mut dropped_headers = Vec::new();
+    let headers = json_headers(value.get("headers"), &mut dropped_headers);
+    for name in &dropped_headers {
+        warnings.push(format!(
+            "entry {idx}: dropped unsafe response header `{name}`"
+        ));
+    }
 
     let body = match value.get("content") {
         Some(content) => {

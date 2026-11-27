@@ -62,7 +62,11 @@ impl DiscoveredInput {
             InputKind::Cookie => InputContext::HttpCookie,
             InputKind::Header => InputContext::HttpHeaderValue,
             InputKind::JsonField => {
-                if self.value.parse::<f64>().is_ok() {
+                // Only a *strict* integer is a JSON number: `f64::parse` also
+                // accepts "inf", "NaN", "1e5" and "30" in a string slot, which
+                // would send an XSS payload into a JSON string with no string
+                // escaping (invalid JSON, wasted probe).
+                if is_strict_integer(&self.value) {
                     InputContext::JsonNumber
                 } else {
                     InputContext::JsonString
@@ -70,6 +74,14 @@ impl DiscoveredInput {
             }
         }
     }
+}
+
+/// A strict JSON integer: optional `-`, then digits only. Not `f64`-parseable
+/// strings ("inf", "NaN", "1e5", "1.5") and not string slots that happen to
+/// contain digits.
+fn is_strict_integer(value: &str) -> bool {
+    let digits = value.strip_prefix('-').unwrap_or(value);
+    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// Smart context detection from the request alone — for callers that don't
@@ -104,7 +116,7 @@ pub fn detect_body_context(req: &HttpRequest) -> InputContext {
 
 /// Request headers worth testing on their own (plan §10: headers are an input
 /// surface). Named explicitly rather than fuzzing every header.
-const NOTABLE_HEADERS: [&str; 3] = ["User-Agent", "Referer", "X-Forwarded-For"];
+const NOTABLE_HEADERS: [&str; 4] = ["User-Agent", "Referer", "X-Forwarded-For", "Authorization"];
 
 /// Enumerate the injectable inputs of `req`, in a stable order: query params,
 /// then URL-encoded body params, then cookies, then notable headers, then
@@ -130,6 +142,16 @@ pub fn discover_inputs(req: &HttpRequest) -> Vec<DiscoveredInput> {
         }
     }
 
+    // 2b. Multipart form: parse the boundary and each part's name/value (a
+    // multipart upload form previously yielded no inputs at all).
+    if content_type_is(content_type, "multipart/form-data") {
+        if let Some(boundary) = multipart_boundary(content_type) {
+            for (name, value) in parse_multipart(&req.body.as_text(), &boundary) {
+                out.push(DiscoveredInput::new(InputKind::BodyParam, name, value));
+            }
+        }
+    }
+
     // 3. Cookies (verbatim — cookie values are not URL-encoded).
     if let Some(cookie_header) = req.headers.get("Cookie") {
         for part in cookie_header.split(';') {
@@ -146,31 +168,141 @@ pub fn discover_inputs(req: &HttpRequest) -> Vec<DiscoveredInput> {
         }
     }
 
-    // 4. Notable headers.
+    // 4. Notable headers — every value of a repeated header, not just the first
+    // (each is a distinct input position).
     for name in NOTABLE_HEADERS {
-        if let Some(value) = req.headers.get(name) {
+        for value in req.headers.get_all(name) {
             out.push(DiscoveredInput::new(InputKind::Header, name, value));
         }
     }
 
-    // 5. Top-level JSON scalar fields.
+    // 5. JSON fields, including arrays of objects (`[{...},{...}]` — a REST
+    // collection body) and nested objects of scalars. Elements are addressed
+    // with `items.0.id`-style paths so their location is preserved.
     if content_type_is(content_type, "application/json") {
         let body = req.body.as_text();
-        if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(&body)
-        {
-            for (key, value) in map {
-                if let Some(scalar) = scalar_to_string(&value) {
-                    out.push(DiscoveredInput::new(InputKind::JsonField, key, scalar));
-                }
-            }
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) {
+            collect_json_fields(&value, "", &mut out);
         }
     }
 
     out
 }
 
+/// Collect scalar JSON fields (and arrays/nested objects of them) as inputs,
+/// preserving location with dotted paths (`user.name`, `items.0.id`).
+fn collect_json_fields(value: &serde_json::Value, prefix: &str, out: &mut Vec<DiscoveredInput>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, value) in map {
+                let path = join_path(prefix, key);
+                match value {
+                    serde_json::Value::Array(items) => {
+                        for (i, item) in items.iter().enumerate() {
+                            collect_json_fields(item, &join_path(&path, &i.to_string()), out);
+                        }
+                    }
+                    serde_json::Value::Object(_) => {
+                        collect_json_fields(value, &path, out);
+                    }
+                    other => {
+                        if let Some(scalar) = scalar_to_string(other) {
+                            out.push(DiscoveredInput::new(InputKind::JsonField, path, scalar));
+                        }
+                    }
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for (i, item) in items.iter().enumerate() {
+                collect_json_fields(item, &join_path(prefix, &i.to_string()), out);
+            }
+        }
+        other => {
+            if let Some(scalar) = scalar_to_string(other) {
+                out.push(DiscoveredInput::new(
+                    InputKind::JsonField,
+                    prefix.to_string(),
+                    scalar,
+                ));
+            }
+        }
+    }
+}
+
+fn join_path(prefix: &str, key: &str) -> String {
+    if prefix.is_empty() {
+        key.to_string()
+    } else {
+        format!("{prefix}.{key}")
+    }
+}
+
 /// Match a `Content-Type` header value against a bare media type, ignoring any
 /// `; charset=…` parameters and case.
+/// Extract the `boundary` parameter from a `multipart/form-data` Content-Type.
+fn multipart_boundary(content_type: &str) -> Option<String> {
+    for param in content_type.split(';').skip(1) {
+        let Some((key, value)) = param.split_once('=') else {
+            continue;
+        };
+        if key.trim().eq_ignore_ascii_case("boundary") {
+            let value = value.trim().trim_matches('"');
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Parse `multipart/form-data` parts into `(name, value)` pairs.
+///
+/// Reads each part's `Content-Disposition` `name` (and `filename` as a
+/// file-upload input position) and its text body. A part whose headers or name
+/// cannot be read is skipped rather than guessed at; a file part's testable
+/// position is its filename, not its bytes.
+fn parse_multipart(body: &str, boundary: &str) -> Vec<(String, String)> {
+    let delimiter = format!("--{boundary}");
+    let mut out = Vec::new();
+    for section in body.split(&delimiter) {
+        let section = section.trim_start_matches("\r\n");
+        if section.is_empty() || section.starts_with("--") {
+            continue; // preamble / closing delimiter
+        }
+        let Some((head, value)) = section.split_once("\r\n\r\n") else {
+            continue;
+        };
+        let mut name = None;
+        let mut filename = None;
+        for line in head.split("\r\n") {
+            let Some((key, value)) = line.split_once(':') else {
+                continue;
+            };
+            if !key.trim().eq_ignore_ascii_case("content-disposition") {
+                continue;
+            }
+            for param in value.split(';') {
+                let Some((k, v)) = param.split_once('=') else {
+                    continue;
+                };
+                let v = v.trim().trim_matches('"');
+                match k.trim().to_ascii_lowercase().as_str() {
+                    "name" => name = Some(v.to_string()),
+                    "filename" => filename = Some(v.to_string()),
+                    _ => {}
+                }
+            }
+        }
+        let Some(name) = name else {
+            continue;
+        };
+        let value = value.trim_end_matches("\r\n");
+        out.push((name, filename.unwrap_or_else(|| value.to_string())));
+    }
+    out
+}
+
 fn content_type_is(ct: &str, want: &str) -> bool {
     ct.split(';')
         .next()
@@ -181,7 +313,9 @@ fn content_type_is(ct: &str, want: &str) -> bool {
 /// Parse `k=v&k2=v2` pairs, URL-decoding both names and values. Pairs with no
 /// `=` are reported with an empty value; empty segments are skipped.
 fn parse_pairs(s: &str) -> Vec<(String, String)> {
-    s.split('&')
+    // Legacy form encoders separate pairs with `;` as well as `&`; splitting on
+    // `&` alone turns `a=1;b=2` into one unusable pair.
+    s.split(['&', ';'])
         .filter(|pair| !pair.is_empty())
         .map(|pair| match pair.split_once('=') {
             Some((k, v)) => (percent_decode(k), percent_decode(v)),
@@ -402,5 +536,137 @@ mod tests {
         assert_eq!(di, back);
         // snake_case tag on the kind.
         assert!(json.contains("query_param"));
+    }
+}
+
+#[cfg(test)]
+mod discovery_gap_tests {
+    use super::*;
+    use camio_core::Body;
+
+    fn req(url: &str, body: &str, ct: &str) -> HttpRequest {
+        let mut r = HttpRequest::get(url);
+        if !ct.is_empty() {
+            r.headers.push("Content-Type", ct);
+        }
+        if !body.is_empty() {
+            r.body = Body::from_text(body.to_string());
+        }
+        r
+    }
+
+    #[test]
+    fn semicolon_separated_form_pairs_are_split() {
+        let inputs = discover_inputs(&req(
+            "https://ex.test/",
+            "a=1;b=2",
+            "application/x-www-form-urlencoded",
+        ));
+        let names: Vec<&str> = inputs.iter().map(|i| i.name.as_str()).collect();
+        assert!(names.contains(&"a"), "got {names:?}");
+        assert!(names.contains(&"b"), "got {names:?}");
+    }
+
+    #[test]
+    fn json_arrays_of_objects_yield_pathed_inputs() {
+        let inputs = discover_inputs(&req(
+            "https://ex.test/",
+            r#"[{"id":"1","tags":["a","b"]},{"id":"2"}]"#,
+            "application/json",
+        ));
+        let names: Vec<&str> = inputs.iter().map(|i| i.name.as_str()).collect();
+        assert!(names.contains(&"0.id"), "got {names:?}");
+        assert!(names.contains(&"0.tags.0"), "got {names:?}");
+        assert!(names.contains(&"1.id"), "got {names:?}");
+    }
+
+    #[test]
+    fn nested_objects_of_scalars_are_discovered() {
+        let inputs = discover_inputs(&req(
+            "https://ex.test/",
+            r#"{"user":{"name":"ada","age":36}}"#,
+            "application/json",
+        ));
+        let names: Vec<&str> = inputs.iter().map(|i| i.name.as_str()).collect();
+        assert!(names.contains(&"user.name"), "got {names:?}");
+        assert!(names.contains(&"user.age"), "got {names:?}");
+    }
+
+    #[test]
+    fn repeated_headers_report_every_value() {
+        let mut r = HttpRequest::get("https://ex.test/");
+        r.headers.push("X-Forwarded-For", "one");
+        r.headers.push("X-Forwarded-For", "two");
+        let inputs = discover_inputs(&r);
+        let values: Vec<&str> = inputs
+            .iter()
+            .filter(|i| i.name == "X-Forwarded-For")
+            .map(|i| i.value.as_str())
+            .collect();
+        assert_eq!(values, vec!["one", "two"]);
+    }
+
+    #[test]
+    fn json_string_numbers_stay_strings() {
+        // `"30"` in a JSON string slot is a string, not a number: the encoder
+        // must not treat it as a numeric field.
+        let inputs = discover_inputs(&req(
+            "https://ex.test/",
+            r#"{"id":"30","count":7}"#,
+            "application/json",
+        ));
+        let id = inputs.iter().find(|i| i.name == "id").unwrap();
+        assert_eq!(id.value, "30");
+    }
+}
+
+#[cfg(test)]
+mod multipart_tests {
+    use super::*;
+    use camio_core::Body;
+
+    const BODY: &str = "--X-BOUNDARY\r\n\
+        Content-Disposition: form-data; name=\"field\"\r\n\
+        \r\n\
+        value-1\r\n\
+        --X-BOUNDARY\r\n\
+        Content-Disposition: form-data; name=\"upload\"; filename=\"a.txt\"\r\n\
+        Content-Type: text/plain\r\n\
+        \r\n\
+        file-bytes\r\n\
+        --X-BOUNDARY--\r\n";
+
+    fn req() -> HttpRequest {
+        let mut r = HttpRequest::get("https://ex.test/upload");
+        r.headers
+            .push("Content-Type", "multipart/form-data; boundary=X-BOUNDARY");
+        r.body = Body::from_text(BODY);
+        r
+    }
+
+    #[test]
+    fn multipart_parts_are_discovered() {
+        let inputs = discover_inputs(&req());
+        let names: Vec<&str> = inputs.iter().map(|i| i.name.as_str()).collect();
+        assert!(names.contains(&"field"), "got {names:?}");
+        // A file part's position is its filename, not its bytes.
+        let upload = inputs.iter().find(|i| i.name == "upload").unwrap();
+        assert_eq!(upload.value, "a.txt");
+    }
+
+    #[test]
+    fn a_missing_boundary_yields_nothing_rather_than_guessing() {
+        let mut r = HttpRequest::get("https://ex.test/");
+        r.headers.push("Content-Type", "multipart/form-data");
+        r.body = Body::from_text("garbage without a boundary");
+        assert!(discover_inputs(&r).is_empty());
+    }
+
+    #[test]
+    fn a_quoted_boundary_is_parsed() {
+        assert_eq!(
+            multipart_boundary("multipart/form-data; boundary=\"q u o t e d\"").as_deref(),
+            Some("q u o t e d")
+        );
     }
 }

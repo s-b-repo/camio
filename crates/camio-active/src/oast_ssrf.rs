@@ -32,6 +32,8 @@ pub fn run_oast_ssrf(
     settle: Duration,
 ) -> Vec<Finding> {
     let mut out = Vec::new();
+    // One settle window for the whole run, set on the first successful send.
+    let mut deadline: Option<std::time::Instant> = None;
     for (kind, name) in dedup_params(discovered_params(base)) {
         let token = collector.new_token();
         let url = collector.callback_url(&token);
@@ -43,7 +45,14 @@ pub fn run_oast_ssrf(
         };
 
         if !settle.is_zero() {
-            std::thread::sleep(settle);
+            // One global deadline instead of a per-probe sleep: waiting
+            // `settle` after *each* send is N× settle of uninterruptible
+            // blocking, so the whole run waits at most once.
+            let until = *deadline.get_or_insert_with(|| std::time::Instant::now() + settle);
+            let now = std::time::Instant::now();
+            if now < until {
+                std::thread::sleep(until - now);
+            }
         }
         let hits = collector.for_token(&token).len();
         if hits > before {

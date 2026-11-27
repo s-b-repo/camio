@@ -15,6 +15,7 @@
 
 pub mod ai_guard;
 pub mod ai_tools;
+pub mod approval;
 pub mod camioql;
 pub mod cvss;
 pub mod fingerprint;
@@ -40,6 +41,7 @@ pub use ai_tools::{
     default_catalog, resolve_tool_call, ResolveRequest, ToolCatalog, ToolResolution, ToolSpec,
     ToolSuggestion,
 };
+pub use approval::{normalize_targets, Approval, PlanSummary};
 pub use camioql::{Query, QueryTarget};
 pub use cvss::{Cvss, CvssError};
 pub use matchreplace::{Find, MatchReplaceRule, RuleSet, Target as MatchTarget};

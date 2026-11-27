@@ -18,19 +18,23 @@
 use camio_automate::{AttackType, Campaign, PayloadSet};
 use camio_convert::Transform;
 use camio_core::{
-    ActionClass, FindingId, FingerprintProfile, HttpExchange, HttpRequest, Policy, PolicyOutcome,
-    Scope, SiteMap, Source, TaskId,
+    ActionClass, Approval, FindingId, FingerprintProfile, HttpExchange, HttpRequest, PlanSummary,
+    Policy, PolicyOutcome, Scope, SiteMap, Source, TaskId,
 };
 use camio_request::{DryRunEngine, FingerprintSpec, RequestEngine};
 use camio_store::{FindingStatus, ReviewTask, Store};
 use serde_json::{json, Value};
-use std::io::{BufRead, Write};
+use std::io::Write;
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const SERVER_NAME: &str = "camio";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// The MCP server state.
+/// Hard cap on one stdio JSON-RPC message (4 MiB), matching the web API's
+/// body bound so a hostile client cannot exhaust memory through either door.
+const MAX_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
+
 pub struct McpServer {
     profile: FingerprintProfile,
     scope: Scope,
@@ -45,6 +49,36 @@ struct OastState {
     collector: std::sync::Arc<camio_oast::Collector>,
     base: String,
     _handle: camio_oast::OastHandle,
+}
+
+/// Read a required string argument, rejecting wrong types instead of silently
+/// coercing (a numeric `method` must not become `GET`).
+fn string_arg(args: &Value, key: &str) -> Result<String, String> {
+    match args.get(key) {
+        None => Err(format!("missing `{key}`")),
+        Some(value) => value
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| format!("`{key}` must be a string")),
+    }
+}
+
+/// Read an optional boolean argument; presence with a non-boolean value is an
+/// error so `"confirm": "true"` cannot silently mean "not confirmed".
+fn bool_arg(args: &Value, key: &str) -> Result<bool, String> {
+    match args.get(key) {
+        None => Ok(false),
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| format!("`{key}` must be a boolean")),
+    }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 impl McpServer {
@@ -85,10 +119,35 @@ impl McpServer {
 
     /// Run the stdio JSON-RPC loop until EOF.
     pub fn serve_stdio(&mut self) -> std::io::Result<()> {
+        use std::io::BufRead as _;
         let stdin = std::io::stdin();
         let mut stdout = std::io::stdout();
-        for line in stdin.lock().lines() {
-            let line = line?;
+        let mut reader = stdin.lock();
+        let mut line = String::new();
+        loop {
+            line.clear();
+            // Bounded read: one JSON-RPC message per line, but a peer must not
+            // be able to exhaust memory with an unterminated line.
+            let read = std::io::Read::take(&mut reader, MAX_MESSAGE_BYTES as u64 + 1)
+                .read_line(&mut line)?;
+            if read == 0 {
+                return Ok(());
+            }
+            if line.len() > MAX_MESSAGE_BYTES {
+                let response = error_response(
+                    Value::Null,
+                    -32700,
+                    &format!("message exceeds the {MAX_MESSAGE_BYTES}-byte limit"),
+                )
+                .to_string();
+                writeln!(stdout, "{response}")?;
+                stdout.flush()?;
+                // Drain the rest of the oversized line so framing re-syncs.
+                line.clear();
+                let mut discard = String::new();
+                let _ = reader.read_line(&mut discard)?;
+                continue;
+            }
             if line.trim().is_empty() {
                 continue;
             }
@@ -97,7 +156,6 @@ impl McpServer {
                 stdout.flush()?;
             }
         }
-        Ok(())
     }
 
     /// Handle one line of input, returning the JSON response line (or `None` for
@@ -192,6 +250,7 @@ impl McpServer {
             "subfinder_enum" => self.tool_subfinder(&args),
             "findings_set_status" => self.tool_findings_set_status(&args),
             "saved_searches" => self.tool_saved_searches(),
+            "tasks_list" => self.tool_tasks_list(&args),
             other => Err(format!("unknown tool: {other}")),
         };
         match result {
@@ -201,10 +260,13 @@ impl McpServer {
     }
 
     fn tool_camioql_query(&self, args: &Value) -> Result<Value, String> {
-        let query = args.get("query").and_then(|q| q.as_str()).unwrap_or("");
+        let query = match args.get("query") {
+            None => String::new(),
+            Some(_) => string_arg(args, "query")?,
+        };
         let limit = args.get("limit").and_then(|l| l.as_u64()).unwrap_or(50) as usize;
         let compiled =
-            camio_core::Query::compile(query).map_err(|e| format!("invalid CamioQL: {e}"))?;
+            camio_core::Query::compile(&query).map_err(|e| format!("invalid CamioQL: {e}"))?;
         let store = self.store.as_ref().ok_or("no history store configured")?;
         let results = store
             .query(&compiled, limit)
@@ -273,6 +335,20 @@ impl McpServer {
             .collect::<Vec<_>>()))
     }
 
+    /// Durable background-task records (plan §4.2): the same rows `camio tasks`
+    /// prints and the web API serves, so a run that finished — or was
+    /// interrupted by a restart — is visible instead of vanishing.
+    fn tool_tasks_list(&self, args: &Value) -> Result<Value, String> {
+        let store = self.store.as_ref().ok_or("no store configured")?;
+        let limit = args
+            .get("limit")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(50)
+            .clamp(1, 200);
+        let rows = store.tasks(limit).map_err(|e| e.to_string())?;
+        Ok(json!({ "tasks": rows }))
+    }
+
     /// Lazily start a loopback OAST collector so `oast_*` tools share one.
     fn ensure_oast(&mut self) -> Result<&OastState, String> {
         if self.oast.is_none() {
@@ -307,11 +383,29 @@ impl McpServer {
 
     /// Enumerate subdomains of a domain with subfinder (external, passive OSINT).
     fn tool_subfinder(&self, args: &Value) -> Result<Value, String> {
-        let domain = args
-            .get("domain")
-            .and_then(|d| d.as_str())
-            .ok_or("missing `domain`")?
-            .to_string();
+        let domain = string_arg(args, "domain")?;
+        let confirm = bool_arg(args, "confirm").unwrap_or(false);
+        // Enumeration sends traffic about a domain, so it runs the same
+        // authorization path as every other network action (plan §16).
+        let decision = self.scope.decide(&HttpExchange::new(
+            HttpRequest::get(format!("https://{domain}/")),
+            Source::Mcp,
+        ));
+        match self
+            .policy
+            .gate_action_with(ActionClass::Active, &self.scope, decision, confirm)
+        {
+            PolicyOutcome::Deny(reason) => return Err(format!("refused: {reason}")),
+            PolicyOutcome::NeedsConfirmation(reason) => {
+                return Ok(json!({
+                    "status": "confirmation_required",
+                    "reason": reason,
+                    "scope": decision.as_str(),
+                    "note": "re-call subfinder_enum with confirm:true to enumerate",
+                }));
+            }
+            PolicyOutcome::Allow => {}
+        }
         let timeout_secs = args
             .get("timeout_secs")
             .and_then(serde_json::Value::as_u64)
@@ -360,17 +454,14 @@ impl McpServer {
     }
 
     fn tool_send_request(&mut self, args: &Value) -> Result<Value, String> {
-        let url = args
-            .get("url")
-            .and_then(|u| u.as_str())
-            .ok_or("missing `url`")?;
-        let method = args.get("method").and_then(|m| m.as_str()).unwrap_or("GET");
-        let confirm = args
-            .get("confirm")
-            .and_then(|c| c.as_bool())
-            .unwrap_or(false);
+        let url = string_arg(args, "url")?;
+        let method = match args.get("method") {
+            None => "GET".to_string(),
+            Some(_) => string_arg(args, "method")?,
+        };
+        let confirm = bool_arg(args, "confirm")?;
 
-        let mut req = HttpRequest::get(url);
+        let mut req = HttpRequest::get(&url);
         req.method = method.to_string();
         if let Some(headers) = args.get("headers") {
             apply_headers(&mut req, headers);
@@ -404,8 +495,11 @@ impl McpServer {
                     .engine
                     .send(req, Source::Mcp)
                     .map_err(|e| format!("send failed: {e}"))?;
+                // A failed persist must be distinguishable from "no store":
+                // silently dropping the exchange would report a successful send
+                // of traffic that is no longer recoverable.
                 let stored_id = match self.store.as_mut() {
-                    Some(store) => store.insert(&ex).ok().map(|id| id.0),
+                    Some(store) => Some(store.insert(&ex).map_err(|e| e.to_string())?.0),
                     None => None,
                 };
                 let mut summary = exchange_summary(&ex);
@@ -449,11 +543,14 @@ impl McpServer {
     /// Run the passive scanner over stored history matching an optional CamioQL
     /// query, optionally persisting findings.
     fn tool_scan(&mut self, args: &Value) -> Result<Value, String> {
-        let query = args.get("query").and_then(|q| q.as_str()).unwrap_or("");
+        let query = match args.get("query") {
+            None => String::new(),
+            Some(_) => string_arg(args, "query")?,
+        };
         let limit = args.get("limit").and_then(|l| l.as_u64()).unwrap_or(1000) as usize;
         let save = args.get("save").and_then(|s| s.as_bool()).unwrap_or(false);
         let compiled =
-            camio_core::Query::compile(query).map_err(|e| format!("invalid CamioQL: {e}"))?;
+            camio_core::Query::compile(&query).map_err(|e| format!("invalid CamioQL: {e}"))?;
         let store = self.store.as_mut().ok_or("no history store configured")?;
         let exchanges = store
             .query_with_bodies(&compiled, limit)
@@ -683,10 +780,13 @@ impl McpServer {
 
     /// Build a site map tree from stored history (plan §7.2 Discover).
     fn tool_sitemap(&self, args: &Value) -> Result<Value, String> {
-        let query = args.get("query").and_then(|q| q.as_str()).unwrap_or("");
+        let query = match args.get("query") {
+            None => String::new(),
+            Some(_) => string_arg(args, "query")?,
+        };
         let limit = args.get("limit").and_then(|l| l.as_u64()).unwrap_or(5000) as usize;
         let compiled =
-            camio_core::Query::compile(query).map_err(|e| format!("invalid CamioQL: {e}"))?;
+            camio_core::Query::compile(&query).map_err(|e| format!("invalid CamioQL: {e}"))?;
         let store = self.store.as_ref().ok_or("no history store configured")?;
         let exchanges = store.query(&compiled, limit).map_err(|e| e.to_string())?;
         let map = SiteMap::build(&exchanges);
@@ -709,6 +809,7 @@ impl McpServer {
         )?;
         let sets = resolve_payload_sets(args.get("payloads"))?;
         let budget = args.get("budget").and_then(|b| b.as_u64());
+        let target = req.url.trim().to_string();
         let campaign = Campaign {
             base: req,
             attack,
@@ -716,12 +817,20 @@ impl McpServer {
             budget,
         };
         let plan = camio_automate::plan(&campaign).map_err(|e| e.to_string())?;
+        // The plan hash an operator must approve before an ACTIVE run (plan
+        // §4.3): identical in meaning to the CLI's preview hash.
+        let summary = PlanSummary::new(ActionClass::Active, vec![target]).with_policy(&self.policy);
+        let summary = match budget {
+            Some(b) => summary.with_max_requests(b),
+            None => summary,
+        };
         Ok(json!({
             "attack": attack.as_str(),
             "num_positions": plan.num_positions,
             "projected_requests": plan.projected_requests,
             "within_budget": plan.within_budget,
-            "note": "planning only — no requests sent. Execute via send_request (policy-gated).",
+            "plan_hash": summary.plan_hash(),
+            "note": "planning only — no requests sent. An ACTIVE run must bind to this plan_hash.",
             "positions": plan
                 .positions
                 .iter()
@@ -736,17 +845,19 @@ impl McpServer {
             .get("path")
             .and_then(|p| p.as_str())
             .ok_or("missing `path`")?;
-        let save = args.get("save").and_then(|s| s.as_bool()).unwrap_or(true);
+        let save = bool_arg(args, "save")?;
         let data = std::fs::read(path).map_err(|e| format!("reading {path}: {e}"))?;
         let result = camio_import::import_bytes(&data).map_err(|e| e.to_string())?;
         let mut stored = 0u64;
         if save {
-            if let Some(store) = self.store.as_mut() {
-                for ex in &result.exchanges {
-                    if store.insert(ex).is_ok() {
-                        stored += 1;
-                    }
-                }
+            // Storing is only possible with a configured store — report the
+            // gap instead of answering `stored: 0` as if it succeeded.
+            let store = self.store.as_mut().ok_or("no history store configured")?;
+            for ex in &result.exchanges {
+                store
+                    .insert(ex)
+                    .map_err(|e| format!("storing imported exchange: {e}"))?;
+                stored += 1;
             }
         }
         Ok(json!({
@@ -776,14 +887,30 @@ impl McpServer {
     /// (plan §16); the sender re-checks scope on every probe.
     fn tool_active_scan(&mut self, args: &Value) -> Result<Value, String> {
         let base = request_from_args(args)?;
-        let confirm = args
-            .get("confirm")
-            .and_then(|c| c.as_bool())
-            .unwrap_or(false);
+        let confirm = bool_arg(args, "confirm")?;
+        // Approval binding (plan §4.3): an operator-approved plan hash must
+        // cover this scan, exactly like the CLI's `--approve`.
+        if let Some(approved) = args.get("approval").and_then(Value::as_str) {
+            let summary = PlanSummary::new(ActionClass::Active, vec![base.url.trim().to_string()])
+                .with_policy(&self.policy);
+            let approval = Approval::bind(summary.clone(), now_ms()).granted_by("camio mcp");
+            if approved.trim() != approval.plan_hash {
+                return Err(format!(
+                    "this approval does not cover the current plan (approved {approved}, plan is {})",
+                    approval.plan_hash
+                ));
+            }
+            if let Err(reason) = approval.allows(&summary, now_ms()) {
+                return Err(format!("approval does not cover this plan: {reason}"));
+            }
+        }
         let decision = self
             .scope
             .decide(&HttpExchange::new(base.clone(), Source::Mcp));
-        match self.policy.gate(ActionClass::Active, decision, confirm) {
+        match self
+            .policy
+            .gate_action_with(ActionClass::Active, &self.scope, decision, confirm)
+        {
             PolicyOutcome::Deny(reason) => return Err(format!("refused: {reason}")),
             PolicyOutcome::NeedsConfirmation(reason) => {
                 return Ok(json!({
@@ -798,16 +925,35 @@ impl McpServer {
         let findings = {
             let engine = self.engine.as_ref();
             let scope = &self.scope;
+            let send_errors: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
             let send = |req: HttpRequest| -> Option<HttpExchange> {
                 if !scope
                     .decide(&HttpExchange::new(req.clone(), Source::Mcp))
                     .is_sendable()
                 {
+                    send_errors
+                        .borrow_mut()
+                        .push("request refused by scope/policy".to_string());
                     return None;
                 }
-                engine.send(req, Source::Mcp).ok()
+                match engine.send(req, Source::Mcp) {
+                    Ok(ex) => Some(ex),
+                    Err(e) => {
+                        send_errors.borrow_mut().push(e.to_string());
+                        None
+                    }
+                }
             };
-            camio_active::run_active(&base, &send)
+            let found = camio_active::run_active(&base, &send);
+            // A run where nothing could be sent is not a clean scan (plan §4.2:
+            // record outcomes distinctly instead of reporting success).
+            if found.is_empty() && !send_errors.borrow().is_empty() {
+                return Err(format!(
+                    "no probe could be sent: {}",
+                    send_errors.borrow().join("; ")
+                ));
+            }
+            found
         };
         let mut saved = 0u64;
         if let Some(store) = self.store.as_mut() {
@@ -1024,296 +1170,308 @@ fn review_summary(review: &ReviewTask) -> Value {
 
 fn tool_defs() -> Value {
     json!([
-        {
-            "name": "camioql_query",
-            "description": "Run a CamioQL (HTTPQL-compatible) query over captured history and return matching exchanges.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "query": { "type": "string", "description": "CamioQL, e.g. resp.code.gte:500 AND req.host.cont:\"example\"" },
-                    "limit": { "type": "integer", "description": "Max results (default 50)" }
-                },
-                "required": ["query"]
-            }
-        },
-        {
-            "name": "history_recent",
-            "description": "Return the most recent captured exchanges.",
-            "inputSchema": { "type": "object", "properties": { "limit": { "type": "integer" } } }
-        },
-        {
-            "name": "fingerprint_status",
-            "description": "Report the active fingerprint profile, the matched-engine target, and whether traffic is fingerprint-matched. Never claims invisibility.",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
-        {
-            "name": "scope_decide",
-            "description": "Return the scope decision (in_scope / out_of_scope / blocked) for a URL, via the one shared scope path.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "url": { "type": "string" } },
-                "required": ["url"]
-            }
-        },
-        {
-            "name": "findings_list",
-            "description": "List recorded findings, most severe first.",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
-        {
-            "name": "send_request",
-            "description": "Send a request through the fingerprint-matched engine. Policy-gated: out-of-scope/blocked destinations are refused; in-scope sends require confirm:true (a dry call returns a preview with the scope decision and fingerprint).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "url": { "type": "string" },
-                    "method": { "type": "string", "description": "default GET" },
-                    "headers": { "type": "object", "description": "name:value map" },
-                    "body": { "type": "string" },
-                    "confirm": { "type": "boolean", "description": "must be true to actually send" }
-                },
-                "required": ["url"]
-            }
-        },
-        {
-            "name": "convert",
-            "description": "Apply a Convert/Decoder pipeline (base64, url, html, hex, gzip/deflate, md5/sha1/sha256/sha512) to a string. Steps run left to right.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "input": { "type": "string" },
-                    "steps": { "type": "array", "items": { "type": "string" }, "description": "e.g. [\"base64\",\"gzip\"] or a comma string \"base64,hex\"" }
-                },
-                "required": ["input", "steps"]
-            }
-        },
-        {
-            "name": "scan",
-            "description": "Run passive security checks over stored history matching an optional CamioQL query; returns findings. Set save:true to persist them.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "query": { "type": "string", "description": "CamioQL filter; empty = all history" },
-                    "limit": { "type": "integer" },
-                    "save": { "type": "boolean", "description": "persist findings to the findings store" }
+            {
+                "name": "camioql_query",
+                "description": "Run a CamioQL (HTTPQL-compatible) query over captured history and return matching exchanges.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "CamioQL, e.g. resp.code.gte:500 AND req.host.cont:\"example\"" },
+                        "limit": { "type": "integer", "description": "Max results (default 50)" }
+                    },
+                    "required": ["query"]
                 }
-            }
-        },
-        {
-            "name": "sequencer_analyze",
-            "description": "Estimate the randomness/entropy of a set of tokens (session ids, CSRF tokens). Statistical estimate, not a cryptographic proof.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "tokens": { "type": "array", "items": { "type": "string" } } },
-                "required": ["tokens"]
-            }
-        },
-        {
-            "name": "discover_inputs",
-            "description": "Enumerate the injectable inputs (query/body params, cookies, notable headers, JSON fields) of a request.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "url": { "type": "string" },
-                    "method": { "type": "string" },
-                    "headers": { "type": "object" },
-                    "body": { "type": "string" }
+            },
+            {
+                "name": "history_recent",
+                "description": "Return the most recent captured exchanges.",
+                "inputSchema": { "type": "object", "properties": { "limit": { "type": "integer" } } }
+            },
+            {
+                "name": "fingerprint_status",
+                "description": "Report the active fingerprint profile, the matched-engine target, and whether traffic is fingerprint-matched. Never claims invisibility.",
+                "inputSchema": { "type": "object", "properties": {} }
+            },
+            {
+                "name": "scope_decide",
+                "description": "Return the scope decision (in_scope / out_of_scope / blocked) for a URL, via the one shared scope path.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": { "url": { "type": "string" } },
+                    "required": ["url"]
+                }
+            },
+            {
+                "name": "findings_list",
+                "description": "List recorded findings, most severe first.",
+                "inputSchema": { "type": "object", "properties": {} }
+            },
+            {
+                "name": "send_request",
+                "description": "Send a request through the fingerprint-matched engine. Policy-gated: out-of-scope/blocked destinations are refused; in-scope sends require confirm:true (a dry call returns a preview with the scope decision and fingerprint).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "url": { "type": "string" },
+                        "method": { "type": "string", "description": "default GET" },
+                        "headers": { "type": "object", "description": "name:value map" },
+                        "body": { "type": "string" },
+                        "confirm": { "type": "boolean", "description": "must be true to actually send" }
+                    },
+                    "required": ["url"]
+                }
+            },
+            {
+                "name": "convert",
+                "description": "Apply a Convert/Decoder pipeline (base64, url, html, hex, gzip/deflate, md5/sha1/sha256/sha512) to a string. Steps run left to right.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "input": { "type": "string" },
+                        "steps": { "type": "array", "items": { "type": "string" }, "description": "e.g. [\"base64\",\"gzip\"] or a comma string \"base64,hex\"" }
+                    },
+                    "required": ["input", "steps"]
+                }
+            },
+            {
+                "name": "scan",
+                "description": "Run passive security checks over stored history matching an optional CamioQL query; returns findings. Set save:true to persist them.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "CamioQL filter; empty = all history" },
+                        "limit": { "type": "integer" },
+                        "save": { "type": "boolean", "description": "persist findings to the findings store" }
+                    }
+                }
+            },
+            {
+                "name": "sequencer_analyze",
+                "description": "Estimate the randomness/entropy of a set of tokens (session ids, CSRF tokens). Statistical estimate, not a cryptographic proof.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": { "tokens": { "type": "array", "items": { "type": "string" } } },
+                    "required": ["tokens"]
+                }
+            },
+            {
+                "name": "discover_inputs",
+                "description": "Enumerate the injectable inputs (query/body params, cookies, notable headers, JSON fields) of a request.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "url": { "type": "string" },
+                        "method": { "type": "string" },
+                        "headers": { "type": "object" },
+                        "body": { "type": "string" }
+                    },
+                    "required": ["url"]
+                }
+            },
+            {
+                "name": "sitemap",
+                "description": "Build a site map tree (origin -> paths, with methods and statuses) from stored history matching an optional CamioQL query.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": { "query": { "type": "string" }, "limit": { "type": "integer" } }
+                }
+            },
+            {
+                "name": "fuzz_plan",
+                "description": "Plan an Intruder-style campaign: report the projected request count and insertion points for a §-marked request. Read-only; nothing is sent.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "url": { "type": "string", "description": "URL; mark insertion points with §…§" },
+                        "method": { "type": "string" },
+                        "headers": { "type": "object" },
+                        "body": { "type": "string" },
+                        "attack": { "type": "string", "description": "sniper | battering_ram | pitchfork | cluster_bomb" },
+                        "payloads": { "type": "array", "items": { "type": "string" }, "description": "built-in pack names (see payloads_list)" },
+                        "budget": { "type": "integer" }
+                    },
+                    "required": ["url", "payloads"]
+                }
+            },
+            {
+                "name": "import_file",
+                "description": "Import a Burp items XML export or a HAR archive from a local path into history. save:true (default) persists the exchanges.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": { "path": { "type": "string" }, "save": { "type": "boolean" } },
+                    "required": ["path"]
+                }
+            },
+            {
+                "name": "payloads_list",
+                "description": "List the built-in payload packs and their sizes.",
+                "inputSchema": { "type": "object", "properties": {} }
+            },
+            {
+                "name": "active_scan",
+                "description": "Opt-in ACTIVE scan (reflected XSS, error-based SQLi, open redirect) against a target. Sends probes via the matched engine. Policy-gated: out-of-scope/blocked refused; requires confirm:true (a dry call returns the scope decision).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "url": { "type": "string" },
+                        "method": { "type": "string" },
+                        "headers": { "type": "object" },
+                        "body": { "type": "string" },
+                        "confirm": { "type": "boolean", "description": "must be true to run the active probes" }
+                    },
+                    "required": ["url"]
+                }
+            },
+            {
+                "name": "analyze_js",
+                "description": "Passively extract hard-coded secrets (redacted) and referenced endpoints from a JavaScript (or any) body.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": { "body": { "type": "string" } },
+                    "required": ["body"]
+                }
+            },
+            {
+                "name": "oast_new_token",
+                "description": "Mint a correlated OAST token and callback URLs (a local Collaborator-style collector starts on first use). Plant the URL in a payload, then poll oast_interactions. Loopback-bound: only callbacks that can reach this host are seen.",
+                "inputSchema": { "type": "object", "properties": {} }
+            },
+            {
+                "name": "oast_interactions",
+                "description": "List out-of-band interactions the OAST collector recorded, optionally filtered to one token — evidence of blind SSRF/injection callbacks.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": { "token": { "type": "string", "description": "Correlation token from oast_new_token; omit for all interactions." } }
+                }
+            },
+            {
+                "name": "subfinder_enum",
+                "description": "Enumerate subdomains of a domain with subfinder (external, passive OSINT). Bounded run; returns the unique host list. Requires subfinder on PATH.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "domain": { "type": "string", "description": "Root domain, e.g. example.com" },
+                        "all_sources": { "type": "boolean" },
+                        "timeout_secs": { "type": "integer", "minimum": 5, "maximum": 180 }
+                    },
+                    "required": ["domain"]
+                }
+            },
+            {
+                "name": "findings_set_status",
+                "description": "Triage a stored finding: set its lifecycle status (open|confirmed|false_positive|fixed|ignored) with an optional note.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "finding_id": { "type": "integer" },
+                        "status": { "type": "string" },
+                        "note": { "type": "string" }
+                    },
+                    "required": ["finding_id", "status"]
+                }
+            },
+            {
+                    "name": "tasks_list",
+                    "description": "List durable background-task records (state, progress, outcome); \
+                                   read-only — restart reconciliation happens at startup or via \
+                                   `camio tasks --reconcile`.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 }
+                        }
+                    }
                 },
-                "required": ["url"]
+    {
+                "name": "saved_searches",
+                "description": "List saved CamioQL searches (name + query) stored in the workspace.",
+                "inputSchema": { "type": "object", "properties": {} }
+            },
+            {
+                "name": "review_start",
+                "description": "Start a background passive review of previously stored traffic. Returns a task ID.",
+                "inputSchema": { "type": "object", "properties": {
+                    "query": { "type": "string", "maxLength": 1024 },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 1000 },
+                    "save": { "type": "boolean" }
+                } }
+            },
+            {
+                "name": "review_tasks",
+                "description": "List recent passive review tasks.",
+                "inputSchema": { "type": "object", "properties": {} }
+            },
+            {
+                "name": "review_workflows",
+                "description": "List the current versions of saved offline review workflows.",
+                "inputSchema": { "type": "object", "properties": {} }
+            },
+            {
+                "name": "review_workflow_run",
+                "description": "Run an exact saved workflow version on stored exchanges or an explicitly supplied capture archive. Returns a passive review task ID.",
+                "inputSchema": { "type": "object", "properties": {
+                    "id": { "type": "integer", "minimum": 1 }, "version": { "type": "integer", "minimum": 1 },
+                    "archive": { "type": "object", "properties": {
+                        "name": { "type": "string", "maxLength": 512 },
+                        "content": { "type": "string", "maxLength": 4194304, "description": "Content of a recorded HAR or Burp items XML archive" }
+                    }, "required": ["name", "content"], "additionalProperties": false }
+                }, "required": ["id", "version"], "additionalProperties": false }
+            },
+            {
+                "name": "review_task",
+                "description": "Read progress and paginated evidence references from a passive review.",
+                "inputSchema": { "type": "object", "properties": {
+                    "id": { "type": "integer", "minimum": 1 }, "offset": { "type": "integer", "minimum": 0 }
+                }, "required": ["id"] }
+            },
+            {
+                "name": "review_cancel",
+                "description": "Stop a queued or running passive review while retaining committed results.",
+                "inputSchema": { "type": "object", "properties": {
+                    "id": { "type": "integer", "minimum": 1 }
+                }, "required": ["id"] }
+            },
+            {
+                "name": "findings_report",
+                "description": "Export finding statuses and evidence references without free text or captured messages.",
+                "inputSchema": { "type": "object", "properties": {} }
+            },
+            {
+                "name": "review_report",
+                "description": "Export a finished review task's redacted results and capture provenance.",
+                "inputSchema": { "type": "object", "properties": {
+                    "id": { "type": "integer", "minimum": 1 }
+                }, "required": ["id"], "additionalProperties": false }
+            },
+            {
+                "name": "review_evidence_bundle",
+                "description": "Export checksummed, redacted evidence linked to a finished review task.",
+                "inputSchema": { "type": "object", "properties": {
+                    "id": { "type": "integer", "minimum": 1 }
+                }, "required": ["id"], "additionalProperties": false }
+            },
+            {
+                "name": "inventory_list",
+                "description": "List normalized origins recorded in local captures and imported observations.",
+                "inputSchema": { "type": "object", "properties": {
+                    "filter": { "type": "string", "maxLength": 256 }, "after": { "type": "string" }
+                }, "additionalProperties": false }
+            },
+            {
+                "name": "inventory_asset",
+                "description": "Read a recorded origin's endpoints and local notes.",
+                "inputSchema": { "type": "object", "properties": {
+                    "origin": { "type": "string" }, "after": { "type": "string" }
+                }, "required": ["origin"], "additionalProperties": false }
+            },
+            {
+                "name": "inventory_evidence",
+                "description": "Read local evidence pointers for a recorded endpoint.",
+                "inputSchema": { "type": "object", "properties": {
+                    "location": { "type": "string" }, "before": { "type": "integer" }
+                }, "required": ["location"], "additionalProperties": false }
             }
-        },
-        {
-            "name": "sitemap",
-            "description": "Build a site map tree (origin -> paths, with methods and statuses) from stored history matching an optional CamioQL query.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "query": { "type": "string" }, "limit": { "type": "integer" } }
-            }
-        },
-        {
-            "name": "fuzz_plan",
-            "description": "Plan an Intruder-style campaign: report the projected request count and insertion points for a §-marked request. Read-only; nothing is sent.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "url": { "type": "string", "description": "URL; mark insertion points with §…§" },
-                    "method": { "type": "string" },
-                    "headers": { "type": "object" },
-                    "body": { "type": "string" },
-                    "attack": { "type": "string", "description": "sniper | battering_ram | pitchfork | cluster_bomb" },
-                    "payloads": { "type": "array", "items": { "type": "string" }, "description": "built-in pack names (see payloads_list)" },
-                    "budget": { "type": "integer" }
-                },
-                "required": ["url", "payloads"]
-            }
-        },
-        {
-            "name": "import_file",
-            "description": "Import a Burp items XML export or a HAR archive from a local path into history. save:true (default) persists the exchanges.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "path": { "type": "string" }, "save": { "type": "boolean" } },
-                "required": ["path"]
-            }
-        },
-        {
-            "name": "payloads_list",
-            "description": "List the built-in payload packs and their sizes.",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
-        {
-            "name": "active_scan",
-            "description": "Opt-in ACTIVE scan (reflected XSS, error-based SQLi, open redirect) against a target. Sends probes via the matched engine. Policy-gated: out-of-scope/blocked refused; requires confirm:true (a dry call returns the scope decision).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "url": { "type": "string" },
-                    "method": { "type": "string" },
-                    "headers": { "type": "object" },
-                    "body": { "type": "string" },
-                    "confirm": { "type": "boolean", "description": "must be true to run the active probes" }
-                },
-                "required": ["url"]
-            }
-        },
-        {
-            "name": "analyze_js",
-            "description": "Passively extract hard-coded secrets (redacted) and referenced endpoints from a JavaScript (or any) body.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "body": { "type": "string" } },
-                "required": ["body"]
-            }
-        },
-        {
-            "name": "oast_new_token",
-            "description": "Mint a correlated OAST token and callback URLs (a local Collaborator-style collector starts on first use). Plant the URL in a payload, then poll oast_interactions. Loopback-bound: only callbacks that can reach this host are seen.",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
-        {
-            "name": "oast_interactions",
-            "description": "List out-of-band interactions the OAST collector recorded, optionally filtered to one token — evidence of blind SSRF/injection callbacks.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "token": { "type": "string", "description": "Correlation token from oast_new_token; omit for all interactions." } }
-            }
-        },
-        {
-            "name": "subfinder_enum",
-            "description": "Enumerate subdomains of a domain with subfinder (external, passive OSINT). Bounded run; returns the unique host list. Requires subfinder on PATH.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "domain": { "type": "string", "description": "Root domain, e.g. example.com" },
-                    "all_sources": { "type": "boolean" },
-                    "timeout_secs": { "type": "integer", "minimum": 5, "maximum": 180 }
-                },
-                "required": ["domain"]
-            }
-        },
-        {
-            "name": "findings_set_status",
-            "description": "Triage a stored finding: set its lifecycle status (open|confirmed|false_positive|fixed|ignored) with an optional note.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "finding_id": { "type": "integer" },
-                    "status": { "type": "string" },
-                    "note": { "type": "string" }
-                },
-                "required": ["finding_id", "status"]
-            }
-        },
-        {
-            "name": "saved_searches",
-            "description": "List saved CamioQL searches (name + query) stored in the workspace.",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
-        {
-            "name": "review_start",
-            "description": "Start a background passive review of previously stored traffic. Returns a task ID.",
-            "inputSchema": { "type": "object", "properties": {
-                "query": { "type": "string", "maxLength": 1024 },
-                "limit": { "type": "integer", "minimum": 1, "maximum": 1000 },
-                "save": { "type": "boolean" }
-            } }
-        },
-        {
-            "name": "review_tasks",
-            "description": "List recent passive review tasks.",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
-        {
-            "name": "review_workflows",
-            "description": "List the current versions of saved offline review workflows.",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
-        {
-            "name": "review_workflow_run",
-            "description": "Run an exact saved workflow version on stored exchanges or an explicitly supplied capture archive. Returns a passive review task ID.",
-            "inputSchema": { "type": "object", "properties": {
-                "id": { "type": "integer", "minimum": 1 }, "version": { "type": "integer", "minimum": 1 },
-                "archive": { "type": "object", "properties": {
-                    "name": { "type": "string", "maxLength": 512 },
-                    "content": { "type": "string", "maxLength": 4194304, "description": "Content of a recorded HAR or Burp items XML archive" }
-                }, "required": ["name", "content"], "additionalProperties": false }
-            }, "required": ["id", "version"], "additionalProperties": false }
-        },
-        {
-            "name": "review_task",
-            "description": "Read progress and paginated evidence references from a passive review.",
-            "inputSchema": { "type": "object", "properties": {
-                "id": { "type": "integer", "minimum": 1 }, "offset": { "type": "integer", "minimum": 0 }
-            }, "required": ["id"] }
-        },
-        {
-            "name": "review_cancel",
-            "description": "Stop a queued or running passive review while retaining committed results.",
-            "inputSchema": { "type": "object", "properties": {
-                "id": { "type": "integer", "minimum": 1 }
-            }, "required": ["id"] }
-        },
-        {
-            "name": "findings_report",
-            "description": "Export finding statuses and evidence references without free text or captured messages.",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
-        {
-            "name": "review_report",
-            "description": "Export a finished review task's redacted results and capture provenance.",
-            "inputSchema": { "type": "object", "properties": {
-                "id": { "type": "integer", "minimum": 1 }
-            }, "required": ["id"], "additionalProperties": false }
-        },
-        {
-            "name": "review_evidence_bundle",
-            "description": "Export checksummed, redacted evidence linked to a finished review task.",
-            "inputSchema": { "type": "object", "properties": {
-                "id": { "type": "integer", "minimum": 1 }
-            }, "required": ["id"], "additionalProperties": false }
-        },
-        {
-            "name": "inventory_list",
-            "description": "List normalized origins recorded in local captures and imported observations.",
-            "inputSchema": { "type": "object", "properties": {
-                "filter": { "type": "string", "maxLength": 256 }, "after": { "type": "string" }
-            }, "additionalProperties": false }
-        },
-        {
-            "name": "inventory_asset",
-            "description": "Read a recorded origin's endpoints and local notes.",
-            "inputSchema": { "type": "object", "properties": {
-                "origin": { "type": "string" }, "after": { "type": "string" }
-            }, "required": ["origin"], "additionalProperties": false }
-        },
-        {
-            "name": "inventory_evidence",
-            "description": "Read local evidence pointers for a recorded endpoint.",
-            "inputSchema": { "type": "object", "properties": {
-                "location": { "type": "string" }, "before": { "type": "integer" }
-            }, "required": ["location"], "additionalProperties": false }
-        }
-    ])
+        ])
 }
 
 fn resource_defs() -> Value {
@@ -1373,7 +1531,7 @@ mod tests {
 
     #[test]
     fn oast_tools_mint_record_and_correlate() {
-        use std::io::{Read, Write};
+        use std::io::Write;
         let mut s = server();
 
         // Mint a token + callback URL.
@@ -1395,6 +1553,7 @@ mod tests {
                 .as_bytes(),
         )
         .unwrap();
+        use std::io::Read as _;
         let mut buf = Vec::new();
         let _ = c.read_to_end(&mut buf);
 

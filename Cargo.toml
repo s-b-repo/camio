@@ -27,7 +27,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.13"
+version = "0.4.0"
 edition = "2021"
 # Provisional: Camio builds on Camoufox (MPL-2.0). Final license is decided in
 # plan.md §12 after full dependency review.
@@ -72,8 +72,12 @@ time = { version = "0.3", default-features = false, features = ["std"] }
 # Reused by camio-ai for OpenAI-compatible API calls (NVIDIA NIM, OpenAI,
 # Ollama, …) — the same BoringSSL client the matched engine uses, so no second
 # TLS stack is added.
-wreq = { version = "0.16.3", features = ["gzip", "brotli", "deflate", "zstd"] }
+# `stream` enables `Response::bytes_stream()`, used by the request engine and
+# the AI client to read response bodies under a hard size cap.
+wreq = { version = "0.16.3", features = ["gzip", "brotli", "deflate", "zstd", "stream"] }
 tokio = { version = "1.43", features = ["rt", "net", "time"] }
+# Stream driver for bounded response reads (already in the tree via wreq).
+futures-util = "0.3"
 
 # Internal crates (path deps, versioned together). The explicit `version` keeps
 # them from being treated as wildcard (`*`) dependencies by cargo-deny and is

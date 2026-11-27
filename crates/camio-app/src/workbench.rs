@@ -2,7 +2,7 @@ use super::{CamioApp, Output, Surface};
 use camio_core::{ExchangeId, Finding, FindingId, Query, TaskId, TaskState};
 use camio_store::{
     ArtifactFormat, ArtifactSummary, ExchangePreview, FindingReview, HistoryPage, Observation,
-    ReportFormat, ReviewState, ReviewTask, SavedExchange, SavedQuery, WorkspaceSummary,
+    ReportFormat, ReviewState, ReviewTask, SavedExchange, SavedQuery, TaskRow, WorkspaceSummary,
     ARTIFACT_BYTES,
 };
 use egui::{Color32, RichText, Stroke};
@@ -108,6 +108,8 @@ pub(super) struct Workbench {
     task_offset: usize,
     task_findings: Vec<Finding>,
     tasks_checked: Option<Instant>,
+    /// Durable background-task records (plan §4.2), refreshed with the rest.
+    task_rows: Vec<TaskRow>,
     artifact_format: ArtifactFormat,
     artifacts: Vec<ArtifactSummary>,
     artifact_before: Option<i64>,
@@ -145,6 +147,7 @@ impl Default for Workbench {
             task_offset: 0,
             task_findings: Vec::new(),
             tasks_checked: None,
+            task_rows: Vec::new(),
             artifact_format: ArtifactFormat::Httpx,
             artifacts: Vec::new(),
             artifact_before: None,
@@ -288,7 +291,20 @@ impl CamioApp {
                             ui.separator();
                             ui.label(format!("Profile    {}", self.cfg.profile.name));
                             ui.label(format!("Engine     {}", self.engine.label()));
-                            ui.label("Measured parity    Unverified");
+                            // The transport status is measured, not asserted: a
+                            // dry-run engine says so, and an approximating
+                            // preset is labelled "approximated", not "matched".
+                            let parity = if self.engine.is_fingerprint_matched() {
+                                RichText::new("Measured parity    matched to the pinned build")
+                                    .color(egui::Color32::from_rgb(120, 200, 120))
+                            } else {
+                                RichText::new("Measured parity    NOT matched — see the note below")
+                                    .color(egui::Color32::from_rgb(230, 160, 120))
+                            };
+                            ui.label(parity);
+                            if let Some(note) = self.engine.parity_note() {
+                                ui.label(RichText::new(note).small().weak());
+                            }
                         });
                 });
             });
@@ -802,9 +818,12 @@ impl CamioApp {
                     .map_err(message)?,
                 None => Vec::new(),
             };
-            Ok((tasks, selection, findings))
+            // Durable background-task records (plan §4.2), which survive a
+            // restart: interrupted runs stay visible instead of vanishing.
+            let task_rows = store.tasks(50).map_err(message)?;
+            Ok((tasks, selection, findings, task_rows))
         }) {
-            Ok((tasks, selection, findings)) => {
+            Ok((tasks, selection, findings, task_rows)) => {
                 let new_capture = selection
                     .and_then(|id| tasks.iter().find(|task| task.task.id == id))
                     .and_then(|task| task.archive.as_ref())
@@ -823,6 +842,7 @@ impl CamioApp {
                 self.workbench.review_tasks = tasks;
                 self.workbench.review_selection = selection;
                 self.workbench.task_findings = findings;
+                self.workbench.task_rows = task_rows;
             }
             Err(error) => self.out = Output::Error(error),
         }
@@ -874,6 +894,48 @@ impl CamioApp {
             if clear {
                 self.tasks.clear_finished();
             }
+            ui.separator();
+        }
+
+        // Durable records from earlier runs (plan §4.2): background tasks that
+        // finished — or were interrupted by a restart — stay visible here.
+        let live_ids: std::collections::HashSet<i64> =
+            self.tasks.list().into_iter().map(|t| t.id.0).collect();
+        let past: Vec<&TaskRow> = self
+            .workbench
+            .task_rows
+            .iter()
+            .filter(|row| !live_ids.contains(&row.id))
+            .collect();
+        if !past.is_empty() {
+            ui.heading("Earlier background tasks");
+            egui::ScrollArea::vertical()
+                .id_salt("bg-tasks-past")
+                .max_height(140.0)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    for row in past {
+                        ui.horizontal(|ui| {
+                            ui.monospace(format!("#{}", row.id));
+                            ui.label(&row.kind);
+                            ui.label(
+                                egui::RichText::new(row.state.as_str())
+                                    .color(task_state_color(row.state)),
+                            );
+                            let line = row
+                                .result
+                                .as_deref()
+                                .or(row.error.as_deref())
+                                .unwrap_or(&row.message);
+                            if !line.is_empty() {
+                                ui.label(egui::RichText::new(line).weak());
+                            }
+                            if let Some(outcome) = row.outcome.as_deref() {
+                                ui.label(egui::RichText::new(outcome).weak().small());
+                            }
+                        });
+                    }
+                });
             ui.separator();
         }
 
@@ -1804,8 +1866,9 @@ fn task_state_color(state: camio_core::TaskState) -> egui::Color32 {
     match state {
         TaskState::Completed => egui::Color32::from_rgb(120, 200, 120),
         TaskState::Failed | TaskState::Interrupted => egui::Color32::from_rgb(230, 120, 120),
-        TaskState::Cancelled => egui::Color32::from_rgb(200, 180, 120),
+        TaskState::Cancelled | TaskState::Cancelling => egui::Color32::from_rgb(200, 180, 120),
         TaskState::Running => egui::Color32::from_rgb(120, 170, 240),
-        TaskState::Pending | TaskState::Paused => egui::Color32::GRAY,
+        TaskState::AwaitingApproval => egui::Color32::from_rgb(200, 160, 240),
+        TaskState::Pending | TaskState::Queued | TaskState::Paused => egui::Color32::GRAY,
     }
 }

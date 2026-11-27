@@ -66,12 +66,14 @@ impl LocalAccess {
             .authority
             .strip_suffix(":80")
             .unwrap_or(&self.authority);
-        if host != expected {
+        // Hostnames are case-insensitive; compare normalized so `LOCALHOST:8787`
+        // is not a confusing rejection.
+        if !host.eq_ignore_ascii_case(expected) {
             return false;
         }
         let origin = self.origin.strip_suffix(":80").unwrap_or(&self.origin);
         let origin_matches = match single_header(headers, "Origin") {
-            Ok(Some(value)) => value == origin,
+            Ok(Some(value)) => value.eq_ignore_ascii_case(origin),
             Ok(None) => true,
             Err(()) => false,
         };
@@ -86,9 +88,14 @@ impl LocalAccess {
         let Ok(Some(value)) = single_header(headers, "Authorization") else {
             return false;
         };
-        let Some(key) = value.strip_prefix("Bearer ") else {
+        // The auth scheme is case-insensitive (RFC 7235): `bearer <token>` is
+        // the same credentials as `Bearer <token>`.
+        let Some((scheme, key)) = value.split_once(' ') else {
             return false;
         };
+        if !scheme.eq_ignore_ascii_case("bearer") {
+            return false;
+        }
         key.len() == self.token.len()
             && key
                 .bytes()
@@ -141,6 +148,20 @@ mod tests {
         assert!(!access.same_origin(&[host.clone(), host.clone()]));
         let auth = header("Authorization", &format!("Bearer {}", access.token));
         assert!(access.authorized(std::slice::from_ref(&auth)));
+        // The scheme is case-insensitive per RFC 7235.
+        let lower = header("Authorization", &format!("bearer {}", access.token));
+        assert!(access.authorized(std::slice::from_ref(&lower)));
+        // A wrong key is still refused under either spelling.
+        let wrong = header("Authorization", "bearer deadbeef");
+        assert!(!access.authorized(std::slice::from_ref(&wrong)));
+        // Host is case-insensitive, but a different host is still refused.
+        let upper_host = header("Host", "127.0.0.1:8787");
+        assert!(access.same_origin(std::slice::from_ref(&upper_host)));
+        assert!(access.same_origin(&[
+            upper_host.clone(),
+            header("Origin", "http://127.0.0.1:8787"),
+            header("Sec-Fetch-Site", "same-origin"),
+        ]));
         assert!(access.same_origin(&[host, auth, header("Sec-Fetch-Site", "same-origin")]));
     }
 }

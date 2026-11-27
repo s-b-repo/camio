@@ -38,7 +38,7 @@ impl std::error::Error for RequestError {}
 
 /// A client that sends an [`HttpRequest`] and returns the completed
 /// [`HttpExchange`].
-pub trait RequestEngine {
+pub trait RequestEngine: Send + Sync {
     /// Human-readable engine label for the status bar / audit log.
     fn label(&self) -> String;
 
@@ -151,6 +151,13 @@ pub fn prepare_request(mut req: HttpRequest, spec: &FingerprintSpec) -> HttpRequ
     }
     if !has(&req, "Accept-Encoding") {
         req.headers.push("Accept-Encoding", "gzip, deflate, br");
+    }
+    // The stack would fill this in lowercase from its own constants; Firefox
+    // sends the canonical casing, so emit it here (the spec lists it in the
+    // profile's header order) whenever the request carries a body.
+    if !req.body.is_empty() && !has(&req, "Content-Length") {
+        req.headers
+            .push("Content-Length", req.body.len().to_string());
     }
     if spec.send_dnt && !has(&req, "DNT") {
         req.headers.push("DNT", "1");

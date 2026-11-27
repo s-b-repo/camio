@@ -60,6 +60,27 @@ pub fn classify(
         .collect()
 }
 
+/// The shortest payload considered a reflection signal (bytes). Below this a
+/// match is indistinguishable from ordinary page content.
+const MIN_REFLECT_LEN: usize = 6;
+
+/// Whether `payload` appears in `body` in a way that means something: long
+/// enough to be a signal, and not a value every page contains (digits-only,
+/// or a plain ASCII word with no punctuation).
+fn is_reflectable(payload: &str, body: &str) -> bool {
+    if payload.len() < MIN_REFLECT_LEN {
+        return false;
+    }
+    let structural = payload
+        .chars()
+        .any(|c| !c.is_ascii_alphanumeric() && !c.is_whitespace());
+    let digits_only = payload.chars().all(|c| c.is_ascii_digit());
+    if !structural && digits_only {
+        return false;
+    }
+    body.contains(payload)
+}
+
 fn classify_one(
     payloads: &[String],
     exchange: &HttpExchange,
@@ -85,12 +106,14 @@ fn classify_one(
 
     let query_match = interesting.map(|q| q.matches(exchange)).unwrap_or(false);
 
+    // A reflection needs a payload long enough to be a *signal*: a 1-2 character
+    // payload (the SQLi pack's `'`/`"` and their hex encodings) appears in
+    // essentially every HTML body, so matching it flags every row. The passive
+    // reflected-input check applies the same guard.
     let reflected = response
         .map(|r| {
             let body = r.body.as_text();
-            payloads
-                .iter()
-                .any(|p| !p.is_empty() && body.contains(p.as_str()))
+            payloads.iter().any(|p| is_reflectable(p, &body))
         })
         .unwrap_or(false);
 
@@ -245,8 +268,12 @@ mod tests {
             body_len: 0,
         };
         let query = Query::compile("resp.code.gte:500").unwrap();
-        // 500 + length change + query match + reflection all at once.
-        let results = vec![(vec!["boom".to_string()], exchange(500, "boom"))];
+        // 500 + length change + query match + reflection all at once. The
+        // payload is long enough to be a reflection signal (see MIN_REFLECT_LEN).
+        let results = vec![(
+            vec!["boom-boom-marker".to_string()],
+            exchange(500, "boom-boom-marker"),
+        )];
         let out = classify(&results, Some(&base), Some(&query));
         assert_eq!(
             out[0].flags,
@@ -271,5 +298,70 @@ mod tests {
         let json = serde_json::to_string(&out[0]).unwrap();
         let back: ClassifiedResult = serde_json::from_str(&json).unwrap();
         assert_eq!(out[0], back);
+    }
+}
+
+#[cfg(test)]
+mod reflection_tests {
+    use super::*;
+    use camio_core::{Body, HeaderList, HttpRequest, HttpResponse, HttpVersion, Source};
+
+    fn ex(status: u16, body: &str) -> HttpExchange {
+        let req = HttpRequest::get("https://ex.test/?q=x");
+        let resp = HttpResponse {
+            status,
+            version: HttpVersion::Http11,
+            reason: None,
+            headers: HeaderList::new(),
+            body: Body::from_text(body.to_string()),
+        };
+        HttpExchange::new(req, Source::Automate).with_response(resp)
+    }
+
+    #[test]
+    fn short_payloads_are_not_reflections() {
+        // `'` and `"` (and their hex encodings) appear in essentially every
+        // HTML body, so they must not mark a row as reflected.
+        let out = classify(
+            &[(
+                vec!["'".to_string(), "\"".to_string(), "27".to_string()],
+                ex(200, "<html>it's a \"test\" & more</html>"),
+            )],
+            None,
+            None,
+        );
+        assert!(
+            !out[0].flags.iter().any(|f| f == "reflected"),
+            "flags: {:?}",
+            out[0].flags
+        );
+    }
+
+    #[test]
+    fn a_distinct_payload_still_marks_reflection() {
+        let payload = "CAMIO-UNIQUE-MARKER-9f3a".to_string();
+        let out = classify(
+            &[(
+                vec![payload.clone()],
+                ex(200, &format!("<html>{payload}</html>")),
+            )],
+            None,
+            None,
+        );
+        assert!(out[0].flags.iter().any(|f| f == "reflected"));
+    }
+
+    #[test]
+    fn digits_only_payloads_are_not_reflections() {
+        // A numeric string is page noise, not a probe signal.
+        let out = classify(
+            &[(
+                vec!["1234567890".to_string()],
+                ex(200, "order 1234567890 confirmed"),
+            )],
+            None,
+            None,
+        );
+        assert!(!out[0].flags.iter().any(|f| f == "reflected"));
     }
 }

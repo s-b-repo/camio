@@ -12,14 +12,14 @@
 mod proxy;
 mod workbench;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use camio_ai::{AiClient, AiConfig, Message};
 use camio_automate::{AttackType, Baseline, Campaign, PayloadSet};
 use camio_convert::Transform;
 use camio_core::{
-    ActionClass, Body, Finding, FindingId, FingerprintPolicy, FingerprintProfile, HttpExchange,
-    HttpRequest, MatchReplaceRule, MatchTarget, Policy, PolicyOutcome, Query, RuleSet, Scope,
-    ScopeRule, Severity, SiteMap, Source,
+    ActionClass, Approval, Body, Finding, FindingId, FingerprintPolicy, FingerprintProfile,
+    HttpExchange, HttpRequest, MatchReplaceRule, MatchTarget, PlanSummary, Policy, PolicyOutcome,
+    Query, RuleSet, Scope, ScopeDecision, ScopeRule, Severity, SiteMap, Source,
 };
 use camio_engine::{self as engine, Camoufox, LaunchOptions};
 use camio_mcp::McpServer;
@@ -118,6 +118,12 @@ enum Command {
     Subfinder(SubfinderArgs),
     /// List external-tool integrations and whether each is installed.
     Integrations,
+    /// Probe authorized targets with ProjectDiscovery httpx (reachability +
+    /// technology metadata), or import an existing httpx JSONL export.
+    Probe(ProbeArgs),
+    /// List durable background-task records, optionally reconciling
+    /// interrupted ones (F03 restart recovery).
+    Tasks(TasksArgs),
     /// Review stored traffic, import evidence, and manage the workspace.
     Workbench(workbench::Args),
     /// Verify checksums and evidence references in an exported review bundle.
@@ -196,6 +202,16 @@ struct LaunchArgs {
     /// Build the command and print it, but do not launch.
     #[arg(long)]
     dry_run: bool,
+    /// Lab profile: allow private/loopback destinations for the opened URL.
+    #[arg(long)]
+    allow_private: bool,
+    /// Also permit link-local / cloud-metadata destinations. Lab mode alone
+    /// never un-blocks 169.254.169.254 or fe80::/10.
+    #[arg(long)]
+    allow_metadata: bool,
+    /// Include rule(s) the opened URL must match.
+    #[arg(long = "scope-include")]
+    scope_include: Vec<String>,
 }
 
 #[derive(Parser)]
@@ -224,6 +240,10 @@ struct SendArgs {
     /// Lab mode: allow private/loopback/metadata destinations.
     #[arg(long)]
     allow_private: bool,
+    /// Also permit link-local / cloud-metadata destinations. Lab mode alone
+    /// never un-blocks 169.254.169.254 or fe80::/10.
+    #[arg(long)]
+    allow_metadata: bool,
     /// Match & Replace rule applied to the outgoing request (repeatable).
     /// Format: `PART|FIND|REPLACE`, where PART is url|method|body|header=NAME.
     #[arg(long = "rewrite")]
@@ -284,6 +304,10 @@ struct ScopeArgs {
     scope_exclude: Vec<String>,
     #[arg(long)]
     allow_private: bool,
+    /// Also permit link-local / cloud-metadata destinations. Lab mode alone
+    /// never un-blocks 169.254.169.254 or fe80::/10.
+    #[arg(long)]
+    allow_metadata: bool,
 }
 
 #[derive(Parser)]
@@ -298,6 +322,10 @@ struct McpServeArgs {
     scope_exclude: Vec<String>,
     #[arg(long)]
     allow_private: bool,
+    /// Also permit link-local / cloud-metadata destinations. Lab mode alone
+    /// never un-blocks 169.254.169.254 or fe80::/10.
+    #[arg(long)]
+    allow_metadata: bool,
     /// Allow active (scan/fuzz) actions via MCP. Off by default.
     #[arg(long)]
     allow_active: bool,
@@ -382,9 +410,24 @@ pub(crate) fn build_scope(
     excludes: &[String],
     allow_private: bool,
 ) -> Result<Scope> {
+    build_scope_full(includes, excludes, allow_private, false)
+}
+
+/// [`build_scope`] plus the separate link-local/metadata opt-in. Lab mode
+/// (`allow_private`) alone never un-blocks 169.254.169.254 or fe80::/10 — the
+/// operator must opt in explicitly (plan §16).
+pub(crate) fn build_scope_full(
+    includes: &[String],
+    excludes: &[String],
+    allow_private: bool,
+    allow_metadata: bool,
+) -> Result<Scope> {
     let mut scope = Scope::new();
     if allow_private {
         scope = scope.allowing_private();
+    }
+    if allow_metadata {
+        scope = scope.allowing_metadata();
     }
     for q in includes {
         scope =
@@ -440,6 +483,8 @@ fn main() -> Result<()> {
         Command::Crawl(args) => crawl_cmd(args),
         Command::Subfinder(args) => subfinder_cmd(args),
         Command::Integrations => integrations_cmd(),
+        Command::Probe(args) => probe_cmd(args),
+        Command::Tasks(args) => tasks_cmd(args),
         Command::Workbench(args) => workbench::run(args),
         Command::VerifyBundle { file } => workbench::verify_bundle(&file),
         Command::Backup { dest, db } => {
@@ -518,6 +563,27 @@ fn fingerprint_cmd(action: FpCmd) -> Result<()> {
 }
 
 fn launch_cmd(args: LaunchArgs) -> Result<()> {
+    // Opening a URL in the managed browser sends traffic, so it runs the same
+    // SSRF/scope guard as `camio send` (plan §16) instead of bypassing it.
+    if let Some(url) = args.url.as_deref() {
+        let scope = build_scope_full(
+            &args.scope_include,
+            &[],
+            args.allow_private,
+            args.allow_metadata,
+        )?;
+        let decision = scope.decide(&HttpExchange::new(HttpRequest::get(url), Source::Browser));
+        match decision {
+            ScopeDecision::Blocked => bail!(
+                "refused: {url} is blocked by the SSRF/safety guard (link-local/metadata \
+                 need an explicit --allow-metadata)"
+            ),
+            ScopeDecision::OutOfScope => {
+                bail!("refused: {url} is out of scope for this launch (add --scope-include)")
+            }
+            ScopeDecision::InScope => {}
+        }
+    }
     let cam = Camoufox::find(&args.install_root)?;
     let profile = profile_for_os(args.preset, parse_os(&args.os)?);
     let opts = LaunchOptions {
@@ -556,7 +622,12 @@ fn launch_cmd(args: LaunchArgs) -> Result<()> {
 
 fn send_cmd(args: SendArgs) -> Result<()> {
     let profile = profile_for(args.preset);
-    let scope = build_scope(&args.scope_include, &args.scope_exclude, args.allow_private)?;
+    let scope = build_scope_full(
+        &args.scope_include,
+        &args.scope_exclude,
+        args.allow_private,
+        args.allow_metadata,
+    )?;
 
     let mut req = HttpRequest::get(&args.url);
     req.method = args.method.clone();
@@ -715,13 +786,26 @@ fn query_cmd(args: QueryArgs) -> Result<()> {
     }
 
     let query = Query::compile(&query_text).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let results = store.query(&query, args.limit)?;
+    // Body filters must read real bodies; the summary path does not, and the
+    // old length-sized placeholder bodies made it allocate Σ(body lengths)
+    // per row for a table that only shows method/status/URL (plan §5).
+    let results = if query.needs_body() || args.json {
+        store.query(&query, args.limit)?
+    } else {
+        store.query_metadata(&query, args.limit)?
+    };
     print_exchange_list(&results, args.json)
 }
 
 fn history_cmd(args: HistoryArgs) -> Result<()> {
     let store = open_store(&args.db)?;
-    let results = store.recent(args.limit)?;
+    let results = if args.json {
+        store.recent(args.limit)?
+    } else {
+        // No bodies needed for the summary table: metadata only.
+        let empty = Query::compile("").map_err(|e| anyhow::anyhow!("{e}"))?;
+        store.query_metadata(&empty, args.limit)?
+    };
     print_exchange_list(&results, args.json)
 }
 
@@ -758,7 +842,12 @@ fn print_exchange_list(results: &[HttpExchange], json: bool) -> Result<()> {
 }
 
 fn scope_cmd(args: ScopeArgs) -> Result<()> {
-    let scope = build_scope(&args.scope_include, &args.scope_exclude, args.allow_private)?;
+    let scope = build_scope_full(
+        &args.scope_include,
+        &args.scope_exclude,
+        args.allow_private,
+        args.allow_metadata,
+    )?;
     let ex = HttpExchange::new(HttpRequest::get(&args.url), Source::Replay);
     let decision = scope.decide(&ex);
     println!("{} -> {}", args.url, decision.as_str());
@@ -772,7 +861,12 @@ fn scope_cmd(args: ScopeArgs) -> Result<()> {
 
 fn mcp_serve_cmd(args: McpServeArgs) -> Result<()> {
     let profile = profile_for(args.preset);
-    let scope = build_scope(&args.scope_include, &args.scope_exclude, args.allow_private)?;
+    let scope = build_scope_full(
+        &args.scope_include,
+        &args.scope_exclude,
+        args.allow_private,
+        args.allow_metadata,
+    )?;
     let store = Store::open(&args.db).with_context(|| format!("opening {}", args.db.display()))?;
     let policy = Policy {
         allow_active: args.allow_active,
@@ -1272,9 +1366,21 @@ struct FuzzArgs {
     scope_exclude: Vec<String>,
     #[arg(long)]
     allow_private: bool,
+    /// Also permit link-local / cloud-metadata destinations. Lab mode alone
+    /// never un-blocks 169.254.169.254 or fe80::/10.
+    #[arg(long)]
+    allow_metadata: bool,
     /// Actually run the campaign (an ACTIVE test). Without this, only the plan is shown.
     #[arg(long)]
     confirm: bool,
+    /// Bind the run to the plan hash printed by the preview (plan §4.3). The
+    /// run is refused if the plan drifted since that hash was approved.
+    #[arg(long)]
+    approve: Option<String>,
+    /// Resume an interrupted campaign: skip the first N generated requests
+    /// (already-sent work is never replayed, plan §4.2).
+    #[arg(long, default_value_t = 0)]
+    resume_from: u64,
     #[arg(long, default_value = "camio.db")]
     db: PathBuf,
     /// How many result rows to print.
@@ -1289,7 +1395,12 @@ fn fuzz_cmd(args: FuzzArgs) -> Result<()> {
         bail!("give at least one --payloads <pack-name|file> (see `camio payloads`)");
     }
     let profile = profile_for(args.preset);
-    let scope = build_scope(&args.scope_include, &args.scope_exclude, args.allow_private)?;
+    let scope = build_scope_full(
+        &args.scope_include,
+        &args.scope_exclude,
+        args.allow_private,
+        args.allow_metadata,
+    )?;
     let base = build_request(&args.url, &args.method, &args.headers, &args.body, &None)?;
 
     let mut sets = Vec::new();
@@ -1331,7 +1442,18 @@ fn fuzz_cmd(args: FuzzArgs) -> Result<()> {
         allow_destructive: false,
         require_confirmation: true,
     };
-    match policy.gate(ActionClass::Active, decision, args.confirm) {
+
+    // The exact plan an approval is bound to (plan §4.3): the normalized
+    // target, the action class, the request budget, and the policy revision.
+    let plan_summary = PlanSummary::new(ActionClass::Active, vec![args.url.trim().to_string()])
+        .with_max_requests(args.budget)
+        .with_policy(&policy);
+    let plan_hash = plan_summary.plan_hash();
+    println!("  plan hash          : {plan_hash}");
+    if args.approve.is_none() {
+        println!("\nApprove this exact plan with --approve {plan_hash} (and --confirm).");
+    }
+    match policy.gate_action_with(ActionClass::Active, &scope, decision, args.confirm) {
         PolicyOutcome::Deny(reason) => bail!("refused: {reason}"),
         PolicyOutcome::NeedsConfirmation(reason) => {
             println!("\n{reason}.");
@@ -1348,7 +1470,41 @@ fn fuzz_cmd(args: FuzzArgs) -> Result<()> {
         );
     }
 
-    let generated = camio_automate::generate(&campaign).map_err(|e| anyhow::anyhow!("{e}"))?;
+    // Approval binding (plan §4.3): the operator must approve the *printed*
+    // plan; any drift (different target, budget, or policy) changes the hash
+    // and is refused rather than silently executed under a stale approval.
+    if let Some(approved) = args.approve.as_deref() {
+        let approval = Approval::bind(plan_summary.clone(), camio_core::approval::now_ms())
+            .granted_by("camio fuzz --approve");
+        if approved.trim() != approval.plan_hash {
+            bail!(
+                "this approval does not cover the current plan (approved {approved}, plan is {plan_hash}); \
+                 re-run the preview and approve the printed hash"
+            );
+        }
+        if let Err(reason) = approval.allows(&plan_summary, camio_core::approval::now_ms()) {
+            bail!("refused: approval does not cover this plan: {reason}");
+        }
+        println!("approval bound to plan {plan_hash}");
+    } else {
+        bail!(
+            "an approved plan hash is required before an ACTIVE campaign (plan §4.3): \
+             re-run the preview and pass --approve {plan_hash}"
+        );
+    }
+
+    // Resume: only the unexecuted remainder of an approved plan runs (plan
+    // §4.2). The approval hash above still binds the plan, so a drifted plan is
+    // refused rather than silently replayed under a stale approval.
+    let resume_from = usize::try_from(args.resume_from).unwrap_or(usize::MAX);
+    let generated = camio_automate::generate_from(&campaign, resume_from)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    if resume_from > 0 {
+        eprintln!(
+            "resuming after {resume_from} request(s) — executing the remaining {}",
+            generated.len()
+        );
+    }
     let eng = matched_engine(&profile).context("building matched request engine")?;
     eprintln!(
         "engine: {} (fingerprint-matched: {})",
@@ -1370,6 +1526,7 @@ fn fuzz_cmd(args: FuzzArgs) -> Result<()> {
     let mut store =
         Store::open(&args.db).with_context(|| format!("opening {}", args.db.display()))?;
     let mut results = Vec::new();
+    let mut skipped = 0usize;
     for g in &generated {
         let pr = HttpExchange::new(g.request.clone(), Source::Automate);
         if !scope.decide(&pr).is_sendable() {
@@ -1377,10 +1534,15 @@ fn fuzz_cmd(args: FuzzArgs) -> Result<()> {
         }
         match eng.send(g.request.clone(), Source::Automate) {
             Ok(ex) => {
-                let _ = store.insert(&ex);
+                store.insert(&ex).with_context(|| {
+                    format!("storing campaign exchange in {}", args.db.display())
+                })?;
                 results.push((g.payloads.clone(), ex));
             }
-            Err(e) => eprintln!("send failed: {e}"),
+            Err(e) => {
+                skipped += 1;
+                eprintln!("send failed: {e}");
+            }
         }
     }
 
@@ -1389,6 +1551,10 @@ fn fuzz_cmd(args: FuzzArgs) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&classified)?);
     } else {
         print_classified(&classified, args.show);
+    }
+    if skipped > 0 {
+        // A partially-failed campaign is not a clean run (plan §4.2).
+        println!("\n{skipped} request(s) could not be sent (see errors above).");
     }
     println!(
         "\nsent {} request(s); stored in {}.",
@@ -1517,7 +1683,12 @@ fn sitemap_cmd(args: SitemapArgs) -> Result<()> {
     let store = open_store(&args.db)?;
     let q =
         Query::compile(args.query.as_deref().unwrap_or("")).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let exchanges = store.query(&q, args.limit)?;
+    // Body filters real bytes; otherwise metadata only (no padded placeholders).
+    let exchanges = if q.needs_body() || args.json {
+        store.query(&q, args.limit)?
+    } else {
+        store.query_metadata(&q, args.limit)?
+    };
     let map = SiteMap::build(&exchanges);
     if args.json {
         println!(
@@ -2064,6 +2235,37 @@ struct OastArgs {
     /// Print N sample correlation tokens + callback URLs and exit (no server).
     #[arg(long)]
     tokens: Option<usize>,
+    /// Persist interactions into this workspace database (with a retention
+    /// policy) so callbacks survive a restart (plan §F15).
+    #[arg(long)]
+    db: Option<PathBuf>,
+    /// Also answer DNS A queries on this address so pure-DNS exfiltration
+    /// (blind SSRF by hostname, XXE with an external DTD) correlates (plan §F15).
+    #[arg(long)]
+    dns_listen: Option<String>,
+    /// How many interactions to retain (oldest pruned first).
+    #[arg(long, default_value_t = 10_000)]
+    retain: usize,
+    /// How long to retain interactions (e.g. `7d`, `24h`).
+    #[arg(long, default_value = "7d")]
+    retain_for: String,
+}
+
+/// Parse a simple duration (`7d`, `24h`, `30m`, `3600s`) into seconds.
+fn parse_duration_secs(text: &str) -> u64 {
+    let text = text.trim();
+    let (num, unit) = text.split_at(
+        text.find(|c: char| c.is_ascii_alphabetic())
+            .unwrap_or(text.len()),
+    );
+    let n: u64 = num.trim().parse().unwrap_or(0);
+    match unit.trim().to_ascii_lowercase().as_str() {
+        "d" => n * 24 * 3600,
+        "h" => n * 3600,
+        "m" => n * 60,
+        "s" | "" => n,
+        _ => n,
+    }
 }
 
 fn oast_cmd(args: OastArgs) -> Result<()> {
@@ -2082,6 +2284,23 @@ fn oast_cmd(args: OastArgs) -> Result<()> {
         return Ok(());
     }
 
+    // Optional durable persistence with a retention policy (plan §F15).
+    let durable = match args.db.as_ref() {
+        Some(db) => {
+            let retention = camio_oast::durable::RetentionPolicy {
+                max_interactions: args.retain,
+                max_age: std::time::Duration::from_secs(parse_duration_secs(&args.retain_for)),
+            };
+            let store = Store::open(db).with_context(|| format!("opening {}", db.display()))?;
+            Some(camio_oast::durable::DurableCollector::new(
+                collector.clone(),
+                store,
+                retention,
+            ))
+        }
+        None => None,
+    };
+
     let listener = std::net::TcpListener::bind(&args.listen)
         .with_context(|| format!("binding {}", args.listen))?;
     let local = listener.local_addr().context("reading local address")?;
@@ -2091,12 +2310,59 @@ fn oast_cmd(args: OastArgs) -> Result<()> {
     eprintln!("  callback base   : http://{base}/");
     eprintln!("  sample token    : {sample}");
     eprintln!("  sample callback : {}", collector.callback_url(&sample));
+    if let Some(d) = durable.as_ref() {
+        eprintln!(
+            "  persistence     : {} (retain {} interaction(s) for {})",
+            args.db
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
+            d.retention().max_interactions,
+            args.retain_for,
+        );
+    }
+
+    // Optional DNS responder for pure-DNS exfiltration correlation.
+    let dns_handle = match args.dns_listen.as_ref() {
+        Some(addr) => {
+            let socket = std::net::UdpSocket::bind(addr)
+                .with_context(|| format!("binding DNS on {addr}"))?;
+            // The DNS answer points at the collector's own address (IPv4
+            // only; an IPv6 bind gets the all-hosts answer, which stays local).
+            let answer_ip = match local.ip() {
+                std::net::IpAddr::V4(v4) => v4.octets(),
+                std::net::IpAddr::V6(_) => [127, 0, 0, 1],
+            };
+            // A durable collector gets the DNS lookups too; without a store the
+            // in-memory collector records them.
+            let sink: std::sync::Arc<dyn camio_oast::dns::DnsSink> = match durable.clone() {
+                Some(d) => std::sync::Arc::new(d),
+                None => collector.clone(),
+            };
+            let responder = camio_oast::dns::DnsResponder::new(sink, answer_ip);
+            let handle = responder.spawn(socket).context("starting DNS responder")?;
+            eprintln!(
+                "  DNS responder   : {addr} (A queries answered with {})",
+                local.ip()
+            );
+            Some(handle)
+        }
+        None => None,
+    };
+
     eprintln!(
         "Plant a token-bearing callback URL in a payload (SSRF/XXE/blind injection);\n\
          interactions that reach this address are logged below. Press Ctrl-C to stop."
     );
 
-    let server = camio_oast::OastServer::new(collector).on_interaction(|i| {
+    // The hook owns its durable collector (a `'static` closure cannot borrow).
+    let durable_hook = durable.clone().map(std::sync::Arc::new);
+    let server = camio_oast::OastServer::new(collector).on_interaction(move |i| {
+        if let Some(d) = durable_hook.as_ref() {
+            if let Err(e) = d.record(i) {
+                eprintln!("  (could not persist the interaction: {e})");
+            }
+        }
         let token = i
             .token
             .as_ref()
@@ -2107,10 +2373,13 @@ fn oast_cmd(args: OastArgs) -> Result<()> {
             i.id, i.method, i.target, i.source
         );
     });
-    server
+    let result = server
         .serve_with_listener(listener)
-        .context("serving OAST collector")?;
-    Ok(())
+        .context("serving OAST collector");
+    if let Some(handle) = dns_handle {
+        handle.stop_and_join();
+    }
+    result
 }
 
 // ===========================================================================
@@ -2141,6 +2410,10 @@ struct NucleiArgs {
     scope_exclude: Vec<String>,
     #[arg(long)]
     allow_private: bool,
+    /// Also permit link-local / cloud-metadata destinations. Lab mode alone
+    /// never un-blocks 169.254.169.254 or fe80::/10.
+    #[arg(long)]
+    allow_metadata: bool,
     /// Actually run Nuclei. Without this, prints what would run.
     #[arg(long)]
     confirm: bool,
@@ -2157,7 +2430,12 @@ struct NucleiArgs {
 }
 
 fn nuclei_cmd(args: NucleiArgs) -> Result<()> {
-    let scope = build_scope(&args.scope_include, &args.scope_exclude, args.allow_private)?;
+    let scope = build_scope_full(
+        &args.scope_include,
+        &args.scope_exclude,
+        args.allow_private,
+        args.allow_metadata,
+    )?;
     let base = HttpRequest::get(&args.url);
     let decision = scope.decide(&HttpExchange::new(base.clone(), Source::Scanner));
 
@@ -2167,7 +2445,7 @@ fn nuclei_cmd(args: NucleiArgs) -> Result<()> {
         allow_destructive: false,
         require_confirmation: true,
     };
-    match policy.gate(ActionClass::Active, decision, args.confirm) {
+    match policy.gate_action_with(ActionClass::Active, &scope, decision, args.confirm) {
         PolicyOutcome::Deny(reason) => bail!("refused: {reason}"),
         PolicyOutcome::NeedsConfirmation(reason) => {
             println!("{reason}.");
@@ -2200,6 +2478,39 @@ fn nuclei_cmd(args: NucleiArgs) -> Result<()> {
         Err(e) => bail!("nuclei run failed: {e}"),
     };
     let findings = camio_integrations::nuclei_to_findings(&raw);
+    // A template can match a redirect target or a host the operator never
+    // approved; re-decide each matched location and report what was dropped
+    // rather than storing it as if in scope.
+    let mut findings = findings;
+    let mut out_of_scope = Vec::new();
+    findings.retain(|f| {
+        let matched = f
+            .detail
+            .lines()
+            .find_map(|l| {
+                l.strip_prefix("- Matched at: `")
+                    .and_then(|v| v.strip_suffix('`'))
+            })
+            .map(str::to_string);
+        match matched {
+            Some(location) => {
+                let decision = scope.decide(&HttpExchange::new(
+                    HttpRequest::get(&location),
+                    Source::Scanner,
+                ));
+                if decision.is_sendable() {
+                    true
+                } else {
+                    out_of_scope.push(location);
+                    false
+                }
+            }
+            None => true,
+        }
+    });
+    for dropped in &out_of_scope {
+        eprintln!("skipped out-of-scope finding location: {dropped}");
+    }
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&findings)?);
@@ -2210,7 +2521,9 @@ fn nuclei_cmd(args: NucleiArgs) -> Result<()> {
     if args.save {
         let mut store =
             Store::open(&args.db).with_context(|| format!("opening {}", args.db.display()))?;
-        let n = store.insert_findings(&findings).unwrap_or(0);
+        let n = store
+            .insert_findings(&findings)
+            .with_context(|| format!("saving findings to {}", args.db.display()))?;
         eprintln!("saved {n} finding(s) to {}", args.db.display());
     }
     Ok(())
@@ -2239,9 +2552,56 @@ struct SubfinderArgs {
     /// Extra args passed verbatim to subfinder (after `--`).
     #[arg(last = true)]
     extra: Vec<String>,
+    #[arg(long = "scope-include")]
+    scope_include: Vec<String>,
+    #[arg(long = "scope-exclude")]
+    scope_exclude: Vec<String>,
+    #[arg(long)]
+    allow_private: bool,
+    /// Also permit link-local / cloud-metadata destinations. Lab mode alone
+    /// never un-blocks 169.254.169.254 or fe80::/10.
+    #[arg(long)]
+    allow_metadata: bool,
+    /// Actually enumerate (an ACTIVE action). Without this, the plan is shown.
+    #[arg(long)]
+    confirm: bool,
 }
 
 fn subfinder_cmd(args: SubfinderArgs) -> Result<()> {
+    // Enumeration sends traffic about a domain (to passive sources and, for
+    // some sources, to the domain itself), so it goes through the same
+    // authorization path as the other external tools (plan §16).
+    let scope = build_scope_full(
+        &args.scope_include,
+        &args.scope_exclude,
+        args.allow_private,
+        args.allow_metadata,
+    )?;
+    let ex = HttpExchange::new(
+        HttpRequest::get(format!("https://{}/", args.domain.trim())),
+        Source::Crawler,
+    );
+    let decision = scope.decide(&ex);
+    let policy = Policy {
+        allow_active: true,
+        allow_destructive: false,
+        require_confirmation: true,
+    };
+    match policy.gate_action_with(ActionClass::Active, &scope, decision, args.confirm) {
+        PolicyOutcome::Deny(reason) => bail!("refused: {reason}"),
+        PolicyOutcome::NeedsConfirmation(reason) => {
+            println!("needs confirmation: {reason}.");
+            println!(
+                "Would enumerate {} (scope {}). Re-run with --confirm and an explicit \
+                 --scope-include rule (authorized targets only).",
+                args.domain,
+                decision.as_str()
+            );
+            return Ok(());
+        }
+        PolicyOutcome::Allow => {}
+    }
+
     let opts = camio_integrations::SubfinderOptions {
         sources: args.sources.clone(),
         all_sources: args.all,
@@ -2289,6 +2649,10 @@ struct CrawlArgs {
     scope_exclude: Vec<String>,
     #[arg(long)]
     allow_private: bool,
+    /// Also permit link-local / cloud-metadata destinations. Lab mode alone
+    /// never un-blocks 169.254.169.254 or fe80::/10.
+    #[arg(long)]
+    allow_metadata: bool,
     /// Actually crawl. Without this, prints what would run.
     #[arg(long)]
     confirm: bool,
@@ -2300,15 +2664,26 @@ struct CrawlArgs {
 
 fn crawl_cmd(args: CrawlArgs) -> Result<()> {
     let profile = profile_for(args.preset);
-    let scope = build_scope(&args.scope_include, &args.scope_exclude, args.allow_private)?;
+    let scope = build_scope_full(
+        &args.scope_include,
+        &args.scope_exclude,
+        args.allow_private,
+        args.allow_metadata,
+    )?;
     let decision = scope.decide(&HttpExchange::new(
         HttpRequest::get(&args.url),
         Source::Crawler,
     ));
 
-    // Crawling sends many requests: in scope + explicit confirmation (plan §16).
-    let policy = Policy::safe();
-    match policy.gate(ActionClass::Mutating, decision, args.confirm) {
+    // Crawling sends many requests automatically: in scope + explicit targets +
+    // explicit confirmation (plan §16). It is an ACTIVE action like the scanner
+    // and the campaign runner, not a one-shot manual send.
+    let policy = Policy {
+        allow_active: true,
+        allow_destructive: false,
+        require_confirmation: true,
+    };
+    match policy.gate_action_with(ActionClass::Active, &scope, decision, args.confirm) {
         PolicyOutcome::Deny(reason) => bail!("refused: {reason}"),
         PolicyOutcome::NeedsConfirmation(reason) => {
             println!("{reason}.");
@@ -2400,6 +2775,297 @@ fn integrations_cmd() -> Result<()> {
 }
 
 // ===========================================================================
+// httpx integration (external HTTP prober, plan §6)
+// ===========================================================================
+
+#[derive(Parser)]
+struct ProbeArgs {
+    /// Target URLs to probe (explicit project targets, one or more).
+    #[arg(required_unless_present = "import")]
+    targets: Vec<String>,
+    /// Import an existing httpx JSONL export instead of running the tool
+    /// (import-only path for hosts where execution is unavailable, plan §6).
+    #[arg(long)]
+    import: Option<PathBuf>,
+    /// Seed targets from the site map of an existing history database
+    /// (explicit project inventory, plan §6) instead of listing URLs.
+    #[arg(long)]
+    from_sitemap: Option<PathBuf>,
+    /// Seed targets from a saved CamioQL search, re-run against the same
+    /// database (plan §6).
+    #[arg(long = "from-saved")]
+    from_saved: Option<String>,
+    /// Maximum targets to probe in one run (a bound on the whole run).
+    #[arg(long)]
+    max_probes: Option<usize>,
+    /// Skip responses larger than this many bytes (an httpx output bound).
+    #[arg(long)]
+    max_response_bytes: Option<usize>,
+    /// Requests-per-second cap.
+    #[arg(long)]
+    rate_limit: Option<u32>,
+    /// Concurrent probes.
+    #[arg(long)]
+    concurrency: Option<u32>,
+    /// Per-probe timeout in seconds.
+    #[arg(long)]
+    timeout_secs: Option<u64>,
+    /// Follow redirects (off by default; each hop must be in scope).
+    #[arg(long)]
+    follow_redirects: bool,
+    /// Extra args passed verbatim to httpx (after `--`).
+    #[arg(last = true)]
+    extra: Vec<String>,
+    #[arg(long = "scope-include")]
+    scope_include: Vec<String>,
+    #[arg(long = "scope-exclude")]
+    scope_exclude: Vec<String>,
+    #[arg(long)]
+    allow_private: bool,
+    /// Also permit link-local / cloud-metadata destinations. Lab mode alone
+    /// never un-blocks 169.254.169.254 or fe80::/10.
+    #[arg(long)]
+    allow_metadata: bool,
+    /// Actually probe (an ACTIVE action). Without this, the plan is shown.
+    #[arg(long)]
+    confirm: bool,
+    /// Persist the raw JSONL as a stored artifact (searchable inventory).
+    #[arg(long)]
+    db: Option<PathBuf>,
+    /// Emit normalized probe results as JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+fn probe_cmd(args: ProbeArgs) -> Result<()> {
+    let scope = build_scope_full(
+        &args.scope_include,
+        &args.scope_exclude,
+        args.allow_private,
+        args.allow_metadata,
+    )?;
+
+    // Import-only path: no execution, no network, parse what's already on disk.
+    if let Some(path) = args.import.as_ref() {
+        let raw =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let results = camio_integrations::parse_httpx_jsonl(&raw);
+        print_probes(&results, args.json)?;
+        if let Some(db) = args.db.as_ref() {
+            let mut store = Store::open(db).with_context(|| format!("opening {}", db.display()))?;
+            let saved = store.import_artifact(
+                camio_store::ArtifactFormat::Httpx,
+                &raw,
+                Some("imported"),
+                true,
+            )?;
+            eprintln!(
+                "stored {} observation(s) from {} ({} skipped) in {}",
+                saved.records,
+                path.display(),
+                saved.skipped,
+                db.display()
+            );
+        }
+        return Ok(());
+    }
+
+    // Seed targets from the project's own inventory when asked: the site map of
+    // a history DB, or a saved CamioQL search re-run against it.
+    let mut targets = args.targets.clone();
+    if args.targets.is_empty() {
+        if let Some(db) = args.from_sitemap.as_ref() {
+            let store = open_store(db)?;
+            let compiled = Query::compile("").map_err(|e| anyhow::anyhow!("{e}"))?;
+            let rows = store.query_metadata(&compiled, 5_000)?;
+            let map = SiteMap::build(&rows);
+            targets.extend(map.origins.keys().cloned());
+        } else if let Some(name) = args.from_saved.as_ref() {
+            let db = args.db.as_ref().ok_or_else(|| {
+                anyhow!("--from-saved re-runs a saved search against a database; pass --db")
+            })?;
+            let store = open_store(db)?;
+            let saved = store
+                .list_saved_searches()?
+                .into_iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, q)| q)
+                .ok_or_else(|| anyhow!("no saved search named `{name}`"))?;
+            let compiled = Query::compile(&saved).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let rows = store.query_metadata(&compiled, 5_000)?;
+            for ex in &rows {
+                targets.push(ex.request.url.clone());
+            }
+        }
+    }
+    if targets.is_empty() {
+        bail!(
+            "no targets: pass URLs, or seed them with --from-sitemap <db> / --from-saved <name> --db <db>"
+        );
+    }
+    if let Some(max) = args.max_probes {
+        if targets.len() > max {
+            targets.truncate(max);
+            eprintln!("capped the probe list at {max} target(s)");
+        }
+    }
+
+    // Probing is an ACTIVE action under the shared policy (plan §16): each
+    // destination must be in scope and approved before it receives traffic.
+    let policy = Policy {
+        allow_active: true,
+        allow_destructive: false,
+        require_confirmation: true,
+    };
+    let mut denied = Vec::new();
+    let mut unconfirmed = Vec::new();
+    for target in &args.targets {
+        let ex = HttpExchange::new(HttpRequest::get(target), Source::Crawler);
+        let decision = scope.decide(&ex);
+        match policy.gate_action_with(ActionClass::Active, &scope, decision, args.confirm) {
+            PolicyOutcome::Deny(reason) => denied.push(format!("{target}: {reason}")),
+            PolicyOutcome::NeedsConfirmation(reason) => {
+                unconfirmed.push(format!("{target}: {reason}"))
+            }
+            PolicyOutcome::Allow => {}
+        }
+    }
+    if !denied.is_empty() {
+        for d in &denied {
+            println!("refused: {d}");
+        }
+        // A refusal is not a clean run: exit non-zero like every other gate.
+        bail!("no target approved for probing");
+    }
+    if !unconfirmed.is_empty() {
+        for u in &unconfirmed {
+            println!("needs confirmation: {u}");
+        }
+        println!(
+            "\nWould probe {} target(s) with httpx. Re-run with --confirm and an explicit \
+             --scope-include rule (authorized targets only).",
+            args.targets.len()
+        );
+        return Ok(());
+    }
+
+    let opts = camio_integrations::HttpxOptions {
+        rate_limit: args.rate_limit,
+        concurrency: args.concurrency,
+        timeout_secs: args.timeout_secs,
+        follow_redirects: args.follow_redirects,
+        extra_args: args.extra.clone(),
+        max_targets: args.max_probes,
+        max_response_bytes: args.max_response_bytes,
+        ..Default::default()
+    };
+    eprintln!(
+        "probing {} target(s) with httpx (rate {:?}, concurrency {:?}, timeout {}s)…",
+        args.targets.len(),
+        opts.rate_limit,
+        opts.concurrency,
+        opts.timeout_secs.unwrap_or(10)
+    );
+    let raw = match camio_integrations::run_httpx_raw(&args.targets, &opts, || false) {
+        Ok(r) => r,
+        Err(camio_integrations::IntegrationError::NotInstalled(t)) => {
+            bail!(
+                "{t} is not installed or not on PATH; install ProjectDiscovery's Go tool from \
+                 https://github.com/projectdiscovery/httpx (or import an existing export with \
+                 --import <file.jsonl>)"
+            )
+        }
+        Err(e @ camio_integrations::IntegrationError::Incompatible { .. }) => bail!("{e}"),
+        Err(e) => bail!("httpx run failed: {e}"),
+    };
+    let results = camio_integrations::parse_httpx_jsonl(&raw);
+    print_probes(&results, args.json)?;
+    if let Some(db) = args.db.as_ref() {
+        let mut store = Store::open(db).with_context(|| format!("opening {}", db.display()))?;
+        let saved = store.import_artifact(camio_store::ArtifactFormat::Httpx, &raw, None, true)?;
+        eprintln!(
+            "stored {} observation(s) ({} skipped) in {}",
+            saved.records,
+            saved.skipped,
+            db.display()
+        );
+    }
+    Ok(())
+}
+
+fn print_probes(results: &[camio_integrations::ProbeResult], json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(results)?);
+        return Ok(());
+    }
+    if results.is_empty() {
+        println!("no probe results (no target answered, or the run was cancelled)");
+        return Ok(());
+    }
+    for p in results {
+        println!(
+            "{:<44} {}",
+            if p.url.is_empty() { &p.input } else { &p.url },
+            camio_integrations::summarize_probe(p)
+        );
+    }
+    println!("\n{} target(s) probed.", results.len());
+    Ok(())
+}
+
+#[derive(Parser)]
+struct TasksArgs {
+    #[arg(long, default_value = "camio.db")]
+    db: PathBuf,
+    /// Mark records still non-terminal after the last exit as interrupted
+    /// (restart recovery, plan §4.2). Read-only unless given.
+    #[arg(long)]
+    reconcile: bool,
+    /// How many records to show (newest first).
+    #[arg(long, default_value = "50")]
+    limit: i64,
+}
+
+fn tasks_cmd(args: TasksArgs) -> Result<()> {
+    let store = Store::open(&args.db).with_context(|| format!("opening {}", args.db.display()))?;
+    if args.reconcile {
+        let n = store.reconcile_interrupted_tasks()?;
+        println!("reconciled {n} interrupted background task(s)");
+    }
+    let rows = store.tasks(args.limit)?;
+    if rows.is_empty() {
+        println!("no background task records in {}", args.db.display());
+        return Ok(());
+    }
+    println!("Background tasks in {}:", args.db.display());
+    for row in &rows {
+        let outcome = row
+            .outcome
+            .as_deref()
+            .map(|o| format!(" [{o}]"))
+            .unwrap_or_default();
+        let detail = row
+            .result
+            .as_deref()
+            .or(row.error.as_deref())
+            .unwrap_or(&row.message)
+            .lines()
+            .next()
+            .unwrap_or_default();
+        let progress = match row.progress_total {
+            Some(total) => format!(" {}/{}", row.progress_done, total),
+            None if row.progress_done > 0 => format!(" {}", row.progress_done),
+            None => String::new(),
+        };
+        println!(
+            "  #{:<4} {:<22} {:<18}{progress}{outcome} {detail}",
+            row.id, row.kind, row.state,
+        );
+    }
+    Ok(())
+}
+
+// ===========================================================================
 // Active scan (opt-in)
 // ===========================================================================
 
@@ -2421,6 +3087,10 @@ struct ActiveArgs {
     scope_exclude: Vec<String>,
     #[arg(long)]
     allow_private: bool,
+    /// Also permit link-local / cloud-metadata destinations. Lab mode alone
+    /// never un-blocks 169.254.169.254 or fe80::/10.
+    #[arg(long)]
+    allow_metadata: bool,
     /// Actually run the active probes. Without this, prints what would run.
     #[arg(long)]
     confirm: bool,
@@ -2446,7 +3116,12 @@ struct ActiveArgs {
 
 fn activescan_cmd(args: ActiveArgs) -> Result<()> {
     let profile = profile_for(args.preset);
-    let scope = build_scope(&args.scope_include, &args.scope_exclude, args.allow_private)?;
+    let scope = build_scope_full(
+        &args.scope_include,
+        &args.scope_exclude,
+        args.allow_private,
+        args.allow_metadata,
+    )?;
     let base = build_request(&args.url, &args.method, &args.headers, &args.body, &None)?;
     let decision = scope.decide(&HttpExchange::new(base.clone(), Source::Scanner));
 
@@ -2456,7 +3131,7 @@ fn activescan_cmd(args: ActiveArgs) -> Result<()> {
         allow_destructive: false,
         require_confirmation: true,
     };
-    match policy.gate(ActionClass::Active, decision, args.confirm) {
+    match policy.gate_action_with(ActionClass::Active, &scope, decision, args.confirm) {
         PolicyOutcome::Deny(reason) => bail!("refused: {reason}"),
         PolicyOutcome::NeedsConfirmation(reason) => {
             println!("{reason}.");
@@ -2651,6 +3326,10 @@ struct AppArgs {
     scope_exclude: Vec<String>,
     #[arg(long)]
     allow_private: bool,
+    /// Also permit link-local / cloud-metadata destinations. Lab mode alone
+    /// never un-blocks 169.254.169.254 or fe80::/10.
+    #[arg(long)]
+    allow_metadata: bool,
     /// Allow active (fuzz) actions from the app. Off by default.
     #[arg(long)]
     allow_active: bool,
@@ -2658,7 +3337,12 @@ struct AppArgs {
 
 fn app_cmd(args: AppArgs) -> Result<()> {
     let profile = profile_for(args.preset);
-    let scope = build_scope(&args.scope_include, &args.scope_exclude, args.allow_private)?;
+    let scope = build_scope_full(
+        &args.scope_include,
+        &args.scope_exclude,
+        args.allow_private,
+        args.allow_metadata,
+    )?;
     let policy = Policy {
         allow_active: args.allow_active,
         ..Policy::safe()
@@ -2691,6 +3375,10 @@ struct UiArgs {
     scope_exclude: Vec<String>,
     #[arg(long)]
     allow_private: bool,
+    /// Also permit link-local / cloud-metadata destinations. Lab mode alone
+    /// never un-blocks 169.254.169.254 or fe80::/10.
+    #[arg(long)]
+    allow_metadata: bool,
     /// Allow active (fuzz) actions from the UI. Off by default.
     #[arg(long)]
     allow_active: bool,
@@ -2698,7 +3386,12 @@ struct UiArgs {
 
 fn ui_cmd(args: UiArgs) -> Result<()> {
     let profile = profile_for(args.preset);
-    let scope = build_scope(&args.scope_include, &args.scope_exclude, args.allow_private)?;
+    let scope = build_scope_full(
+        &args.scope_include,
+        &args.scope_exclude,
+        args.allow_private,
+        args.allow_metadata,
+    )?;
     let policy = Policy {
         allow_active: args.allow_active,
         ..Policy::safe()

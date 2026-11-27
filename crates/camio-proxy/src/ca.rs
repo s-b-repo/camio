@@ -21,6 +21,7 @@ use rcgen::{
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::ServerConfig;
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -76,6 +77,11 @@ pub struct CertAuthority {
     configs: Mutex<HashMap<String, Arc<ServerConfig>>>,
 }
 
+/// Maximum cached per-host TLS leaf configs. Each entry holds a freshly
+/// generated ECDSA key, so an unbounded cache is a slow memory/CPU leak for any
+/// client that connects to many distinct hosts.
+const MAX_CACHED_CONFIGS: usize = 256;
+
 impl CertAuthority {
     /// Generate a brand-new in-memory CA (not persisted) with the default
     /// neutral name. Useful for tests and ephemeral sessions.
@@ -129,6 +135,45 @@ impl CertAuthority {
         Ok(Self::from_parts(issuer, cert_pem))
     }
 
+    /// Paths this CA would use in `dir`.
+    pub fn paths(dir: impl AsRef<Path>) -> (PathBuf, PathBuf) {
+        let dir = dir.as_ref();
+        (dir.join("camio-ca.pem"), dir.join("camio-ca.key"))
+    }
+
+    /// Whether a persisted CA exists at `dir` (both the cert and its key).
+    pub fn exists(dir: impl AsRef<Path>) -> bool {
+        let (cert, key) = Self::paths(dir);
+        cert.exists() && key.exists()
+    }
+
+    /// Remove the persisted CA from `dir`, returning whether anything was
+    /// deleted. Removing the CA revokes Camio's ability to mint leaves for it —
+    /// the operator's trust stores keep whatever they imported, so this is the
+    /// "stop intercepting as this identity" action, not a global un-trust.
+    pub fn remove(dir: impl AsRef<Path>) -> Result<bool, CaError> {
+        let (cert, key) = Self::paths(dir);
+        let mut removed = false;
+        for path in [cert, key] {
+            match std::fs::remove_file(&path) {
+                Ok(()) => removed = true,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(removed)
+    }
+
+    /// Rotate: remove any existing CA and create a fresh one under the same
+    /// common name. A new key + cert means previously imported trust no longer
+    /// matches, so the operator must re-import — the returned CA's PEM is the
+    /// one to hand out.
+    pub fn rotate(dir: impl AsRef<Path>, common_name: &str) -> Result<Self, CaError> {
+        let dir = dir.as_ref();
+        Self::remove(dir)?;
+        Self::load_or_create_named(dir, common_name)
+    }
+
     fn from_parts(issuer: Issuer<'static, KeyPair>, ca_cert_pem: String) -> Self {
         CertAuthority {
             issuer,
@@ -146,20 +191,33 @@ impl CertAuthority {
 
     /// A rustls server config presenting a freshly minted leaf for `host`,
     /// cached so repeat connections to the same host reuse it.
+    ///
+    /// The cache is a bounded LRU: leaf keygen is expensive and a client can
+    /// force it with arbitrary unique hostnames, so the oldest entries are
+    /// evicted past [`MAX_CACHED_CONFIGS`] instead of growing without limit.
     pub fn server_config(&self, host: &str) -> Result<Arc<ServerConfig>, CaError> {
-        if let Some(cfg) = self
-            .configs
-            .lock()
-            .expect("CA config cache poisoned")
-            .get(host)
+        let host = host.trim().to_ascii_lowercase();
         {
-            return Ok(cfg.clone());
+            let mut cache = self.configs.lock().expect("CA config cache poisoned");
+            if let Some(cfg) = cache.get(&host) {
+                // Refresh recency (move to the back of the eviction order).
+                let cfg = cfg.clone();
+                cache.remove(&host);
+                cache.insert(host.clone(), cfg.clone());
+                return Ok(cfg);
+            }
         }
-        let cfg = Arc::new(self.build_config(host)?);
-        self.configs
-            .lock()
-            .expect("CA config cache poisoned")
-            .insert(host.to_string(), cfg.clone());
+        let cfg = Arc::new(self.build_config(&host)?);
+        let mut cache = self.configs.lock().expect("CA config cache poisoned");
+        cache.insert(host.clone(), cfg.clone());
+        while cache.len() > MAX_CACHED_CONFIGS {
+            // `HashMap` iteration order is arbitrary; dropping any oldest-ish
+            // entry is fine for a cache whose only job is to avoid re-keygen.
+            let Some(victim) = cache.keys().next().cloned() else {
+                break;
+            };
+            cache.remove(&victim);
+        }
         Ok(cfg)
     }
 
@@ -227,17 +285,29 @@ fn validity_window(days: i64) -> (time::OffsetDateTime, time::OffsetDateTime) {
     )
 }
 
-/// Write a private key file with `0600` permissions on Unix.
+/// Write a private key file with `0600` permissions on Unix. The file is
+/// created with the restrictive mode from the start, so there is no window
+/// where another local process could read the CA key.
 fn write_private(path: &PathBuf, bytes: &[u8]) -> std::io::Result<()> {
-    std::fs::write(path, bytes)?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true).mode(0o600);
+        let mut file = opts.open(path)?;
+        file.write_all(bytes)?;
+        // Repair an existing file that was created loosely.
         let mut perms = std::fs::metadata(path)?.permissions();
-        perms.set_mode(0o600);
-        std::fs::set_permissions(path, perms)?;
+        if perms.mode() & 0o077 != 0 {
+            perms.set_mode(0o600);
+            std::fs::set_permissions(path, perms)?;
+        }
+        Ok(())
     }
-    Ok(())
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, bytes)
+    }
 }
 
 #[cfg(test)]
@@ -265,6 +335,88 @@ mod tests {
         assert_eq!(pem1, ca2.ca_cert_pem(), "reloaded CA must be identical");
         // The reloaded issuer can still mint leaves.
         ca2.server_config("reload.test").expect("mint after reload");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+
+    #[test]
+    fn the_leaf_cache_is_bounded() {
+        let ca = CertAuthority::generate().unwrap();
+        // One more than the bound: the cache must not grow past it.
+        for i in 0..(MAX_CACHED_CONFIGS + 40) {
+            ca.server_config(&format!("host{i}.test")).unwrap();
+        }
+        let cached = ca.configs.lock().unwrap().len();
+        assert_eq!(cached, MAX_CACHED_CONFIGS, "cache must be bounded");
+    }
+
+    #[test]
+    fn a_cached_host_is_reused_not_regenerated() {
+        let ca = CertAuthority::generate().unwrap();
+        let first = ca.server_config("Same-Host.test").unwrap();
+        let second = ca.server_config("same-host.test").unwrap();
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "the same host must reuse the cached config (case-insensitively)"
+        );
+    }
+}
+
+#[cfg(test)]
+mod rotation_tests {
+    use super::*;
+
+    fn tmp(tag: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir =
+            std::env::temp_dir().join(format!("camio-ca-{tag}-{}-{nanos}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn rotate_replaces_the_key_and_removes_the_old_identity() {
+        let dir = tmp("rotate");
+        let first = CertAuthority::load_or_create_named(&dir, "Camio Test CA").unwrap();
+        let first_pem = first.ca_cert_pem().to_string();
+        assert!(CertAuthority::exists(&dir));
+
+        let rotated = CertAuthority::rotate(&dir, "Camio Test CA").unwrap();
+        assert_ne!(
+            rotated.ca_cert_pem(),
+            first_pem,
+            "rotation must mint a new CA, not reuse the old one"
+        );
+
+        // A rotation leaves exactly one usable CA on disk.
+        let reloaded = CertAuthority::load_or_create_named(&dir, "Camio Test CA").unwrap();
+        assert_eq!(reloaded.ca_cert_pem(), rotated.ca_cert_pem());
+
+        // Removal deletes both files and reports it.
+        assert!(CertAuthority::remove(&dir).unwrap());
+        assert!(!CertAuthority::exists(&dir));
+        // Removing again is a no-op, not an error.
+        assert!(!CertAuthority::remove(&dir).unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_partial_ca_is_reported_as_absent() {
+        let dir = tmp("partial");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!CertAuthority::exists(&dir), "no files → not a CA");
+        std::fs::write(dir.join("camio-ca.pem"), "junk").unwrap();
+        assert!(
+            !CertAuthority::exists(&dir),
+            "a cert without its key is not a CA"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

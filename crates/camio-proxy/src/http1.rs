@@ -89,6 +89,20 @@ impl<S: Read + Write> Conn<S> {
         &mut self.inner
     }
 
+    /// The bytes already buffered (for preface detection before a full read).
+    pub fn peek(&self) -> &[u8] {
+        self.available()
+    }
+
+    /// Read once so the first bytes of the connection are available to
+    /// [`Conn::peek`] without consuming a message.
+    pub fn prime(&mut self) -> std::io::Result<()> {
+        if self.available().is_empty() {
+            self.fill()?;
+        }
+        Ok(())
+    }
+
     /// Consume this reader, returning the stream and any bytes already buffered
     /// past the last consumed message (needed for a blind CONNECT relay).
     pub fn into_parts(self) -> (S, Vec<u8>) {
@@ -381,6 +395,20 @@ pub fn to_http_request(head: &RequestHead, body: Body, url: String) -> HttpReque
 
 /// Whether this request is a WebSocket upgrade handshake (RFC 6455): a GET with
 /// `Connection: Upgrade` (token, possibly among others) and `Upgrade: websocket`.
+/// Whether the buffered bytes begin an HTTP/2 connection (the RFC 7540 §3.5
+/// connection preface, `PRI * HTTP/2.0`).
+///
+/// A client that speaks HTTP/2 with *prior knowledge* never sends it, so the
+/// proxy must recognise the preface itself and answer with an explicit
+/// disposition rather than dropping the connection as a malformed HTTP/1
+/// request. The intercepted path reads HTTP/1.1 by design: the real HTTP/2
+/// fingerprint is reproduced by the matched engine toward the target, which is
+/// what the plan's transport model requires.
+pub fn is_http2_preface(available: &[u8]) -> bool {
+    const PREFACE: &[u8] = b"PRI * HTTP/2.0";
+    available.len() >= PREFACE.len() && &available[..PREFACE.len()] == PREFACE
+}
+
 pub fn is_websocket_upgrade(head: &RequestHead) -> bool {
     if !head.method.eq_ignore_ascii_case("GET") {
         return false;
@@ -485,6 +513,11 @@ fn is_request_hop_header(name: &str) -> bool {
         "te",
         "trailer",
         "upgrade",
+        // The proxy re-frames the body: the engine sets its own
+        // Content-Length, so forwarding the client's (now stale after a
+        // Match & Replace rewrite) value would desynchronize the origin.
+        "content-length",
+        "transfer-encoding",
     ];
     HOP.iter().any(|h| name.eq_ignore_ascii_case(h))
 }
@@ -721,5 +754,28 @@ mod tests {
         assert!(req.headers.get("connection").is_none());
         assert_eq!(req.headers.get("x-keep"), Some("yes"));
         assert_eq!(req.headers.get("host"), Some("h"));
+    }
+}
+
+#[cfg(test)]
+mod h2_tests {
+    use super::*;
+
+    #[test]
+    fn the_http2_preface_is_recognised() {
+        assert!(is_http2_preface(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"));
+        assert!(!is_http2_preface(b"GET / HTTP/1.1\r\n"));
+        // A shorter buffer is not a preface.
+        assert!(!is_http2_preface(b"PRI"));
+        assert!(!is_http2_preface(b""));
+    }
+
+    #[test]
+    fn conn_peeks_buffered_bytes() {
+        let mut conn = Conn::new(std::io::Cursor::new(
+            b"PRI * HTTP/2.0\r\nSM\r\n\r\n".to_vec(),
+        ));
+        conn.prime().unwrap();
+        assert!(is_http2_preface(conn.peek()));
     }
 }

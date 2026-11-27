@@ -612,29 +612,72 @@ mod finding_cvss_tests {
 }
 
 /// Lifecycle state of a long-running task (plan §11: "Long tasks return IDs with
-/// status/cancel/results").
+/// status/cancel/results"; plan §4.2 lists the full persisted set and requires
+/// validated transitions between them).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskState {
+    /// Accepted, not yet started (queued behind other work).
+    Queued,
+    /// Created and waiting for the operator's approval before it may run.
+    AwaitingApproval,
+    /// Started in-process (kept as the alias of `Queued` the runtime used
+    /// first, so old records stay valid).
     Pending,
+    /// Executing.
     Running,
+    /// Suspended at a real checkpoint. Pause is only exposed where the
+    /// underlying work can actually resume (plan §4.2).
     Paused,
-    Completed,
+    /// Cancellation requested; the job is winding down cooperatively.
+    Cancelling,
+    /// Stopped by the operator before doing further work.
     Cancelled,
+    /// Finished successfully.
+    Completed,
+    /// Finished with an error.
     Failed,
+    /// Found still non-terminal after a restart; its work did not complete
+    /// and is not blindly replayed (plan §4.2 restart reconciliation).
     Interrupted,
 }
 
 impl TaskState {
     pub fn as_str(self) -> &'static str {
         match self {
+            TaskState::Queued => "queued",
+            TaskState::AwaitingApproval => "awaiting_approval",
             TaskState::Pending => "pending",
             TaskState::Running => "running",
             TaskState::Paused => "paused",
+            TaskState::Cancelling => "cancelling",
             TaskState::Completed => "completed",
             TaskState::Cancelled => "cancelled",
             TaskState::Failed => "failed",
             TaskState::Interrupted => "interrupted",
+        }
+    }
+
+    /// Parse a stored/CLI state name. Accepts `-` and space as separators so
+    /// operator-facing names match the serde spelling.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s
+            .trim()
+            .to_ascii_lowercase()
+            .replace(['-', ' '], "_")
+            .as_str()
+        {
+            "queued" => Some(TaskState::Queued),
+            "awaiting_approval" => Some(TaskState::AwaitingApproval),
+            "pending" => Some(TaskState::Pending),
+            "running" => Some(TaskState::Running),
+            "paused" => Some(TaskState::Paused),
+            "cancelling" => Some(TaskState::Cancelling),
+            "completed" => Some(TaskState::Completed),
+            "cancelled" => Some(TaskState::Cancelled),
+            "failed" => Some(TaskState::Failed),
+            "interrupted" => Some(TaskState::Interrupted),
+            _ => None,
         }
     }
 
@@ -647,6 +690,32 @@ impl TaskState {
                 | TaskState::Failed
                 | TaskState::Interrupted
         )
+    }
+
+    /// Whether `self -> next` is a valid lifecycle transition (plan §4.2).
+    /// Terminal states never move, and no path skips the cancelling wind-down.
+    pub fn can_transition_to(self, next: TaskState) -> bool {
+        use TaskState::*;
+        match self {
+            Queued | Pending => matches!(
+                next,
+                AwaitingApproval | Running | Cancelling | Cancelled | Failed | Interrupted
+            ),
+            AwaitingApproval => matches!(
+                next,
+                Queued | Running | Cancelling | Cancelled | Failed | Interrupted
+            ),
+            Running => matches!(
+                next,
+                Paused | Cancelling | Completed | Cancelled | Failed | Interrupted
+            ),
+            Paused => matches!(
+                next,
+                Running | Cancelling | Cancelled | Failed | Interrupted
+            ),
+            Cancelling => matches!(next, Cancelled | Completed | Failed | Interrupted),
+            Completed | Cancelled | Failed | Interrupted => false,
+        }
     }
 }
 

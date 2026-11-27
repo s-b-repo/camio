@@ -33,29 +33,47 @@ impl PassiveCheck for GraphqlIntrospection {
         };
         let body = resp.body.as_text();
 
-        // Introspection data present in the response.
-        let introspection = body.contains("\"__schema\"") || body.contains("\"__type\"");
+        // A server with introspection *disabled* answers with an `errors` array
+        // that names `__schema` ("Cannot query field \"__schema\"") — that is
+        // the opposite of an exposed schema, so it must not match. Only an
+        // actual introspection *result* counts.
+        let has_errors = body.contains("\"errors\"");
+        let introspection = !has_errors
+            && (body.contains("\"__schema\"") || body.contains("\"__type\""))
+            && (body.contains("\"types\"") || body.contains("\"queryType\""));
 
         // A `…/graphql` endpoint that answered a query with a 2xx JSON response.
+        // This shows a live endpoint, not necessarily an open one: it is a
+        // tentative observation, never a firm "introspection enabled" claim.
         let is_json = content_type(resp)
             .map(|ct| ct.to_ascii_lowercase().contains("json"))
             .unwrap_or(false);
         let query_endpoint = ex.request.path().to_ascii_lowercase().ends_with("/graphql")
             && is_2xx(resp)
             && is_json
+            && !has_errors
             && ex.request.body.as_text().contains("query");
 
-        if !(introspection || query_endpoint) {
-            return Vec::new();
+        if introspection {
+            return vec![finding(
+                "GraphQL introspection enabled",
+                Severity::Medium,
+                Confidence::Firm,
+                "The GraphQL endpoint returns full schema introspection data (`__schema` with the type system), which lets anyone enumerate every type and operation. Disable introspection in production and require authentication on the GraphQL endpoint.",
+                ex.id,
+            )];
+        }
+        if query_endpoint {
+            return vec![finding(
+                "GraphQL endpoint answers arbitrary queries",
+                Severity::Low,
+                Confidence::Tentative,
+                "A `/graphql` endpoint answered a `query` with a 2xx JSON response. This shows a live endpoint that executes queries without erroring; it does not by itself prove introspection is enabled. Verify whether the endpoint requires authentication and whether introspection is disabled.",
+                ex.id,
+            )];
         }
 
-        vec![finding(
-            "GraphQL introspection enabled",
-            Severity::Medium,
-            Confidence::Firm,
-            "The GraphQL endpoint exposes schema introspection (`__schema`/`__type`) or answers arbitrary queries. Introspection lets anyone enumerate the full type system and every operation, which greatly accelerates targeted attacks. Disable introspection in production and require authentication on the GraphQL endpoint.",
-            ex.id,
-        )]
+        Vec::new()
     }
 }
 
@@ -143,5 +161,59 @@ mod tests {
             Source::Scanner,
         );
         assert!(GraphqlIntrospection.check(&ex).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+    use camio_core::{Body, HeaderList, HttpRequest, HttpResponse, HttpVersion, Source};
+
+    fn exchange(url: &str, req_body: &str, status: u16, ct: &str, resp_body: &str) -> HttpExchange {
+        let mut req = HttpRequest::get(url);
+        if !req_body.is_empty() {
+            req.method = "POST".into();
+            req.headers.push("Content-Type", "application/json");
+            req.body = Body::from_text(req_body.to_string());
+        }
+        let mut h = HeaderList::new();
+        h.push("Content-Type", ct);
+        let resp = HttpResponse {
+            status,
+            version: HttpVersion::Http11,
+            reason: None,
+            headers: h,
+            body: Body::from_text(resp_body),
+        };
+        HttpExchange::new(req, Source::Scanner).with_response(resp)
+    }
+
+    #[test]
+    fn introspection_disabled_error_is_not_a_finding() {
+        // "Cannot query field \"__schema\"" is the *disabled* answer; the old
+        // check reported it as "introspection enabled" at Medium/Firm.
+        let ex = exchange(
+            "https://api.test/graphql",
+            r#"{"query":"{ __schema { types { name } } }"}"#,
+            200,
+            "application/json",
+            r#"{"errors":[{"message":"Cannot query field \"__schema\" on type \"Query\"."}]}"#,
+        );
+        assert!(GraphqlIntrospection.check(&ex).is_empty());
+    }
+
+    #[test]
+    fn a_real_introspection_result_is_firm() {
+        let ex = exchange(
+            "https://api.test/graphql",
+            r#"{"query":"{ __schema { types { name } } }"}"#,
+            200,
+            "application/json",
+            r#"{"data":{"__schema":{"queryType":{"name":"Query"},"types":[{"name":"User","kind":"OBJECT"}]}}}"#,
+        );
+        let f = GraphqlIntrospection.check(&ex);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].severity, Severity::Medium);
+        assert_eq!(f[0].confidence, Confidence::Firm);
     }
 }

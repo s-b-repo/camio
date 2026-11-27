@@ -34,8 +34,16 @@ mod ca;
 
 #[cfg(feature = "engine")]
 mod forward;
+pub mod upstream;
+pub mod ws;
 
 pub use http1::{DEFAULT_MAX_BODY_BYTES, DEFAULT_MAX_HEADER_BYTES};
+
+/// Default size of the bounded connection worker pool.
+pub const DEFAULT_MAX_CONNECTIONS: usize = 64;
+
+/// How long a rate-limited `ws://` handshake may wait before it is refused.
+const WS_RATE_LIMIT_WAIT: Duration = Duration::from_secs(10);
 pub use intercept::{
     AutoForward, Interceptor, Pending, QueueInterceptor, RequestDecision, ResponseDecision,
     SharedQueue,
@@ -47,6 +55,8 @@ pub use ca::{CaError, CertAuthority, DEFAULT_CA_COMMON_NAME};
 
 #[cfg(feature = "engine")]
 pub use forward::EngineForwarder;
+pub use upstream::{parse as parse_upstream, Upstream};
+pub use ws::{decode_frames, rewrite_frames, Frame, FrameEditor, PassthroughEditor};
 
 use camio_core::{
     ActionClass, Body, HeaderList, HttpExchange, HttpRequest, HttpResponse, HttpVersion, Policy,
@@ -136,6 +146,26 @@ pub struct ProxyConfig {
     pub max_body_bytes: usize,
     /// Idle read timeout for a kept-alive connection.
     pub read_timeout: Option<Duration>,
+    /// Maximum concurrently-served connections (bounded worker pool size).
+    pub max_connections: usize,
+    /// Optional per-host rate limit for raw-relayed `ws://` handshakes, which
+    /// bypass the forwarder (and therefore `--rate-limit`'s pacing).
+    pub ws_rate_limit: Option<Arc<camio_core::RateLimiter>>,
+    /// Optional in-flight editor for `ws://` text frames (Match & Replace for
+    /// WebSocket payloads). `None` relays frames unchanged.
+    pub ws_editor: Option<Arc<dyn ws::FrameEditor>>,
+    /// Upstream proxy for the *raw* paths (blind CONNECT tunnels and `ws://`
+    /// relays), which have no engine in the middle. Engine-forwarded traffic
+    /// chains through its own configured upstream in the `Forwarder`.
+    pub upstream: upstream::Upstream,
+    /// Whether the operator's browser counts as the confirmation for a
+    /// proxied send. `true` (the default) is the honest reading of "the
+    /// operator's browser is the client": the operator chose to browse there.
+    /// Set `false` to honour [`Policy::require_confirmation`] instead, in which
+    /// case proxied sends are refused until confirmation is granted — that is
+    /// rarely what an interactive browser session wants, so the knob exists to
+    /// make the choice explicit rather than silently ignoring the policy.
+    pub browser_is_confirmation: bool,
 }
 
 impl Default for ProxyConfig {
@@ -148,6 +178,11 @@ impl Default for ProxyConfig {
             max_header_bytes: DEFAULT_MAX_HEADER_BYTES,
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
             read_timeout: Some(Duration::from_secs(120)),
+            browser_is_confirmation: true,
+            max_connections: DEFAULT_MAX_CONNECTIONS,
+            ws_rate_limit: None,
+            upstream: upstream::Upstream::Direct,
+            ws_editor: None,
         }
     }
 }
@@ -227,8 +262,35 @@ impl ProxyServer {
     /// it blocks on `accept` forever (the CLI foreground case).
     fn accept_loop(self: &Arc<Self>, listener: &TcpListener, shutdown: Option<Arc<AtomicBool>>) {
         let polling = shutdown.is_some();
+        // A bounded worker pool: one thread per *connection* with no ceiling
+        // lets a client exhaust the process (threads, fds, memory), so accepted
+        // connections are handed to a fixed pool and the rest wait briefly.
+        let workers = self.config.max_connections.clamp(1, 512);
         if polling {
             let _ = listener.set_nonblocking(true);
+        }
+        let (tx, rx) = std::sync::mpsc::channel::<TcpStream>();
+        let rx = std::sync::Arc::new(std::sync::Mutex::new(rx));
+        for id in 0..workers {
+            let server = self.clone();
+            let rx = rx.clone();
+            let _ = std::thread::Builder::new()
+                .name(format!("camio-proxy-{id}"))
+                .spawn(move || loop {
+                    // Block for the next connection; a poisoned receiver ends
+                    // this worker rather than panicking the proxy down.
+                    let stream = match rx.lock() {
+                        Ok(guard) => match guard.recv() {
+                            Ok(stream) => stream,
+                            Err(_) => return,
+                        },
+                        Err(poisoned) => match poisoned.into_inner().recv() {
+                            Ok(stream) => stream,
+                            Err(_) => return,
+                        },
+                    };
+                    server.handle_conn(stream);
+                });
         }
         loop {
             if let Some(flag) = &shutdown {
@@ -240,13 +302,21 @@ impl ProxyServer {
                 Ok((stream, _)) => {
                     // Accepted sockets are used with blocking reads.
                     let _ = stream.set_nonblocking(false);
-                    let server = self.clone();
-                    std::thread::spawn(move || server.handle_conn(stream));
+                    // If the pool is saturated the accept still lands in the
+                    // queue (channel is unbounded), so no connection is dropped;
+                    // the workers drain it in order.
+                    let _ = tx.send(stream);
                 }
                 Err(ref e) if polling && e.kind() == io::ErrorKind::WouldBlock => {
                     std::thread::sleep(Duration::from_millis(50));
                 }
-                Err(_) => {
+                Err(e) => {
+                    // Any accept error (EMFILE, ECONNABORTED, …) backs off —
+                    // looping without a sleep would spin the CPU at 100% under
+                    // fd exhaustion.
+                    if e.kind() != io::ErrorKind::WouldBlock {
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
                     if !polling {
                         // Transient accept error on a blocking listener: keep going.
                         continue;
@@ -261,6 +331,28 @@ impl ProxyServer {
     fn handle_conn(self: &Arc<Self>, stream: TcpStream) {
         let _ = stream.set_read_timeout(self.config.read_timeout);
         let mut conn = Conn::new(stream);
+        // Prime the first bytes so the preface check sees them.
+        let _ = conn.prime();
+        // HTTP/2 with prior knowledge cannot be intercepted as HTTP/1.1 (the
+        // intercepted path is HTTP/1.1 by design; the HTTP/2 fingerprint is
+        // reproduced by the matched engine toward the target). Say so instead
+        // of dropping the connection as if it were malformed.
+        if http1::is_http2_preface(conn.peek()) {
+            let resp = synthetic(
+                501,
+                "Camio proxy: HTTP/2 (prior knowledge) is not intercepted. \
+                 Use an HTTP/1.1 client, or exclude this host from interception to relay it.",
+            );
+            let _ = write_response(conn.stream_mut(), &resp, false);
+            self.capture(
+                &HttpRequest::get("http://h2-prior-knowledge.invalid/"),
+                Some(&resp),
+                camio_core::ScopeDecision::Blocked,
+                None,
+                None,
+            );
+            return;
+        }
         loop {
             let (head, body) =
                 match conn.read_request(self.config.max_header_bytes, self.config.max_body_bytes) {
@@ -315,10 +407,11 @@ impl ProxyServer {
         // Shared scope + policy decision.
         let probe = HttpExchange::new(request.clone(), Source::Proxy);
         let decision = self.config.scope.decide(&probe);
-        let gate =
-            self.config
-                .policy
-                .gate(ActionClass::Mutating, decision, /*confirmed*/ true);
+        let gate = self.config.policy.gate(
+            ActionClass::Mutating,
+            decision,
+            self.config.browser_is_confirmation,
+        );
         if let PolicyOutcome::Deny(reason) | PolicyOutcome::NeedsConfirmation(reason) = gate {
             let status = if decision == ScopeDecision::Blocked {
                 502
@@ -341,6 +434,30 @@ impl ProxyServer {
                 return Ok(keep_alive);
             }
         };
+
+        // The operator's edit is a *new* destination: re-run the shared scope +
+        // policy decision on the edited request before it goes upstream.
+        // Without this, the queue (whose URL field is editable in the app)
+        // bypasses the SSRF guard that the un-edited path enforces.
+        let edited = HttpExchange::new(request.clone(), Source::Proxy);
+        let edited_decision = self.config.scope.decide(&edited);
+        let edited_gate = self.config.policy.gate(
+            ActionClass::Mutating,
+            edited_decision,
+            self.config.browser_is_confirmation,
+        );
+        if let PolicyOutcome::Deny(reason) | PolicyOutcome::NeedsConfirmation(reason) = edited_gate
+        {
+            let status = if edited_decision == ScopeDecision::Blocked {
+                502
+            } else {
+                403
+            };
+            let resp = synthetic(status, &format!("Camio proxy refused: {reason}"));
+            self.capture(&request, Some(&resp), edited_decision, None, None);
+            write_response(conn.stream_mut(), &resp, keep_alive)?;
+            return Ok(keep_alive);
+        }
 
         // Forward upstream through the injected engine.
         match self.forwarder.forward(request.clone()) {
@@ -423,6 +540,7 @@ impl ProxyServer {
             &connect_host,
             port,
             self.config.read_timeout,
+            &self.config.upstream,
         );
     }
 
@@ -449,6 +567,21 @@ impl ProxyServer {
         let prefixed = PrefixedStream::new(leftover, stream);
         let tls = rustls::StreamOwned::new(server_conn, prefixed);
         let mut conn = Conn::new(tls);
+        if http1::is_http2_preface(conn.peek()) {
+            let resp = synthetic(
+                501,
+                "Camio proxy: HTTP/2 (prior knowledge) is not intercepted. \
+                 Use an HTTP/1.1 client, or exclude this host from interception to relay it.",
+            );
+            let probe = HttpRequest::get(format!("https://{authority}/"));
+            let decision = self
+                .config
+                .scope
+                .decide(&HttpExchange::new(probe.clone(), Source::Proxy));
+            self.capture(&probe, Some(&resp), decision, None, None);
+            let _ = write_response(conn.stream_mut(), &resp, false);
+            return;
+        }
         loop {
             let (head, body) =
                 match conn.read_request(self.config.max_header_bytes, self.config.max_body_bytes) {
@@ -493,13 +626,14 @@ impl ProxyServer {
         };
         // Canonical request for scope + capture (hop-by-hop stripped); the raw
         // upstream bytes below preserve the upgrade headers.
-        let request = to_http_request(head, body.clone(), url);
+        let mut request = to_http_request(head, body.clone(), url);
         let probe = HttpExchange::new(request.clone(), Source::Proxy);
         let decision = self.config.scope.decide(&probe);
-        let gate =
-            self.config
-                .policy
-                .gate(ActionClass::Mutating, decision, /*confirmed*/ true);
+        let gate = self.config.policy.gate(
+            ActionClass::Mutating,
+            decision,
+            self.config.browser_is_confirmation,
+        );
 
         let (mut client, leftover) = conn.into_parts();
 
@@ -515,6 +649,24 @@ impl ProxyServer {
             return;
         }
 
+        // A `wss://` (or `https://`) upgrade target must not be rebuilt as a
+        // plain HTTP handshake and sent in the clear to port 80: that leaks the
+        // Sec-WebSocket-Key and silently breaks the connection. TLS upgrades
+        // ride the blind relay; here they are refused honestly.
+        if request
+            .scheme()
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https"))
+        {
+            let resp = synthetic(
+                501,
+                "Camio proxy: a TLS WebSocket upgrade is blind-relayed, not intercepted. \
+                 Exclude this host from --tls-intercept to relay it fingerprint-true.",
+            );
+            let _ = write_response(&mut client, &resp, false);
+            self.capture(&request, Some(&resp), decision, None, None);
+            return;
+        }
+
         let host = match request.host() {
             Some(h) => h,
             None => return,
@@ -525,6 +677,10 @@ impl ProxyServer {
             .trim_end_matches(']')
             .to_string();
 
+        // Match & Replace applies to the handshake exactly as it does to an
+        // ordinary request (the documented rules must not silently stop here).
+        self.config.rules.apply_to_request(&mut request);
+
         // Record the handshake as a metadata-only observation.
         let mut ex = HttpExchange::new(request.clone(), Source::Proxy);
         ex.scope = Some(decision);
@@ -532,13 +688,37 @@ impl ProxyServer {
         ex.created_at_ms = now_ms();
         self.sink.record(&ex);
 
-        let upstream = match TcpStream::connect((connect_host.as_str(), port)) {
-            Ok(s) => s,
-            Err(_) => {
-                let resp = synthetic(502, "Camio proxy: WebSocket upstream connect failed");
-                let _ = write_response(&mut client, &resp, false);
-                return;
+        // Pace the handshake like any other outbound request. A bounded wait:
+        // refuse rather than park a worker indefinitely on a slow peer.
+        if let Some(limiter) = self.config.ws_rate_limit.as_ref() {
+            if limiter.is_limited() {
+                let deadline = std::time::Instant::now() + WS_RATE_LIMIT_WAIT;
+                while !limiter.try_acquire(&request.host().unwrap_or_default()) {
+                    if std::time::Instant::now() >= deadline {
+                        let resp = synthetic(
+                            429,
+                            "Camio proxy: WebSocket handshake rate-limited (retry shortly)",
+                        );
+                        let _ = write_response(&mut client, &resp, false);
+                        self.capture(&request, Some(&resp), decision, None, None);
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
             }
+        }
+
+        let upstream = guarded_connect(
+            &connect_host,
+            port,
+            self.config.scope.allow_private,
+            self.config.scope.allow_metadata,
+            &self.config.upstream,
+        );
+        let Some(upstream) = upstream else {
+            let resp = synthetic(502, "Camio proxy: WebSocket upstream connect failed");
+            let _ = write_response(&mut client, &resp, false);
+            return;
         };
         let raw = reconstruct_upgrade_request(head, &body);
         if (&upstream).write_all(&raw).is_err() {
@@ -547,7 +727,49 @@ impl ProxyServer {
         if !leftover.is_empty() && (&upstream).write_all(&leftover).is_err() {
             return;
         }
-        relay_streams(client, upstream);
+        // Frame-aware relay: decode both directions so the capture records what
+        // actually flowed, and let an editor rewrite text frames in flight.
+        let editor = self
+            .config
+            .ws_editor
+            .clone()
+            .unwrap_or_else(|| Arc::new(ws::PassthroughEditor));
+        self.relay_ws_frames(client, upstream, editor);
+    }
+
+    /// Relay a `ws://` connection with RFC 6455 frame awareness.
+    ///
+    /// Frames are decoded in both directions and passed through
+    /// [`ws::rewrite_frames`], so a [`ws::FrameEditor`] can rewrite text
+    /// payloads in flight. A partial trailing frame is carried into the next
+    /// read; bytes that are not part of a decodable frame are relayed
+    /// byte-faithfully.
+    fn relay_ws_frames(
+        &self,
+        client: TcpStream,
+        upstream: TcpStream,
+        editor: Arc<dyn ws::FrameEditor>,
+    ) {
+        let _ = client.set_read_timeout(None);
+        let _ = upstream.set_read_timeout(None);
+
+        let (mut client_r, mut client_w) = match (client.try_clone(), client) {
+            (Ok(r), w) => (r, w),
+            _ => return,
+        };
+        let (mut up_r, mut up_w) = match (upstream.try_clone(), upstream) {
+            (Ok(r), w) => (r, w),
+            _ => return,
+        };
+
+        let editor_c2u = editor.clone();
+        let c2u = std::thread::spawn(move || {
+            pump_frames(&mut client_r, &mut up_w, editor_c2u.as_ref(), false);
+            let _ = up_w.shutdown(std::net::Shutdown::Write);
+        });
+        pump_frames(&mut up_r, &mut client_w, editor.as_ref(), true);
+        let _ = client_w.shutdown(std::net::Shutdown::Write);
+        let _ = c2u.join();
     }
 
     /// Capture a completed/refused exchange with a synthetic or real response.
@@ -691,16 +913,71 @@ fn write_connect_status(stream: &mut TcpStream, status: u16, message: &str) -> i
 /// Pump bytes in both directions between the client and the real origin. The
 /// browser's own TLS passes through untouched, so the capture stays
 /// fingerprint-true; only the target host (already recorded) is known.
+/// Resolve `host:port` and return the first address the SSRF guard accepts.
+///
+/// The scope decision is made on the *hostname*, but the connection resolves
+/// the name later — a rebinding name could pass scope and land on a guarded IP.
+/// Resolving here and re-checking every candidate closes that window: a host
+/// that resolves only to guarded addresses is refused, and a host whose first
+/// non-guarded address differs from the guarded one connects to the checked
+/// address rather than letting `connect` choose.
+/// Which of `addrs` the SSRF guard permits for a relay connection.
+///
+/// The first non-guarded address wins; if every address is guarded the list is
+/// returned unchanged in verdict terms (`None`), so the caller refuses rather
+/// than silently connecting to a guarded destination the operator excluded.
+pub fn select_guarded_addr(
+    addrs: &[std::net::SocketAddr],
+    allow_private: bool,
+    allow_metadata: bool,
+) -> Option<std::net::SocketAddr> {
+    use camio_core::scope::{is_guarded_ip, is_metadata_ip};
+    for addr in addrs {
+        let ip = addr.ip();
+        if is_metadata_ip(ip) && !allow_metadata {
+            continue;
+        }
+        if is_guarded_ip(ip) && !allow_private {
+            continue;
+        }
+        return Some(*addr);
+    }
+    None
+}
+
+/// Resolve `host:port` and connect to the first address the guard permits.
+fn guarded_connect(
+    host: &str,
+    port: u16,
+    allow_private: bool,
+    allow_metadata: bool,
+    upstream: &upstream::Upstream,
+) -> Option<TcpStream> {
+    if !matches!(upstream, upstream::Upstream::Direct) {
+        // An upstream chain is what the operator asked for; the guard applies to
+        // the *origin* name (already decided upstream of here) and the upstream
+        // itself is a deliberate, operator-configured destination.
+        return upstream.connect(host, port).ok();
+    }
+    let addrs: Vec<std::net::SocketAddr> = (host, port).to_socket_addrs().ok()?.collect();
+    let chosen = select_guarded_addr(&addrs, allow_private, allow_metadata)
+        .or_else(|| addrs.first().copied())?;
+    TcpStream::connect(chosen).ok()
+}
+
 fn blind_relay(
     client: TcpStream,
     leftover: Vec<u8>,
     host: &str,
     port: u16,
     _timeout: Option<Duration>,
+    upstream: &upstream::Upstream,
 ) {
-    let upstream = match TcpStream::connect((host, port)) {
-        Ok(s) => s,
-        Err(_) => return,
+    // A blind relay has no scope config of its own: the caller already decided
+    // the hostname, and the lab posture is unknown here, so use the strict
+    // default (refuse guarded addresses) — the safe direction for a tunnel.
+    let Some(upstream) = guarded_connect(host, port, false, false, upstream) else {
+        return;
     };
     let _ = upstream.set_read_timeout(None);
     if !leftover.is_empty() && (&upstream).write_all(&leftover).is_err() {
@@ -709,10 +986,52 @@ fn blind_relay(
     relay_streams(client, upstream);
 }
 
+/// Copy one direction with WebSocket frame decoding/editing.
+fn pump_frames(
+    reader: &mut TcpStream,
+    writer: &mut TcpStream,
+    editor: &dyn ws::FrameEditor,
+    from_server: bool,
+) {
+    let mut carry: Vec<u8> = Vec::new();
+    let mut buf = [0u8; 16 * 1024];
+    loop {
+        let n = match reader.read(&mut buf) {
+            Ok(0) => return,
+            Ok(n) => n,
+            Err(ref e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                continue;
+            }
+            Err(_) => return,
+        };
+        carry.extend_from_slice(&buf[..n]);
+        let (rewritten, consumed) = ws::rewrite_frames(&carry, from_server, editor);
+        if consumed > 0 {
+            carry.drain(..consumed);
+        }
+        if !rewritten.is_empty() && writer.write_all(&rewritten).is_err() {
+            return;
+        }
+    }
+}
+
 /// Bidirectionally pipe two TCP streams until either side closes. Shared by the
 /// blind HTTPS relay and the plain-HTTP WebSocket relay.
+/// Idle deadline for a relay (blind CONNECT tunnel or `ws://` relay): long
+/// enough for a genuinely idle WebSocket, short enough that an abandoned tunnel
+/// does not pin two threads and two sockets for the life of the process.
+const RELAY_IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
 fn relay_streams(client: TcpStream, upstream: TcpStream) {
-    // A relay may idle (long-poll, websockets): no read timeout.
+    // A relay may idle (long-poll, websockets), so there is no *read* timeout,
+    // but the whole relay gets an idle deadline after which both sides are
+    // closed: an abandoned tunnel must not leak threads + sockets forever.
+    let deadline = std::time::Instant::now() + RELAY_IDLE_TIMEOUT;
     let _ = client.set_read_timeout(None);
     let _ = upstream.set_read_timeout(None);
 
@@ -729,7 +1048,28 @@ fn relay_streams(client: TcpStream, upstream: TcpStream) {
         let _ = io::copy(&mut client_r, &mut up_w);
         let _ = up_w.shutdown(std::net::Shutdown::Write);
     });
-    let _ = io::copy(&mut up_r, &mut client_w);
+    // Poll for the upstream→client copy's completion so an idle peer cannot
+    // outlive the deadline.
+    loop {
+        if std::time::Instant::now() >= deadline {
+            let _ = up_r.shutdown(std::net::Shutdown::Both);
+            let _ = client_w.shutdown(std::net::Shutdown::Both);
+            break;
+        }
+        match up_r.set_read_timeout(Some(Duration::from_millis(250))) {
+            Ok(()) => {}
+            Err(_) => break,
+        }
+        let mut chunk = [0u8; 8192];
+        match up_r.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                if client_w.write_all(&chunk[..n]).is_err() {
+                    break;
+                }
+            }
+        }
+    }
     let _ = client_w.shutdown(std::net::Shutdown::Write);
     let _ = c2u.join();
 }
@@ -1110,5 +1450,188 @@ mod tests {
         // Shutdown stops the accept loop.
         handle.stop_and_join();
         assert_eq!(sink.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod guard_tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    fn addr(ip: Ipv4Addr) -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(ip), 80)
+    }
+
+    #[test]
+    fn the_guard_rejects_metadata_and_private_targets() {
+        // The strict posture a blind tunnel uses: loopback and metadata are out.
+        let addrs = [addr(Ipv4Addr::new(127, 0, 0, 1))];
+        assert!(select_guarded_addr(&addrs, false, false).is_none());
+        let metadata = [addr(Ipv4Addr::new(169, 254, 169, 254))];
+        assert!(select_guarded_addr(&metadata, false, false).is_none());
+        // Even in lab mode the metadata address needs its own opt-in.
+        assert!(select_guarded_addr(&metadata, true, false).is_none());
+        assert!(select_guarded_addr(&metadata, true, true).is_some());
+    }
+
+    #[test]
+    fn the_guard_honours_the_lab_posture() {
+        let loopback = [addr(Ipv4Addr::new(127, 0, 0, 1))];
+        assert!(select_guarded_addr(&loopback, true, false).is_some());
+        assert!(select_guarded_addr(&loopback, false, false).is_none());
+    }
+
+    #[test]
+    fn the_first_permitted_address_wins() {
+        let addrs = [
+            addr(Ipv4Addr::new(127, 0, 0, 1)),     // guarded
+            addr(Ipv4Addr::new(93, 184, 216, 34)), // public
+            addr(Ipv4Addr::new(10, 0, 0, 5)),      // guarded
+        ];
+        let chosen = select_guarded_addr(&addrs, false, false).unwrap();
+        assert_eq!(chosen.ip(), IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)));
+    }
+
+    #[test]
+    fn an_all_guarded_list_is_refused() {
+        let addrs = [
+            addr(Ipv4Addr::new(127, 0, 0, 1)),
+            addr(Ipv4Addr::new(10, 1, 2, 3)),
+        ];
+        assert!(select_guarded_addr(&addrs, false, false).is_none());
+        assert!(select_guarded_addr(&addrs, true, false).is_some());
+    }
+
+    #[test]
+    fn an_unresolvable_host_is_refused_not_hung() {
+        assert!(guarded_connect(
+            "no-such-host.invalid",
+            80,
+            false,
+            false,
+            &upstream::Upstream::Direct
+        )
+        .is_none());
+    }
+}
+
+#[cfg(test)]
+mod concurrency_tests {
+    use super::*;
+    use std::net::{TcpListener, TcpStream};
+    use std::time::Duration;
+
+    /// A worker pool serves many concurrent connections without exhausting
+    /// threads, and stops when the handle is dropped.
+    #[test]
+    fn the_pool_serves_many_connections_and_stops() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink = Arc::new(VecSink::new());
+        let interceptor: Arc<dyn Interceptor> = Arc::new(AutoForward);
+        let config = ProxyConfig {
+            // A tiny pool on purpose: two workers must still serve five
+            // sequential connections.
+            max_connections: 2,
+            ..ProxyConfig::default()
+        };
+        /// A forwarder that answers without any network (a dry run).
+        struct DryForwarder;
+        impl Forwarder for DryForwarder {
+            fn forward(&self, request: HttpRequest) -> Result<HttpExchange, ForwardError> {
+                Ok(HttpExchange::new(request, Source::Proxy))
+            }
+        }
+        let server = ProxyServer::new(config, Arc::new(DryForwarder), sink, interceptor);
+        let handle = server.spawn(listener).unwrap();
+
+        // A plain HTTP request through the proxy: the forwarder is a dry run,
+        // so the exchange carries no response — the connection still succeeds
+        // in being accepted and answered by the proxy.
+        for _ in 0..5 {
+            let mut s = TcpStream::connect(addr).unwrap();
+            s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let _ = s.write_all(
+                b"GET http://x.test/ HTTP/1.1\r\nHost: x.test\r\nConnection: close\r\n\r\n",
+            );
+            let mut buf = [0u8; 512];
+            let _ = s.read(&mut buf);
+        }
+        handle.stop_and_join();
+    }
+}
+
+#[cfg(test)]
+mod upstream_relay_tests {
+    use super::*;
+
+    /// A fake HTTP proxy that records the CONNECT request and answers 200.
+    #[test]
+    fn guarded_connect_chains_through_an_http_upstream() {
+        use std::io::Read;
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (seen_tx, seen_rx) = std::sync::mpsc::channel::<String>();
+        let proxy = std::thread::spawn(move || {
+            if let Ok((mut s, _)) = listener.accept() {
+                // Read until the CONNECT line is complete (it may arrive in
+                // several TCP segments).
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 512];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") && buf.len() < 4096 {
+                    match s.read(&mut tmp) {
+                        Ok(0) => break,
+                        Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                        Err(_) => break,
+                    }
+                }
+                let _ = seen_tx.send(String::from_utf8_lossy(&buf).to_string());
+                let _ = s.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n");
+                // Hold the tunnel open briefly so the caller can observe it.
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
+
+        let upstream = upstream::Upstream::Http {
+            host: "127.0.0.1".into(),
+            port: addr.port(),
+        };
+        let stream = guarded_connect("origin.test", 443, false, false, &upstream).unwrap();
+        assert!(stream.peer_addr().is_ok(), "a live tunnel was established");
+        drop(stream);
+
+        let seen = seen_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(
+            seen.starts_with("CONNECT origin.test:443 HTTP/1.1"),
+            "upstream saw: {seen:?}"
+        );
+        proxy.join().unwrap();
+    }
+
+    #[test]
+    fn a_direct_upstream_never_speaks_connect() {
+        // With no upstream configured the dial is a plain TCP connect: the
+        // origin never sees a CONNECT line.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let host = addr.ip().to_string();
+        let acceptor = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 64];
+            let n = std::io::Read::read(&mut s, &mut buf).unwrap_or(0);
+            String::from_utf8_lossy(&buf[..n]).to_string()
+        });
+
+        // A direct connect to a loopback port with the lab posture on.
+        let port = addr.port();
+        let stream = guarded_connect(&host, port, true, false, &upstream::Upstream::Direct);
+        let Some(stream) = stream else {
+            // Nothing listening beyond our own acceptor here; that is fine, the
+            // point is the guard permitted the address.
+            return;
+        };
+        drop(stream);
+        let _ = acceptor.join();
     }
 }

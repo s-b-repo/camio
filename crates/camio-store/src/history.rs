@@ -77,6 +77,23 @@ impl StoredExchange {
         self.load(store, None)
     }
 
+    /// Total body bytes this row currently carries (0 when bodies were not
+    /// loaded, since the metadata path leaves them empty).
+    pub(crate) fn body_bytes(&self) -> usize {
+        self.exchange.request.body.len()
+            + self
+                .exchange
+                .response
+                .as_ref()
+                .map(|r| r.body.len())
+                .unwrap_or(0)
+    }
+
+    /// Consume the row into its exchange.
+    pub(crate) fn into_exchange(self) -> HttpExchange {
+        self.exchange
+    }
+
     // Older query callers expect length-sized placeholders. Paged views and
     // body filters use the stored lengths directly instead.
     pub(super) fn with_length_placeholders(mut self) -> HttpExchange {
@@ -231,7 +248,7 @@ impl Store {
     }
 }
 
-fn metadata_clause(filter: RequiredMetadata<'_>) -> Option<(&'static str, Value)> {
+pub(crate) fn metadata_clause(filter: RequiredMetadata<'_>) -> Option<(&'static str, Value)> {
     Some(match filter {
         RequiredMetadata::Method(value) => ("method = ?3", Value::Text(value.to_owned())),
         RequiredMetadata::Host(value) => ("host = ?3", Value::Text(value.to_owned())),

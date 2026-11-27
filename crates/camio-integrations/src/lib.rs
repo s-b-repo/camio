@@ -11,11 +11,17 @@
 //! [`IntegrationError::NotInstalled`], never a crash — and the runner enforces
 //! Camio's "bounded, cancellable" contract (plan §4.2) at the process boundary.
 
+pub mod httpx;
 pub mod nuclei;
 pub mod registry;
 pub mod subfinder;
 
 pub use registry::{probe_tool, registry, ToolInfo, ToolStatus, KNOWN_TOOLS};
+
+pub use httpx::{
+    parse_httpx_jsonl, run_httpx, run_httpx_cancellable, run_httpx_raw,
+    summarize as summarize_probe, HttpxOptions, ProbeResult,
+};
 
 pub use nuclei::{
     nuclei_to_findings, parse_nuclei_jsonl, run_nuclei, run_nuclei_cancellable, NucleiFinding,
@@ -36,6 +42,9 @@ pub enum IntegrationError {
     Run(String),
     /// Output was produced but could not be used.
     Parse(String),
+    /// A binary with the tool's name exists but is not the tool the adapter
+    /// drives (e.g. a different `httpx` implementation earlier on `PATH`).
+    Incompatible { tool: String, detail: String },
 }
 
 impl fmt::Display for IntegrationError {
@@ -46,6 +55,9 @@ impl fmt::Display for IntegrationError {
             }
             IntegrationError::Run(e) => write!(f, "tool run failed: {e}"),
             IntegrationError::Parse(e) => write!(f, "tool output parse failed: {e}"),
+            IntegrationError::Incompatible { tool, detail } => {
+                write!(f, "{tool} on PATH is incompatible: {detail}")
+            }
         }
     }
 }

@@ -13,7 +13,7 @@
 //! Evidence is never silently rewritten: the full structured exchange is stored
 //! as JSON (bodies elided to their sha) and reconstructed byte-for-byte on read.
 
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 use camio_core::{Body, ExchangeId, Finding, FindingId, HttpExchange, Query};
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -61,6 +61,7 @@ mod history;
 mod inventory;
 mod report;
 mod review;
+mod tasks;
 mod workflow;
 mod workspace;
 
@@ -75,10 +76,16 @@ pub use inventory::{
 };
 pub use report::{FindingReport, ReportFormat};
 pub use review::{ReviewCandidate, ReviewCounts, ReviewTask};
+pub use tasks::TaskRow;
 pub use workflow::{ReviewPlan, ReviewWorkflow, WorkflowVersion, MAX_REVIEW_EXCHANGES};
 pub use workspace::{FindingReview, ReviewState, SavedExchange, SavedQuery, WorkspaceSummary};
 
-const SCHEMA_VERSION: i64 = 7;
+/// Maximum rows a metadata query scans before giving up: a generous window
+/// that keeps a query matching nothing from walking a multi-million-row table
+/// in Rust, while the SQL prefilter keeps real result sets far below it.
+const MAX_SCAN_WINDOW: usize = 100_000;
+
+const SCHEMA_VERSION: i64 = 9;
 
 /// Triage lifecycle for a finding (plan §F14). Additive: the `findings` rows are
 /// untouched; a finding with no row here is treated as `open`.
@@ -110,6 +117,50 @@ CREATE TABLE IF NOT EXISTS exchange_label (
 );
 CREATE INDEX IF NOT EXISTS idx_exchange_label_label ON exchange_label(label);
 ";
+
+/// Durable OAST interactions (plan §F15): retained under a policy, not by
+/// process uptime, so callbacks survive restarts and prunes are decisions.
+const OAST_INTERACTION_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS oast_interactions (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    token          TEXT,
+    method         TEXT NOT NULL,
+    target         TEXT NOT NULL,
+    host           TEXT,
+    source         TEXT NOT NULL,
+    received_at_ms INTEGER NOT NULL,
+    body_summary   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_oast_token ON oast_interactions(token);
+CREATE INDEX IF NOT EXISTS idx_oast_received ON oast_interactions(received_at_ms);
+";
+
+/// One stored OAST interaction (plan §F15). Kept in the store so the
+/// dependency stays one-directional (camio-oast depends on camio-store).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OastRow {
+    pub id: i64,
+    pub token: Option<String>,
+    pub method: String,
+    pub target: String,
+    pub host: Option<String>,
+    pub source: String,
+    pub received_at_ms: i64,
+    pub body_summary: Option<String>,
+}
+
+fn oast_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<OastRow> {
+    Ok(OastRow {
+        id: r.get(0)?,
+        token: r.get(1)?,
+        method: r.get(2)?,
+        target: r.get(3)?,
+        host: r.get(4)?,
+        source: r.get(5)?,
+        received_at_ms: r.get(6)?,
+        body_summary: r.get(7)?,
+    })
+}
 
 /// The embedded store.
 pub struct Store {
@@ -187,6 +238,14 @@ impl Store {
                 tx.execute_batch(EXCHANGE_LABEL_SCHEMA)
                     .context("creating exchange-label (organizer) schema")?;
             }
+            if version < 8 {
+                tx.execute_batch(tasks::SCHEMA)
+                    .context("creating durable task-record schema")?;
+            }
+            if version < 9 {
+                tx.execute_batch(OAST_INTERACTION_SCHEMA)
+                    .context("creating durable OAST interaction schema")?;
+            }
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             tx.commit()?;
         }
@@ -212,6 +271,82 @@ impl Store {
         Ok(self
             .conn
             .query_row("SELECT COUNT(*) FROM blobs", [], |r| r.get(0))?)
+    }
+
+    /// Record a durable OAST interaction (plan §F15).
+    pub fn record_oast_interaction(&self, row: &OastRow) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO oast_interactions (token, method, target, host, source,
+                                            received_at_ms, body_summary)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                row.token,
+                row.method,
+                row.target,
+                row.host,
+                row.source,
+                row.received_at_ms,
+                row.body_summary,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Prune OAST interactions under the retention policy (count + age).
+    pub fn prune_oast_interactions(&self, max_count: usize, max_age_ms: i64) -> Result<usize> {
+        let oldest = now_ms() - max_age_ms.max(0);
+        let by_age = self.conn.execute(
+            "DELETE FROM oast_interactions WHERE received_at_ms < ?1",
+            params![oldest],
+        )?;
+        let by_count = self.conn.execute(
+            "DELETE FROM oast_interactions WHERE id NOT IN (
+                 SELECT id FROM oast_interactions ORDER BY id DESC LIMIT ?1
+             )",
+            params![max_count as i64],
+        )?;
+        Ok(by_age + by_count)
+    }
+
+    /// Stored OAST interactions for one token (newest first).
+    pub fn oast_interactions_for_token(&self, token: &str) -> Result<Vec<OastRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, token, method, target, host, source, received_at_ms, body_summary
+             FROM oast_interactions WHERE token = ?1 ORDER BY id DESC LIMIT 200",
+        )?;
+        let rows = stmt.query_map(params![token], oast_row)?;
+        Ok(rows.filter_map(Result::ok).collect())
+    }
+
+    /// Stored OAST interactions (newest first).
+    pub fn oast_interactions(&self, limit: i64) -> Result<Vec<OastRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, token, method, target, host, source, received_at_ms, body_summary
+             FROM oast_interactions ORDER BY id DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit], oast_row)?;
+        Ok(rows.filter_map(Result::ok).collect())
+    }
+
+    /// Persist a background-task record (plan §4.2 durable jobs).
+    pub fn save_task(&self, row: &TaskRow) -> Result<()> {
+        Ok(tasks::save(&self.conn, row)?)
+    }
+
+    /// Read one durable task record.
+    pub fn task(&self, id: i64) -> Result<Option<TaskRow>> {
+        Ok(tasks::get(&self.conn, id)?)
+    }
+
+    /// Read durable task records, newest first.
+    pub fn tasks(&self, limit: i64) -> Result<Vec<TaskRow>> {
+        Ok(tasks::list(&self.conn, limit)?)
+    }
+
+    /// Mark records still non-terminal after a restart as interrupted
+    /// (plan §4.2 reconciliation). Returns how many were reconciled.
+    pub fn reconcile_interrupted_tasks(&self) -> Result<usize> {
+        Ok(tasks::reconcile_interrupted(&self.conn, now_ms())?)
     }
 
     /// Insert an exchange, returning its assigned id. Bodies are stored as
@@ -357,6 +492,122 @@ impl Store {
         Ok(out)
     }
 
+    /// Metadata-only query: like [`Store::query`] but the returned exchanges
+    /// carry *no* body bytes at all instead of zero-filled placeholders sized
+    /// to the original body.
+    ///
+    /// The old placeholder behavior allocated `Σ(req_len + resp_len)` across
+    /// every matched row, so a metadata query over a store with large bodies
+    /// could exhaust memory while answering a question that never needed the
+    /// bytes. Use this for URL/host/status-shaped work (site maps, scoping,
+    /// previews); use [`Store::query_with_bodies`] when the body is read.
+    pub fn query_metadata(&self, query: &Query, limit: usize) -> Result<Vec<HttpExchange>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let with_bodies = query.needs_body();
+        let scan = self.metadata_scan(query, MAX_SCAN_WINDOW);
+        let mut out = Vec::new();
+        for mut row in scan? {
+            if with_bodies {
+                row.load_bodies(self)?;
+            }
+            if query.matches(&row) {
+                out.push(row.into_exchange());
+                if out.len() >= limit {
+                    break;
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// A bounded scan of matching *metadata* rows, with the query's
+    /// required-metadata conjunct pushed into SQL so the query is answered from
+    /// the `exchanges` indexes instead of walking the whole table in Rust
+    /// (plan §5: "indexed query planning").
+    ///
+    /// The SQL clause is a superset prefilter of the full query — the caller
+    /// still applies `Query::matches` — so results stay exact, and the window
+    /// bound keeps a query that matches nothing from scanning forever.
+    pub(crate) fn metadata_scan(
+        &self,
+        query: &Query,
+        window: usize,
+    ) -> Result<Vec<history::StoredExchange>> {
+        // Every required conjunct is pushed (host, method, source, status are
+        // all indexed), so a multi-predicate query is narrowed by all of them
+        // instead of only the first. They are AND-ed: each is *required* by the
+        // query, so the SQL set stays a superset of the real result set.
+        let mut sql = format!("SELECT {} FROM exchanges", history::EXCHANGE_COLUMNS);
+        let mut bind: Vec<rusqlite::types::Value> = Vec::new();
+        let mut clauses: Vec<String> = Vec::new();
+        for filter in query.required_metadata_all() {
+            if let Some((clause, value)) = history::metadata_clause(filter) {
+                // `metadata_clause` writes the paged view's `?3` placeholder;
+                // renumber to this query's own parameter index.
+                let param = bind.len() + 1;
+                clauses.push(clause.replace("?3", &format!("?{param}")));
+                bind.push(value);
+            }
+        }
+        if !clauses.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&clauses.join(" AND "));
+        }
+        sql.push_str(&format!(" ORDER BY id DESC LIMIT {}", window.max(1) as i64));
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut rows = stmt.query(rusqlite::params_from_iter(bind))?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            out.push(history::StoredExchange::from_row(row)?);
+        }
+        Ok(out)
+    }
+
+    /// Load exchanges for a passive scan, bounded by *both* a row count and a
+    /// cumulative body-byte budget.
+    ///
+    /// A synchronous scan request must not load 1000 exchanges' worth of real
+    /// bodies (several GiB for a store with large payloads) into memory inside
+    /// one single-threaded request: rows whose bodies would exceed the budget
+    /// are skipped and counted instead, so the caller can say so.
+    pub fn query_for_scan(
+        &self,
+        query: &Query,
+        max_rows: usize,
+        max_bytes: usize,
+    ) -> Result<(Vec<HttpExchange>, usize)> {
+        if max_rows == 0 || max_bytes == 0 {
+            return Ok((Vec::new(), 0));
+        }
+        let with_bodies = query.needs_body();
+        let scan = self.metadata_scan(query, MAX_SCAN_WINDOW);
+
+        let mut out = Vec::new();
+        let mut skipped = 0usize;
+        let mut budget = max_bytes;
+        for mut row in scan? {
+            if out.len() >= max_rows {
+                break;
+            }
+            if with_bodies {
+                row.load_bodies(self)?;
+            }
+            if !query.matches(&row) {
+                continue;
+            }
+            let used = row.body_bytes();
+            if used > budget {
+                skipped += 1;
+                continue;
+            }
+            budget = budget.saturating_sub(used);
+            out.push(row.into_exchange());
+        }
+        Ok((out, skipped))
+    }
+
     /// Convenience: the `limit` most recent exchanges (no filter).
     pub fn recent(&self, limit: usize) -> Result<Vec<HttpExchange>> {
         self.query(&Query::compile("").expect("empty query compiles"), limit)
@@ -454,6 +705,12 @@ impl Store {
 
     /// Save (or overwrite) a named CamioQL search (plan §F07).
     pub fn save_search(&mut self, name: &str, query: &str) -> Result<()> {
+        // Bound the name like the sibling saved-object APIs: an empty or
+        // unbounded name is an operator-visible defect, not a silent row.
+        ensure!(
+            !name.trim().is_empty() && name.len() <= 100,
+            "saved-search name supports 1-100 bytes"
+        );
         self.conn.execute(
             "INSERT INTO saved_search (name, query, created_at_ms) VALUES (?1, ?2, ?3)
              ON CONFLICT(name) DO UPDATE SET query = excluded.query",
@@ -497,6 +754,10 @@ impl Store {
 
     /// Attach a label to an exchange (plan §F18). Idempotent.
     pub fn add_label(&mut self, id: ExchangeId, label: &str) -> Result<()> {
+        ensure!(
+            !label.trim().is_empty() && label.len() <= 120,
+            "a label supports 1-120 bytes"
+        );
         self.conn.execute(
             "INSERT OR IGNORE INTO exchange_label (exchange_id, label, created_at_ms)
              VALUES (?1, ?2, ?3)",
@@ -1035,6 +1296,58 @@ mod tests {
     }
 
     #[test]
+    fn migrates_v7_workspaces_and_adds_task_records() {
+        // A v7 workspace (labels, findings triage, saved searches) opens on v8
+        // with prior data intact and the new durable task table ready.
+        let conn = Connection::open_in_memory().unwrap();
+        for schema in [
+            SCHEMA,
+            workspace::SCHEMA,
+            review::SCHEMA,
+            evidence::SCHEMA,
+            FINDING_STATUS_SCHEMA,
+            SAVED_SEARCH_SCHEMA,
+            EXCHANGE_LABEL_SCHEMA,
+        ] {
+            conn.execute_batch(schema).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 7).unwrap();
+        conn.execute(
+            "INSERT INTO exchange_label(exchange_id, label, created_at_ms) VALUES (1, 'triage', 5)",
+            [],
+        )
+        .unwrap();
+        let store = Store::init(conn).unwrap();
+        // Old data survived.
+        assert_eq!(store.all_labels().unwrap(), vec![("triage".to_string(), 1)]);
+        // New table works.
+        store
+            .save_task(&TaskRow {
+                id: 1,
+                kind: "scan".into(),
+                state: camio_core::TaskState::Running,
+                progress_done: 0,
+                progress_total: None,
+                message: String::new(),
+                result: None,
+                error: None,
+                outcome: None,
+                created_at_ms: 1,
+                updated_at_ms: 1,
+            })
+            .unwrap();
+        assert_eq!(
+            store.task(1).unwrap().unwrap().state,
+            camio_core::TaskState::Running
+        );
+        assert_eq!(store.reconcile_interrupted_tasks().unwrap(), 1);
+        assert_eq!(
+            store.task(1).unwrap().unwrap().state,
+            camio_core::TaskState::Interrupted
+        );
+    }
+
+    #[test]
     fn saved_workflow_runs_keep_the_selected_version_across_edits() {
         let conn = Connection::open_in_memory().unwrap();
         for schema in [SCHEMA, workspace::SCHEMA, review::SCHEMA, evidence::SCHEMA] {
@@ -1078,5 +1391,259 @@ mod tests {
         assert_eq!(task.workflow.unwrap(), older.revision);
         assert_eq!(task.limit, 17);
         assert!(!task.save);
+    }
+}
+
+#[cfg(test)]
+mod metadata_query_tests {
+    use super::*;
+    use camio_core::{HeaderList, HttpExchange, HttpRequest, HttpResponse, HttpVersion, Source};
+
+    fn big(url: &str) -> HttpExchange {
+        let mut req = HttpRequest::get(url);
+        req.body = Body::from_bytes(vec![b'a'; 4096]);
+        let resp = HttpResponse {
+            status: 200,
+            version: HttpVersion::Http11,
+            reason: None,
+            headers: HeaderList::new(),
+            body: Body::from_bytes(vec![b'b'; 8192]),
+        };
+        HttpExchange::new(req, Source::Replay).with_response(resp)
+    }
+
+    #[test]
+    fn metadata_query_loads_no_body_bytes() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.insert(&big("https://ex.test/a")).unwrap();
+        store.insert(&big("https://ex.test/b")).unwrap();
+
+        let query = Query::compile("").unwrap();
+        let meta = store.query_metadata(&query, 100).unwrap();
+        assert_eq!(meta.len(), 2);
+        for ex in &meta {
+            assert!(
+                ex.request.body.is_empty(),
+                "metadata queries must not allocate body bytes"
+            );
+            assert!(
+                ex.response
+                    .as_ref()
+                    .map(|r| r.body.is_empty())
+                    .unwrap_or(true),
+                "metadata queries must not allocate response bytes"
+            );
+        }
+        // URL metadata is still there — the site map works from it.
+        assert_eq!(meta[0].request.url, "https://ex.test/b");
+
+        // The full-body path still loads real bytes.
+        let full = store.query_with_bodies(&query, 100).unwrap();
+        assert_eq!(full[0].request.body.len(), 4096);
+        assert_eq!(full[0].response.as_ref().unwrap().body.len(), 8192);
+    }
+}
+
+#[cfg(test)]
+mod scan_budget_tests {
+    use super::*;
+    use camio_core::{HeaderList, HttpRequest, HttpResponse, HttpVersion, Source};
+
+    fn big(url: &str, body_len: usize) -> HttpExchange {
+        let mut req = HttpRequest::get(url);
+        req.body = Body::from_bytes(vec![b'a'; body_len]);
+        let resp = HttpResponse {
+            status: 200,
+            version: HttpVersion::Http11,
+            reason: None,
+            headers: HeaderList::new(),
+            body: Body::from_bytes(vec![b'b'; body_len]),
+        };
+        HttpExchange::new(req, Source::Replay).with_response(resp)
+    }
+
+    #[test]
+    fn the_byte_budget_skips_oversized_bodies() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.insert(&big("https://ex.test/a", 1024)).unwrap();
+        store.insert(&big("https://ex.test/b", 4096)).unwrap();
+        store.insert(&big("https://ex.test/c", 1024)).unwrap();
+
+        // A body filter loads real bodies, so the byte budget engages: it fits
+        // only the two 1024-byte rows, not the 4096-byte one.
+        let (rows, skipped) = store
+            .query_for_scan(&Query::compile(r#"resp.body.cont:"b""#).unwrap(), 100, 4096)
+            .unwrap();
+        assert!(rows.len() <= 2, "returned {} rows", rows.len());
+        assert_eq!(
+            skipped + rows.len(),
+            3,
+            "every row is either scanned or reported skipped"
+        );
+        assert_eq!(
+            rows.iter()
+                .map(|r| r.request.url.clone())
+                .collect::<Vec<_>>(),
+            vec!["https://ex.test/c", "https://ex.test/a"],
+            "newest first, no body placeholders"
+        );
+    }
+
+    #[test]
+    fn a_zero_budget_returns_nothing() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.insert(&big("https://ex.test/a", 16)).unwrap();
+        let (rows, skipped) = store
+            .query_for_scan(&Query::compile(r#"resp.body.cont:"b""#).unwrap(), 100, 0)
+            .unwrap();
+        assert!(rows.is_empty());
+        assert_eq!(skipped, 0, "a zero budget scans nothing, not even one row");
+    }
+}
+
+#[cfg(test)]
+mod pushdown_tests {
+    use super::*;
+    use camio_core::{HeaderList, HttpRequest, HttpResponse, HttpVersion, Source};
+
+    fn exchange(url: &str, status: u16, source: Source, host: &str) -> HttpExchange {
+        let mut req = HttpRequest::get(url);
+        req.headers.push("Host", host);
+        let resp = HttpResponse {
+            status,
+            version: HttpVersion::Http11,
+            reason: None,
+            headers: HeaderList::new(),
+            body: Body::from_text("body-bytes"),
+        };
+        HttpExchange::new(req, source).with_response(resp)
+    }
+
+    #[test]
+    fn the_metadata_predicate_is_pushed_into_sql_and_results_are_exact() {
+        let mut store = Store::open_in_memory().unwrap();
+        for i in 0..50 {
+            let host = if i % 2 == 0 { "even.test" } else { "odd.test" };
+            store
+                .insert(&exchange(
+                    &format!("https://{host}/{i}"),
+                    200,
+                    Source::Replay,
+                    host,
+                ))
+                .unwrap();
+        }
+        // Only even.test matches; the SQL prefilter narrows the scan, the
+        // Rust-side match still decides, so exactly 25 rows come back.
+        let rows = store
+            .query_metadata(&Query::compile(r#"req.host.eq:"even.test""#).unwrap(), 100)
+            .unwrap();
+        assert_eq!(rows.len(), 25);
+        assert!(rows.iter().all(|r| r.request.url.contains("even.test")));
+
+        // A status predicate is pushed too.
+        let not_found = store
+            .query_metadata(&Query::compile("resp.code.eq:404").unwrap(), 100)
+            .unwrap();
+        assert!(not_found.is_empty());
+
+        // A non-pushable query (free text over bodies) still works — bodies are
+        // loaded and matched in Rust.
+        store
+            .insert(&exchange(
+                "https://even.test/needle",
+                200,
+                Source::Replay,
+                "even.test",
+            ))
+            .unwrap();
+        let text = store
+            .query_metadata(&Query::compile("body-bytes").unwrap(), 100)
+            .unwrap();
+        assert_eq!(text.len(), 51);
+    }
+}
+
+#[cfg(test)]
+mod multi_predicate_tests {
+    use super::*;
+    use camio_core::{HeaderList, HttpRequest, HttpResponse, HttpVersion, Source};
+
+    fn exchange(url: &str, status: u16, source: Source, host: &str, method: &str) -> HttpExchange {
+        let mut req = HttpRequest::get(url);
+        req.method = method.to_string();
+        req.headers.push("Host", host);
+        let resp = HttpResponse {
+            status,
+            version: HttpVersion::Http11,
+            reason: None,
+            headers: HeaderList::new(),
+            body: Body::from_text("payload-body"),
+        };
+        HttpExchange::new(req, source).with_response(resp)
+    }
+
+    #[test]
+    fn every_predicate_contributes_to_the_sql_narrowing() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .insert(&exchange(
+                "https://a.test/1",
+                200,
+                Source::Replay,
+                "a.test",
+                "GET",
+            ))
+            .unwrap();
+        store
+            .insert(&exchange(
+                "https://a.test/2",
+                500,
+                Source::Replay,
+                "a.test",
+                "POST",
+            ))
+            .unwrap();
+        store
+            .insert(&exchange(
+                "https://b.test/3",
+                500,
+                Source::Replay,
+                "b.test",
+                "POST",
+            ))
+            .unwrap();
+
+        // Two conjuncts: host = a.test AND method = POST. Exactly one row.
+        let rows = store
+            .query_metadata(
+                &Query::compile(r#"req.host.eq:"a.test" AND req.method.eq:"POST""#).unwrap(),
+                100,
+            )
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].request.url, "https://a.test/2");
+
+        // Three conjuncts (host + method + status) narrow to the same row.
+        let rows = store
+            .query_metadata(
+                &Query::compile(
+                    r#"req.host.eq:"a.test" AND req.method.eq:"POST" AND resp.code.gte:500"#,
+                )
+                .unwrap(),
+                100,
+            )
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+
+        // An OR is not narrowed (neither disjunct is required), but the result
+        // is still exact.
+        let rows = store
+            .query_metadata(
+                &Query::compile(r#"req.host.eq:"a.test" OR req.host.eq:"b.test""#).unwrap(),
+                100,
+            )
+            .unwrap();
+        assert_eq!(rows.len(), 3);
     }
 }

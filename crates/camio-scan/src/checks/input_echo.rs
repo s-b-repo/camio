@@ -27,6 +27,10 @@ fn shared_db() -> &'static PayloadDb {
 
 /// Passive check that flags responses containing payload-like substrings drawn
 /// from the Camio payload database.
+/// Maximum response body scanned for input-echo signatures (2 MiB). The scan is
+/// O(signatures × body length) and runs on the proxy's capture hot path.
+const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
+
 pub struct InputEcho;
 
 impl PassiveCheck for InputEcho {
@@ -48,6 +52,12 @@ impl PassiveCheck for InputEcho {
         };
         let db = shared_db();
         if db.signatures.is_empty() {
+            return Vec::new();
+        }
+        // Bound the body: the scan is O(signatures × body length) and runs on
+        // the proxy's capture hot path, so a multi-MiB bundle pays for a probe
+        // nobody needs. The cap is generous for real HTML/JS payloads.
+        if resp.body.len() > MAX_BODY_BYTES {
             return Vec::new();
         }
         let body = resp.body.as_text();
@@ -92,12 +102,27 @@ fn short_needle(needle: &str) -> String {
     if needle.len() <= MAX {
         needle.to_string()
     } else {
-        format!("{}…", &needle[..MAX])
+        // Floor to a char boundary: slicing at a raw byte offset panics on a
+        // multi-byte character, and needles come from operator/target data.
+        let mut end = MAX;
+        while end > 0 && !needle.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}…", &needle[..end])
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn short_needle_never_panics_on_multibyte() {
+        // A needle whose byte offset 60 lands mid-character must floor cleanly.
+        let needle = "é".repeat(40);
+        let out = super::short_needle(&needle);
+        assert!(out.ends_with('…'));
+        assert!(out.chars().count() <= 31);
+    }
+
     use super::*;
     use camio_core::{Body, HeaderList, HttpRequest, HttpResponse, HttpVersion, Source};
 

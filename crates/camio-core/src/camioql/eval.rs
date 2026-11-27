@@ -67,7 +67,16 @@ impl Query {
     }
 
     pub fn required_metadata(&self) -> Option<RequiredMetadata<'_>> {
-        required_metadata(&self.root)
+        self.required_metadata_all().into_iter().next()
+    }
+
+    /// Every metadata predicate the query *requires* (the conjuncts of a
+    /// top-level `AND`), so a storage backend can narrow an indexed scan by all
+    /// of them. An `OR` yields nothing: neither disjunct alone is required.
+    pub fn required_metadata_all(&self) -> Vec<RequiredMetadata<'_>> {
+        let mut out = Vec::new();
+        collect_required_metadata(&self.root, &mut out);
+        out
     }
 
     /// Test the query against a target. Unresolved `preset:` references match
@@ -137,6 +146,28 @@ fn expr_needs_body(expr: &Expr) -> bool {
         Expr::Clause(c) => matches!(c.field.as_slice(), [side, field]
             if (side.eq_ignore_ascii_case("req") || side.eq_ignore_ascii_case("resp"))
                 && (field.eq_ignore_ascii_case("body") || field.eq_ignore_ascii_case("raw"))),
+    }
+}
+
+/// Collect the required-metadata conjuncts of `node`. Only `AND` introduces
+/// new conjuncts; an `OR`/`NOT`/anything else cannot be narrowed without
+/// excluding valid rows, so it stops the collection (the top-level match still
+/// filters exactly).
+fn collect_required_metadata<'a>(node: &'a Node, out: &mut Vec<RequiredMetadata<'a>>) -> bool {
+    match node {
+        Node::And(left, right) => {
+            let l = collect_required_metadata(left, out);
+            let r = collect_required_metadata(right, out);
+            l || r
+        }
+        Node::Clause { .. } => match required_metadata(node) {
+            Some(m) => {
+                out.push(m);
+                true
+            }
+            None => false,
+        },
+        _ => false,
     }
 }
 
