@@ -87,15 +87,23 @@ impl Forwarder for EngineForwarder {
             let tx = self
                 .tx
                 .lock()
+                // The source is a `PoisonError`, which only says "someone
+                // panicked while holding this"; the replacement names which
+                // component is unusable.
+                // audit-allow: B7
                 .map_err(|_| ForwardError("proxy forwarder poisoned".into()))?;
             tx.send(Job {
                 req: request,
                 reply: reply_tx,
             })
+            // `SendError` means the worker's channel closed — i.e. it stopped.
+            // audit-allow: B7
             .map_err(|_| ForwardError("proxy engine worker stopped".into()))?;
         }
         reply_rx
             .recv()
+            // `RecvError` means the worker exited without replying.
+            // audit-allow: B7
             .map_err(|_| ForwardError("proxy engine worker dropped the reply".into()))?
     }
 }

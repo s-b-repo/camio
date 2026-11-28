@@ -35,13 +35,28 @@
 //!   and [`parse_chat_response`] helpers it (and its tests) use.
 //! * [`prompt`] — pure workbench prompt builders ([`explain_exchange`],
 //!   [`suggest_tests`], [`nl_to_camioql`]).
+//! * [`assist`] — task-oriented assist capabilities with pure prompt-builders
+//!   and thin runners ([`attack_plan_prompt`]/[`run_attack_plan`],
+//!   [`payload_mutations_prompt`]/[`run_payload_mutations`] with
+//!   [`parse_mutation_list`], [`triage_prompt`]/[`run_triage`]), each routing
+//!   untrusted input through [`redact_untrusted`].
 
+pub mod assist;
+pub mod captcha_ocr;
 pub mod client;
 pub mod config;
 pub mod error;
 pub mod message;
 pub mod prompt;
 
+pub use assist::{
+    attack_plan_prompt, parse_mutation_list, payload_mutations_prompt, redact_untrusted,
+    run_attack_plan, run_payload_mutations, run_triage, triage_prompt,
+};
+pub use captcha_ocr::{
+    solve as solve_captcha, tesseract_available, ImageFormat, OcrBackend, OcrConfig, OcrError,
+    OcrResult,
+};
 pub use client::{build_chat_body, parse_chat_response, AiClient};
 pub use config::{AiConfig, Provider};
 pub use error::AiError;
@@ -59,7 +74,9 @@ pub(crate) fn truncate_chars(s: &str, max: usize) -> String {
     for (count, (idx, _)) in s.char_indices().enumerate() {
         if count == max {
             let mut out = String::with_capacity(idx + 12);
-            out.push_str(&s[..idx]);
+            // `idx` comes from `char_indices`, so it is a boundary by
+            // construction; `get` documents that where the slice happens.
+            out.push_str(s.get(..idx).unwrap_or(""));
             out.push_str("…[truncated]");
             return out;
         }

@@ -470,7 +470,7 @@ remediation, Rust security, software supply chain.
 
 **Post 32 — packaging that a reviewer can check**
 
-Signed release binaries for Linux and macOS (x86_64 and arm64), an SBOM
+Signed release binaries for Linux and macOS (x8664 and arm64), an SBOM
 generated from cargo metadata, cargo-deny on
 advisories/bans/licenses/sources, and CI gates that break the build on a
 clippy warning.

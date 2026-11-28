@@ -1,17 +1,21 @@
 {
-  "name": "Camio — Black & Blue",
-  "description": "Black surfaces, light-blue text, #1e80ff blue buttons. Matches the native app's 'Sentinel Blue' theme and the Camio site palette. Edit these values to recolor the fork (and the app's color picker does the same live).",
+  "name": "Cyber Sec — Sentinel Blue",
+  "description": "The Cyber Sec house palette, lifted 1:1 from cybersec.org.za (assets/styles.css): navy ink, sky-blue accent, cyan secondary, blue-white text. Camio's native app, web UI and browser chrome all share it. Edit these values to recolor the fork (the app's color picker does the same live).",
   "palette": {
-    "ink": "#000000",
-    "ink_2": "#020508",
-    "surface": "#051228",
-    "line": "rgba(20,90,220,0.45)",
-    "text": "#c0d6f0",
-    "muted": "#5a84b8",
-    "accent": "#1e80ff",
-    "accent_deep": "#0d4bb3",
-    "accent_2": "#00aadd",
-    "warn": "#ff3b55"
+    "ink": "#08111f",
+    "ink_2": "#0b1423",
+    "surface": "#101c2f",
+    "surface_2": "#17263c",
+    "line": "#3b5877",
+    "line_soft": "#263a54",
+    "text": "#e7eefb",
+    "muted": "#afc2dc",
+    "faint": "#9cb2ce",
+    "accent": "#83bcff",
+    "accent_deep": "#215bab",
+    "accent_2": "#65d2ed",
+    "accent_glow": "rgba(62,143,255,0.17)",
+    "warn": "#ff8297"
   },
   "fonts": {
     "display": "Chakra Petch, system-ui, sans-serif",

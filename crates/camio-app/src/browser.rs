@@ -68,45 +68,11 @@ pub struct Launched {
 /// channel is enabled so an agent can drive it.
 /// Camio's black-&-blue browser chrome (userChrome.css), matching the native
 /// app's "Sentinel Blue" theme: black toolbars, light-blue text, and the
-/// `#1e80ff` blue accent on the URL bar, selected tab, and buttons.
-pub const CAMIO_USERCHROME_CSS: &str = r#"/* Camio — black & blue browser chrome. Generated; edit the Camio theme instead. */
-:root {
-  --camio-ink: #000000;
-  --camio-surface: #051228;
-  --camio-line: rgba(20, 90, 220, 0.45);
-  --camio-text: #c0d6f0;
-  --camio-accent: #1e80ff;
-
-  --toolbar-bgcolor: var(--camio-ink) !important;
-  --toolbar-color: var(--camio-text) !important;
-  --lwt-accent-color: var(--camio-ink) !important;
-  --lwt-text-color: var(--camio-text) !important;
-  --toolbarbutton-icon-fill: var(--camio-text) !important;
-  --toolbar-field-background-color: var(--camio-surface) !important;
-  --toolbar-field-focus-background-color: var(--camio-surface) !important;
-  --toolbar-field-color: var(--camio-text) !important;
-  --toolbar-field-border-color: var(--camio-line) !important;
-  --tab-selected-bgcolor: var(--camio-surface) !important;
-  --tabs-border-color: var(--camio-line) !important;
-  --lwt-toolbar-field-border-focus: var(--camio-accent) !important;
-}
-#navigator-toolbox {
-  background: var(--camio-ink) !important;
-  border-bottom: 1px solid var(--camio-line) !important;
-}
-#urlbar, #searchbar {
-  background: var(--camio-surface) !important;
-  color: var(--camio-text) !important;
-}
-#urlbar[focused="true"] { outline: 1px solid var(--camio-accent) !important; }
-.tab-background[selected] {
-  background: var(--camio-surface) !important;
-  box-shadow: inset 0 -2px 0 0 var(--camio-accent) !important;
-}
-.toolbarbutton-1 { color: var(--camio-text) !important; }
-/* Blue buttons / accents */
-button, .button, menulist { accent-color: var(--camio-accent) !important; }
-"#;
+/// `#83bcff` sky-blue accent on the URL bar, selected tab, buttons, popups and
+/// sidebar. Kept byte-for-byte in sync with `browser/branding/userChrome.css`
+/// so a stock LibreWolf Camio launches gets the same theme as the baked-in
+/// `camio-browser` fork.
+pub const CAMIO_USERCHROME_CSS: &str = include_str!("../../../browser/branding/userChrome.css");
 
 /// Write the launched profile's files: the fingerprint `user.js` (with legacy
 /// stylesheets enabled) and the Camio black/blue `chrome/userChrome.css`.
@@ -183,7 +149,7 @@ mod tests {
         assert!(user_js.contains("legacyUserProfileCustomizations.stylesheets"));
 
         let css = std::fs::read_to_string(dir.join("chrome").join("userChrome.css")).unwrap();
-        assert!(css.contains("#1e80ff")); // the Camio blue accent
+        assert!(css.contains("#83bcff")); // the Cyber Sec "Sentinel Blue" accent
         assert!(css.contains("#navigator-toolbox"));
         let _ = std::fs::remove_dir_all(&dir);
     }

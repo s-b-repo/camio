@@ -72,6 +72,8 @@ pub fn parse_chat_response(json: &str) -> Result<String, AiError> {
                 )));
             }
             Err(AiError::Decode(
+                // The `[0]` below is part of the message, not an index.
+                // audit-allow: D1
                 "response had no choices[0].message.content".to_string(),
             ))
         }

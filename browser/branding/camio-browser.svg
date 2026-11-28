@@ -1,18 +1,17 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="Camio Browser">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="Camio Browser — a Cyber Sec tool">
+  <!-- Cyber Sec shield mark (from cybersec.org.za/assets/favicon.svg), scaled to
+       an app-icon canvas with the Sentinel Blue palette. -->
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#0a1a33"/>
-      <stop offset="1" stop-color="#04070d"/>
-    </linearGradient>
-    <linearGradient id="c" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#4aa0ff"/>
-      <stop offset="1" stop-color="#1e80ff"/>
+      <stop offset="0" stop-color="#101c2f"/>
+      <stop offset="1" stop-color="#08111f"/>
     </linearGradient>
   </defs>
   <rect width="128" height="128" rx="28" fill="url(#bg)"/>
-  <rect x="3.5" y="3.5" width="121" height="121" rx="25" fill="none" stroke="#14325f" stroke-width="2"/>
-  <!-- bold open "C" in Camio blue -->
-  <path d="M90 42 A30 30 0 1 0 90 86" fill="none" stroke="url(#c)" stroke-width="13" stroke-linecap="round"/>
-  <!-- accent dot closing the gap -->
-  <circle cx="97" cy="64" r="6.5" fill="#1e80ff"/>
+  <rect x="3.5" y="3.5" width="121" height="121" rx="25" fill="none" stroke="#3b5877" stroke-width="2"/>
+  <!-- shield -->
+  <path d="M64 20 L108 44 v24 c0 25-18 41-44 48 C38 109 20 93 20 68 V44 Z"
+        fill="none" stroke="#83bcff" stroke-width="6" stroke-linejoin="round"/>
+  <!-- security cross -->
+  <path d="M64 50 v28 M50 64 h28" stroke="#83bcff" stroke-width="6" stroke-linecap="round"/>
 </svg>

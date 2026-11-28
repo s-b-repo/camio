@@ -301,6 +301,31 @@ mod tests {
     }
 
     #[test]
+    fn a_caido_export_with_mixed_entries_recovers_the_good_ones() {
+        // Caido's project export is HAR 1.2 (creator name "Caido"). A real export
+        // can contain entries we cannot replay; those are skipped with a warning
+        // while the recoverable ones still import — a partial-error report, not an
+        // all-or-nothing failure (plan §F19 Caido interchange + malformed recovery).
+        let har = r#"{"log":{
+            "creator":{"name":"Caido","version":"0.40.0"},
+            "entries":[
+                {"request":{"method":"GET","url":"https://app.example/one"},
+                 "response":{"status":200,"content":{"text":"ok","mimeType":"text/plain"}}},
+                {"response":{"status":500}},
+                {"request":{"method":"POST","url":"https://app.example/two"}}
+            ]}}"#;
+        let result = import_har(har).unwrap();
+        assert_eq!(result.format, "har");
+        // Two recoverable requests; the request-less entry is dropped.
+        assert_eq!(result.exchanges.len(), 2);
+        assert_eq!(result.exchanges[0].request.url, "https://app.example/one");
+        assert_eq!(result.exchanges[1].request.url, "https://app.example/two");
+        // The partial-error report names exactly what was skipped.
+        assert_eq!(result.warnings.len(), 1);
+        assert!(result.warnings[0].contains("missing request"));
+    }
+
+    #[test]
     fn zero_status_response_maps_to_none() {
         let har = r#"{"log":{"entries":[
             {"request":{"method":"GET","url":"https://x.example/"},

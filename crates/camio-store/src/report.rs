@@ -5,7 +5,6 @@ use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeSet;
-use std::fmt::Write;
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -38,11 +37,13 @@ impl ReportFormat {
     }
 
     pub fn review_filename(self, task: TaskId) -> String {
-        let extension = self
-            .filename()
-            .rsplit_once('.')
-            .expect("report uses a file extension")
-            .1;
+        // A format without an extension is a programming error, not something a
+        // caller can cause — and the answer is a filename with no extension,
+        // not a panic while naming a file to hand to the operator.
+        let extension = self.filename().rsplit_once('.').map_or("", |(_, ext)| ext);
+        if extension.is_empty() {
+            return format!("camio-review-{task}");
+        }
         format!("camio-review-{task}.{extension}")
     }
 }
@@ -123,7 +124,7 @@ impl Store {
             }),
         };
         let mut stmt = self.conn.prepare(
-            "SELECT COALESCE(r.rule, k.rule), r.data_json FROM review_results r
+            "SELECT COALESCE(r.rule, k.rule, json_extract(r.data_json, '$.rule')), r.data_json FROM review_results r
              LEFT JOIN passive_keys k ON k.finding_id = json_extract(r.data_json, '$.id')
              WHERE r.task_id = ?1 ORDER BY r.severity DESC, r.key LIMIT 10001",
         )?;
@@ -210,7 +211,7 @@ impl FindingReport {
         );
         if let Some(run) = &self.run {
             for (label, value) in run.summary() {
-                writeln!(report, "- {label} · {value}").expect("writing to a String");
+                report.push_str(&format!("- {label} · {value}\n"));
             }
             report.push('\n');
         }
@@ -222,17 +223,15 @@ impl FindingReport {
         report.push_str("| --- | --- | --- | --- | --- | --- |\n");
         for entry in &self.findings {
             let evidence = evidence_ids(entry);
-            writeln!(
-                report,
-                "| {} | {} | {:?} | {:?} | {} | {} |",
+            report.push_str(&format!(
+                "| {} | {} | {:?} | {:?} | {} | {} |\n",
                 entry.id.map_or_else(|| "—".into(), |id| id.to_string()),
                 entry.rule.as_deref().unwrap_or("—"),
                 entry.severity,
                 entry.confidence,
                 entry.state.map_or("Task result", ReviewState::as_str),
                 evidence
-            )
-            .expect("writing to a String");
+            ));
         }
         report
     }
@@ -262,17 +261,14 @@ impl FindingReport {
              table{width:100%;border-collapse:collapse}th,td{text-align:left;vertical-align:top;padding:.5rem;border-bottom:1px solid #bbb}\
              th{background:#eef4fc}code,dd{overflow-wrap:anywhere}</style><main>",
         );
-        write!(
-            report,
+        report.push_str(&format!(
             "<h1>{}</h1><p>Redacted summary. Evidence IDs refer to the local workspace.</p>",
             self.heading()
-        )
-        .expect("writing to a String");
+        ));
         if let Some(run) = &self.run {
             report.push_str("<dl>");
             for (label, value) in run.summary() {
-                write!(report, "<dt>{label}</dt><dd>{}</dd>", html_text(&value))
-                    .expect("writing to a String");
+                report.push_str(&format!("<dt>{label}</dt><dd>{}</dd>", html_text(&value)));
             }
             report.push_str("</dl>");
         }
@@ -283,10 +279,11 @@ impl FindingReport {
             // Report entries obtained from Store contain only trusted rule
             // identifiers, but callers can also construct reports directly.
             let check = html_text(check);
-            write!(report, "<tr><td>{}</td><td><code>{check}</code></td><td>{:?}</td><td>{:?}</td><td>{}</td><td>{evidence}</td></tr>",
+            report.push_str(&format!(
+                "<tr><td>{}</td><td><code>{check}</code></td><td>{:?}</td><td>{:?}</td><td>{}</td><td>{evidence}</td></tr>",
                 entry.id.map_or_else(|| "—".into(), |id| id.to_string()), entry.severity, entry.confidence,
                 entry.state.map_or("Task result", ReviewState::as_str),
-            ).expect("writing to a String");
+            ));
         }
         if self.findings.is_empty() {
             report.push_str("<tr><td colspan=\"6\">No findings in this report.</td></tr>");

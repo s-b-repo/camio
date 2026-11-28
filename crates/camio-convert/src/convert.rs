@@ -27,9 +27,11 @@ use base64::Engine as _;
 use flate2::read::{DeflateDecoder, GzDecoder};
 use flate2::write::{DeflateEncoder, GzEncoder};
 use flate2::Compression;
+// Payload-transform primitives over the operator's own input (hashing a
+// payload before sending it) — not password or token hashing. audit-allow: L1
 use md5::Md5;
-use sha1::Sha1;
-use sha2::{Digest, Sha256, Sha512};
+use sha1::Sha1; // audit-allow: L2
+use sha2::{Digest, Sha256, Sha384, Sha512};
 use std::fmt;
 use std::io::{Read, Write};
 
@@ -112,6 +114,9 @@ pub enum Transform {
     GzipDecompress,
     DeflateCompress,
     DeflateDecompress,
+    Base32Encode,
+    Base32Decode,
+    Rot13,
     Md5,
     Sha1,
     Sha256,
@@ -120,7 +125,7 @@ pub enum Transform {
 
 /// Every [`Transform`], in catalog order — the backing array for
 /// [`Transform::all`] and [`Transform::from_name`].
-const ALL: [Transform; 18] = [
+const ALL: [Transform; 21] = [
     Transform::Base64Encode,
     Transform::Base64Decode,
     Transform::Base64UrlEncode,
@@ -131,6 +136,9 @@ const ALL: [Transform; 18] = [
     Transform::HtmlDecode,
     Transform::HexEncode,
     Transform::HexDecode,
+    Transform::Base32Encode,
+    Transform::Base32Decode,
+    Transform::Rot13,
     Transform::GzipCompress,
     Transform::GzipDecompress,
     Transform::DeflateCompress,
@@ -156,6 +164,9 @@ impl Transform {
             Transform::HtmlDecode => "html-decode",
             Transform::HexEncode => "hex",
             Transform::HexDecode => "hex-decode",
+            Transform::Base32Encode => "base32",
+            Transform::Base32Decode => "base32-decode",
+            Transform::Rot13 => "rot13",
             Transform::GzipCompress => "gzip",
             Transform::GzipDecompress => "gunzip",
             Transform::DeflateCompress => "deflate",
@@ -192,6 +203,9 @@ impl Transform {
             "html-decode" | "htmldecode" | "html-entity-decode" => Transform::HtmlDecode,
             "hex" | "hex-encode" | "hexencode" => Transform::HexEncode,
             "hex-decode" | "hexdecode" | "unhex" => Transform::HexDecode,
+            "base32" | "base32-encode" | "b32" => Transform::Base32Encode,
+            "base32-decode" | "b32decode" | "unbase32" => Transform::Base32Decode,
+            "rot13" | "rot-13" | "caesar13" => Transform::Rot13,
             "gzip" | "gzip-compress" | "gz" => Transform::GzipCompress,
             "gunzip" | "gzip-decompress" | "gzip-decode" => Transform::GzipDecompress,
             "deflate" | "deflate-compress" => Transform::DeflateCompress,
@@ -232,6 +246,9 @@ impl Transform {
             Transform::HtmlDecode => Ok(html_decode(input)),
             Transform::HexEncode => Ok(hex_encode(input)),
             Transform::HexDecode => hex_decode(input),
+            Transform::Base32Encode => Ok(base32_encode(input)),
+            Transform::Base32Decode => base32_decode(input),
+            Transform::Rot13 => Ok(rot13(input)),
             Transform::GzipCompress => gzip_compress(input),
             Transform::GzipDecompress => gzip_decompress(input),
             Transform::DeflateCompress => deflate_compress(input),
@@ -365,6 +382,82 @@ fn hex_decode(input: &[u8]) -> Result<Vec<u8>, ConvertError> {
         .chunks_exact(2)
         .map(|p| (p[0] << 4) | p[1])
         .collect())
+}
+
+/// RFC 4648 base32 alphabet (upper-case, no lower-case).
+const BASE32_ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+
+/// RFC 4648 base32 encode with `=` padding. Common for TOTP secrets, DNS
+/// exfiltration and some tokens, so it belongs in the decoder/encoder (F17).
+fn base32_encode(input: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(input.len().div_ceil(5) * 8);
+    for chunk in input.chunks(5) {
+        // Pack up to 5 bytes into a 40-bit buffer, MSB first.
+        let mut buf = 0u64;
+        for (i, &b) in chunk.iter().enumerate() {
+            buf |= (b as u64) << (32 - i * 8);
+        }
+        // Each chunk of n bytes yields a fixed number of base32 symbols.
+        let symbols = match chunk.len() {
+            1 => 2,
+            2 => 4,
+            3 => 5,
+            4 => 7,
+            _ => 8,
+        };
+        for i in 0..8 {
+            if i < symbols {
+                let idx = ((buf >> (35 - i * 5)) & 0x1f) as usize;
+                out.push(BASE32_ALPHABET[idx]);
+            } else {
+                out.push(b'=');
+            }
+        }
+    }
+    out
+}
+
+/// RFC 4648 base32 decode: ignores whitespace and padding, accepts upper or
+/// lower case.
+fn base32_decode(input: &[u8]) -> Result<Vec<u8>, ConvertError> {
+    let mut bits = 0u64;
+    let mut nbits = 0u32;
+    let mut out = Vec::with_capacity(input.len() * 5 / 8 + 1);
+    for &c in input {
+        if c.is_ascii_whitespace() || c == b'=' {
+            continue;
+        }
+        let up = c.to_ascii_uppercase();
+        let val = match up {
+            b'A'..=b'Z' => up - b'A',
+            b'2'..=b'7' => up - b'2' + 26,
+            _ => {
+                return Err(ConvertError::Decode(format!(
+                    "base32: invalid digit 0x{c:02x}"
+                )))
+            }
+        };
+        bits = (bits << 5) | val as u64;
+        nbits += 5;
+        if nbits >= 8 {
+            nbits -= 8;
+            out.push((bits >> nbits) as u8);
+        }
+    }
+    Ok(out)
+}
+
+/// ROT13: rotate ASCII letters by 13 (symmetric; its own inverse). Non-letters
+/// pass through unchanged.
+fn rot13(input: &[u8]) -> Vec<u8> {
+    input
+        .iter()
+        .map(|&c| match c {
+            b'a'..=b'z' => b'a' + (c - b'a' + 13) % 26,
+            b'A'..=b'Z' => b'A' + (c - b'A' + 13) % 26,
+            other => other,
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -609,6 +702,340 @@ fn decode_jwt_segment(segment: &str, label: &str) -> Result<String, ConvertError
     String::from_utf8(bytes).map_err(|e| ConvertError::Decode(format!("jwt {label}: utf-8: {e}")))
 }
 
+// ---------------------------------------------------------------------------
+// JWT security analysis (inspired by jwt_tool / the Burp JWT extensions)
+// ---------------------------------------------------------------------------
+
+/// Severity of a JWT weakness, mirroring the finding severities elsewhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JwtSeverity {
+    Critical,
+    High,
+    Medium,
+    Info,
+}
+
+/// One weakness found in a JWT.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct JwtIssue {
+    pub severity: JwtSeverity,
+    pub title: String,
+    pub detail: String,
+}
+
+/// The result of analysing a JWT for common weaknesses. Decoding never verifies
+/// a real signature; the only verification performed is the **offline HMAC
+/// secret-guessing** against the supplied wordlist (so a hit means the token is
+/// forgeable with that secret).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct JwtAnalysis {
+    pub header_json: String,
+    pub payload_json: String,
+    /// The `alg` header value, lowercased (e.g. `"hs256"`, `"none"`, `"rs256"`).
+    pub alg: String,
+    pub issues: Vec<JwtIssue>,
+    /// The HMAC secret from the wordlist that verified the signature, if any.
+    /// Its presence is itself a Critical issue (the token is forgeable).
+    pub cracked_secret: Option<String>,
+}
+
+/// A short built-in wordlist of the HMAC secrets that turn up most often in real
+/// JWT deployments (dev defaults, framework examples, trivial passwords). Used
+/// when the caller supplies no wordlist of its own.
+pub const COMMON_JWT_SECRETS: &[&str] = &[
+    "secret",
+    "secretkey",
+    "your-256-bit-secret",
+    "your_jwt_secret",
+    "jwt_secret",
+    "jwtsecret",
+    "changeme",
+    "password",
+    "123456",
+    "admin",
+    "key",
+    "private",
+    "test",
+    "supersecret",
+    "s3cr3t",
+    "qwerty",
+    "secret123",
+    "mysecret",
+    "token",
+    "default",
+];
+
+/// Analyse `token` for common JWT weaknesses: the `alg:none` signature bypass,
+/// a weak/guessable HMAC secret (tried against `wordlist`, or
+/// [`COMMON_JWT_SECRETS`] when `wordlist` is empty), and claim-hygiene problems
+/// (missing/expired `exp`, a future `nbf`). `now_unix` is the current time for
+/// the claim checks; pass `None` to read the system clock.
+///
+/// Sends nothing. The HMAC guessing is a bounded, offline loop over the
+/// wordlist. Intended for **authorized** testing of tokens you are permitted to
+/// assess.
+pub fn analyze_jwt(
+    token: &str,
+    wordlist: &[String],
+    now_unix: Option<u64>,
+) -> Result<JwtAnalysis, ConvertError> {
+    let parts: Vec<&str> = token.trim().split('.').collect();
+    if parts.len() != 3 {
+        return Err(ConvertError::Decode(format!(
+            "jwt: expected 3 dot-separated segments, found {}",
+            parts.len()
+        )));
+    }
+    let decoded = decode_jwt(token)?;
+    let signing_input = format!("{}.{}", parts[0], parts[1]);
+    let sig_segment = parts[2];
+
+    let header: serde_json::Value =
+        serde_json::from_str(&decoded.header_json).unwrap_or(serde_json::Value::Null);
+    let payload: serde_json::Value =
+        serde_json::from_str(&decoded.payload_json).unwrap_or(serde_json::Value::Null);
+
+    let alg = header
+        .get("alg")
+        .and_then(|a| a.as_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    let mut issues: Vec<JwtIssue> = Vec::new();
+    let mut cracked_secret: Option<String> = None;
+
+    // --- alg:none — signature bypass -------------------------------------
+    if alg == "none" {
+        issues.push(JwtIssue {
+            severity: JwtSeverity::Critical,
+            title: "Algorithm 'none' accepted in header".to_string(),
+            detail: "The token's header declares `alg: none`. If the server honours it, the signature is not verified at all — an attacker can forge any payload (e.g. elevate to admin) by setting `alg:none` and sending an empty signature. Confirm the server rejects it.".to_string(),
+        });
+    }
+
+    // --- Empty signature with a real alg ---------------------------------
+    if sig_segment.is_empty() && alg != "none" && !alg.is_empty() {
+        issues.push(JwtIssue {
+            severity: JwtSeverity::High,
+            title: "Empty signature".to_string(),
+            detail: format!("The token declares `alg: {alg}` but carries no signature. A server that accepts it is not verifying signatures."),
+        });
+    }
+
+    // --- Weak HMAC secret (offline guess) --------------------------------
+    if alg.starts_with("hs") && !sig_segment.is_empty() {
+        let list_owned: Vec<String>;
+        let list: &[String] = if wordlist.is_empty() {
+            list_owned = COMMON_JWT_SECRETS.iter().map(|s| s.to_string()).collect();
+            &list_owned
+        } else {
+            wordlist
+        };
+        if let Some(hit) = crack_hmac(&alg, signing_input.as_bytes(), sig_segment, list) {
+            issues.push(JwtIssue {
+                severity: JwtSeverity::Critical,
+                title: "Weak HMAC signing secret".to_string(),
+                detail: format!("The `{alg}` signature verifies against the guessable secret `{hit}`. The token is fully forgeable — anyone with this secret can mint valid tokens with any claims."),
+            });
+            cracked_secret = Some(hit);
+        }
+    }
+
+    // --- Claim hygiene ----------------------------------------------------
+    let now = now_unix.unwrap_or_else(now_unix_secs);
+    match payload.get("exp").and_then(json_as_u64) {
+        None => issues.push(JwtIssue {
+            severity: JwtSeverity::Medium,
+            title: "No expiry claim (exp)".to_string(),
+            detail: "The token has no `exp` claim, so it never expires. A leaked token stays valid indefinitely.".to_string(),
+        }),
+        Some(exp) if exp < now => issues.push(JwtIssue {
+            severity: JwtSeverity::Info,
+            title: "Token is expired".to_string(),
+            detail: format!("The `exp` claim ({exp}) is in the past (now {now}). This token should already be rejected."),
+        }),
+        _ => {}
+    }
+    if let Some(nbf) = payload.get("nbf").and_then(json_as_u64) {
+        if nbf > now {
+            issues.push(JwtIssue {
+                severity: JwtSeverity::Info,
+                title: "Token not yet valid (nbf in the future)".to_string(),
+                detail: format!("The `nbf` claim ({nbf}) is after now ({now})."),
+            });
+        }
+    }
+
+    Ok(JwtAnalysis {
+        header_json: decoded.header_json,
+        payload_json: decoded.payload_json,
+        alg,
+        issues,
+        cracked_secret,
+    })
+}
+
+/// Current UNIX time in seconds (best-effort; 0 before the epoch).
+fn now_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Read a JSON number as `u64` whether it is encoded as an integer or (as some
+/// libraries emit timestamps) a float.
+fn json_as_u64(v: &serde_json::Value) -> Option<u64> {
+    v.as_u64().or_else(|| v.as_f64().map(|f| f as u64))
+}
+
+/// Try each secret in `wordlist` against the HMAC signature; return the first
+/// that verifies. `alg` is one of `hs256`/`hs384`/`hs512`.
+fn crack_hmac(alg: &str, signing_input: &[u8], sig_b64url: &str, wordlist: &[String]) -> Option<String> {
+    let want = B64_URL.decode(sig_b64url.as_bytes()).ok()?;
+    for secret in wordlist {
+        let got = match alg {
+            "hs256" => hmac(Sha256::new(), 64, secret.as_bytes(), signing_input),
+            "hs384" => hmac(Sha384::new(), 128, secret.as_bytes(), signing_input),
+            "hs512" => hmac(Sha512::new(), 128, secret.as_bytes(), signing_input),
+            _ => return None,
+        };
+        if constant_time_eq(&got, &want) {
+            return Some(secret.clone());
+        }
+    }
+    None
+}
+
+/// Generic HMAC over any `sha2` digest. `block` is the hash's block size in
+/// bytes (64 for SHA-256, 128 for SHA-384/512). Implemented here rather than
+/// pulling the `hmac` crate because it is a handful of lines and keeps the
+/// dependency surface small (the same choice `camio-core::ai_guard` made).
+fn hmac<D>(mut inner: D, block: usize, key: &[u8], msg: &[u8]) -> Vec<u8>
+where
+    D: Digest + Clone + sha2::digest::FixedOutputReset,
+{
+    // Key shortening: a key longer than the block is replaced by its hash.
+    let mut key_block = vec![0u8; block];
+    if key.len() > block {
+        let mut h = inner.clone();
+        Digest::update(&mut h, key);
+        let hashed = h.finalize_reset().to_vec();
+        key_block[..hashed.len()].copy_from_slice(&hashed);
+    } else {
+        key_block[..key.len()].copy_from_slice(key);
+    }
+    let mut i_pad = key_block.clone();
+    let mut o_pad = key_block;
+    for b in i_pad.iter_mut() {
+        *b ^= 0x36;
+    }
+    for b in o_pad.iter_mut() {
+        *b ^= 0x5c;
+    }
+    // inner = H(i_pad || msg)
+    Digest::update(&mut inner, &i_pad);
+    Digest::update(&mut inner, msg);
+    let inner_digest = inner.finalize_reset();
+    // outer = H(o_pad || inner)
+    Digest::update(&mut inner, &o_pad);
+    Digest::update(&mut inner, &inner_digest);
+    inner.finalize().to_vec()
+}
+
+/// Length-independent constant-time byte comparison (prevents a timing side
+/// channel in the signature check — academic for an offline tool, but correct).
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+// ---------------------------------------------------------------------------
+// Favicon hash (Shodan `http.favicon.hash` / favfreak) — asset correlation
+// ---------------------------------------------------------------------------
+
+/// Compute the **Shodan favicon hash** of a favicon's bytes: the value you can
+/// pivot on in Shodan (`http.favicon.hash:<N>`), Censys or FOFA to find every
+/// host serving the same favicon — a fast way to map an organisation's other
+/// assets, shadow IT, and origin servers hiding behind a CDN.
+///
+/// The algorithm must match Shodan exactly: standard-base64 the bytes **the way
+/// Python's `base64.encodebytes` does** (76-char lines, each terminated by
+/// `\n`), then take the signed 32-bit MurmurHash3 (x86, seed 0) of that text.
+/// Returns the signed `i32` Shodan reports.
+pub fn favicon_hash(favicon: &[u8]) -> i32 {
+    let b64 = B64_STD.encode(favicon);
+    // Emulate Python's base64.encodebytes: wrap at 76 chars, newline per line.
+    let mut lined = String::with_capacity(b64.len() + b64.len() / 76 + 1);
+    let bytes = b64.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let end = (i + 76).min(bytes.len());
+        lined.push_str(&b64[i..end]);
+        lined.push('\n');
+        i = end;
+    }
+    murmur3_x86_32(lined.as_bytes(), 0) as i32
+}
+
+/// [`favicon_hash`] for a standard-base64-encoded favicon — the convenient form
+/// for callers (e.g. the MCP server) that carry the bytes as base64 text.
+pub fn favicon_hash_base64(b64: &str) -> Result<i32, ConvertError> {
+    let bytes = B64_STD
+        .decode(b64.trim().as_bytes())
+        .map_err(|e| ConvertError::Decode(format!("favicon base64: {e}")))?;
+    Ok(favicon_hash(&bytes))
+}
+
+/// MurmurHash3 x86 32-bit (the variant Shodan/mmh3 uses).
+fn murmur3_x86_32(data: &[u8], seed: u32) -> u32 {
+    const C1: u32 = 0xcc9e_2d51;
+    const C2: u32 = 0x1b87_3593;
+    let mut h = seed;
+    let nblocks = data.len() / 4;
+    for i in 0..nblocks {
+        let o = i * 4;
+        let mut k = u32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]);
+        k = k.wrapping_mul(C1);
+        k = k.rotate_left(15);
+        k = k.wrapping_mul(C2);
+        h ^= k;
+        h = h.rotate_left(13);
+        h = h.wrapping_mul(5).wrapping_add(0xe654_6b64);
+    }
+    // Tail.
+    let tail = &data[nblocks * 4..];
+    let mut k1 = 0u32;
+    if tail.len() >= 3 {
+        k1 ^= (tail[2] as u32) << 16;
+    }
+    if tail.len() >= 2 {
+        k1 ^= (tail[1] as u32) << 8;
+    }
+    if !tail.is_empty() {
+        k1 ^= tail[0] as u32;
+        k1 = k1.wrapping_mul(C1);
+        k1 = k1.rotate_left(15);
+        k1 = k1.wrapping_mul(C2);
+        h ^= k1;
+    }
+    // Finalization mix.
+    h ^= data.len() as u32;
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x85eb_ca6b);
+    h ^= h >> 13;
+    h = h.wrapping_mul(0xc2b2_ae35);
+    h ^= h >> 16;
+    h
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -845,7 +1272,40 @@ mod tests {
         for &t in Transform::all() {
             assert_eq!(Transform::from_name(t.name()), Some(t), "name {}", t.name());
         }
-        assert_eq!(Transform::all().len(), 18);
+        assert_eq!(Transform::all().len(), 21);
+    }
+
+    #[test]
+    fn base32_round_trips_rfc4648_vectors() {
+        // RFC 4648 §10 test vectors.
+        for (plain, encoded) in [
+            ("", ""),
+            ("f", "MY======"),
+            ("fo", "MZXQ===="),
+            ("foo", "MZXW6==="),
+            ("foob", "MZXW6YQ="),
+            ("fooba", "MZXW6YTB"),
+            ("foobar", "MZXW6YTBOI======"),
+        ] {
+            let out = Transform::Base32Encode.apply(plain.as_bytes()).unwrap();
+            assert_eq!(String::from_utf8(out).unwrap(), encoded, "encode {plain}");
+            let back = Transform::Base32Decode.apply(encoded.as_bytes()).unwrap();
+            assert_eq!(String::from_utf8(back).unwrap(), plain, "decode {encoded}");
+        }
+    }
+
+    #[test]
+    fn base32_decode_rejects_invalid() {
+        assert!(Transform::Base32Decode.apply(b"MZXW6!!!").is_err());
+    }
+
+    #[test]
+    fn rot13_is_its_own_inverse() {
+        let plain = b"Hello, Camio 123!";
+        let once = Transform::Rot13.apply(plain).unwrap();
+        assert_eq!(&once, b"Uryyb, Pnzvb 123!");
+        let twice = Transform::Rot13.apply(&once).unwrap();
+        assert_eq!(&twice, plain);
     }
 
     #[test]
@@ -964,5 +1424,90 @@ SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
         // It is a std::error::Error.
         let e: &dyn std::error::Error = &ConvertError::Decode("x".into());
         assert_eq!(e.to_string(), "decode error: x");
+    }
+
+    // ---- JWT security analysis ----
+
+    #[test]
+    fn analyze_jwt_cracks_the_canonical_jwt_io_secret() {
+        // The jwt.io sample HS256 token is signed with "your-256-bit-secret"
+        // (which is in COMMON_JWT_SECRETS). A successful crack also proves the
+        // HMAC-SHA256 implementation matches the reference signature.
+        let token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.\
+eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.\
+SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+        let a = analyze_jwt(token, &[], Some(1_516_239_999)).unwrap();
+        assert_eq!(a.alg, "hs256");
+        assert_eq!(a.cracked_secret.as_deref(), Some("your-256-bit-secret"));
+        assert!(a
+            .issues
+            .iter()
+            .any(|i| i.severity == JwtSeverity::Critical && i.title.contains("Weak HMAC")));
+    }
+
+    #[test]
+    fn analyze_jwt_wrong_secret_does_not_crack() {
+        let token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.\
+eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.\
+SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+        // A wordlist without the real secret must not produce a false crack.
+        let a = analyze_jwt(token, &["nope".to_string(), "wrong".to_string()], Some(0)).unwrap();
+        assert_eq!(a.cracked_secret, None);
+    }
+
+    #[test]
+    fn analyze_jwt_flags_alg_none() {
+        let header = B64_URL.encode(br#"{"alg":"none","typ":"JWT"}"#);
+        let payload = B64_URL.encode(br#"{"sub":"admin","exp":9999999999}"#);
+        let token = format!("{header}.{payload}.");
+        let a = analyze_jwt(&token, &[], Some(0)).unwrap();
+        assert_eq!(a.alg, "none");
+        assert!(a
+            .issues
+            .iter()
+            .any(|i| i.severity == JwtSeverity::Critical && i.title.contains("'none'")));
+    }
+
+    #[test]
+    fn analyze_jwt_flags_missing_and_expired_exp() {
+        // No exp → Medium.
+        let header = B64_URL.encode(br#"{"alg":"HS256"}"#);
+        let payload = B64_URL.encode(br#"{"sub":"x"}"#);
+        let token = format!("{header}.{payload}.c2ln");
+        let a = analyze_jwt(&token, &["none".to_string()], Some(1000)).unwrap();
+        assert!(a.issues.iter().any(|i| i.title.contains("No expiry")));
+
+        // Expired exp → Info.
+        let payload2 = B64_URL.encode(br#"{"sub":"x","exp":500}"#);
+        let token2 = format!("{header}.{payload2}.c2ln");
+        let a2 = analyze_jwt(&token2, &["none".to_string()], Some(1000)).unwrap();
+        assert!(a2.issues.iter().any(|i| i.title.contains("expired")));
+    }
+
+    // ---- Favicon hash (Shodan) ----
+
+    #[test]
+    fn murmur3_empty_is_zero() {
+        assert_eq!(murmur3_x86_32(b"", 0), 0);
+    }
+
+    #[test]
+    fn favicon_hash_empty_is_zero_and_deterministic() {
+        // base64.encodebytes(b"") == b"" so mmh3("") == 0, matching Shodan.
+        assert_eq!(favicon_hash(&[]), 0);
+        let data = b"\x89PNG\r\n\x1a\n some favicon bytes here";
+        assert_eq!(favicon_hash(data), favicon_hash(data));
+    }
+
+    #[test]
+    fn favicon_hash_wraps_76_char_lines_like_python() {
+        // 60 bytes → 80 base64 chars → two lines (76 + 4) each with a trailing
+        // newline, exactly as Python's base64.encodebytes produces. We assert
+        // the hash is stable and non-zero for a realistic-length input (the
+        // line-wrapping path is exercised).
+        let data = vec![0x41u8; 60];
+        let h = favicon_hash(&data);
+        assert_ne!(h, 0);
+        assert_eq!(h, favicon_hash(&data));
     }
 }

@@ -143,13 +143,22 @@ pub fn base_score(vector: &str) -> Result<f64, CvssError> {
     let i = i.ok_or(CvssError::MissingMetric("I"))?;
     let a = a.ok_or(CvssError::MissingMetric("A"))?;
 
+    // Resolve the PR weight against scope. The letter was validated while parsing,
+    // so the fallback below is unreachable *today*; it returns the same error a
+    // malformed vector produces rather than panicking on a score computed from
+    // input the operator supplied.
     let pr = match (pr_letter, scope_changed) {
         ("N", _) => 0.85,
         ("L", false) => 0.62,
         ("L", true) => 0.68,
         ("H", false) => 0.27,
         ("H", true) => 0.50,
-        _ => unreachable!("PR letter validated above"),
+        other => {
+            return Err(CvssError::BadMetricValue(format!(
+                "PR:{:?} with scope changed = {}",
+                other.0, other.1
+            )))
+        }
     };
 
     // Impact sub-score.

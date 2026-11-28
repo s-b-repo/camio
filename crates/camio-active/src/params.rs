@@ -81,9 +81,78 @@ pub(crate) fn with_param(
             let rebuilt = replace_or_append_pairs(&base.body.as_text(), name, value);
             req.body = Body::from_text(rebuilt);
         }
-        InputKind::Cookie | InputKind::Header | InputKind::JsonField => {}
+        InputKind::Cookie
+        | InputKind::Header
+        | InputKind::JsonField
+        | InputKind::XmlText
+        | InputKind::XmlAttr => {}
     }
     req
+}
+
+/// Clone `base` and set the XML injection point addressed by `name` (an element
+/// path for text, `path@attr` for an attribute — the same addressing
+/// [`camio_automate::discover_inputs`] produces) to `value`. Returns an
+/// unmodified clone if the body is not XML or the node does not resolve.
+pub(crate) fn with_xml_input(base: &HttpRequest, name: &str, value: &str) -> HttpRequest {
+    let mut req = base.clone();
+    if let Some(rewritten) = camio_automate::set_xml_input(&base.body.as_text(), name, value) {
+        req.body = Body::from_text(rewritten);
+    }
+    req
+}
+
+/// Clone `base` and set the JSON body field at dotted `path` (the same
+/// `user.name` / `items.0.id` addressing [`camio_automate::discover_inputs`]
+/// produces) to `value` as a JSON string. Returns an unmodified clone if the
+/// body is not JSON or the path does not resolve, so a failed rewrite simply
+/// sends no meaningful probe rather than corrupting the request.
+pub(crate) fn with_json_field(base: &HttpRequest, path: &str, value: &str) -> HttpRequest {
+    let mut req = base.clone();
+    if let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&base.body.as_text()) {
+        if set_json_path(&mut root, path, value) {
+            req.body = Body::from_text(root.to_string());
+        }
+    }
+    req
+}
+
+/// Set the scalar at `path` (dotted, numeric segments index arrays) to a JSON
+/// string `value`. Returns whether the path resolved to a settable location.
+fn set_json_path(root: &mut serde_json::Value, path: &str, value: &str) -> bool {
+    let segments: Vec<&str> = path.split('.').collect();
+    let mut cur = root;
+    for (i, seg) in segments.iter().enumerate() {
+        let last = i + 1 == segments.len();
+        if last {
+            return match cur {
+                serde_json::Value::Object(map) => {
+                    map.insert(seg.to_string(), serde_json::Value::String(value.to_string()));
+                    true
+                }
+                serde_json::Value::Array(arr) => match seg.parse::<usize>() {
+                    Ok(idx) if idx < arr.len() => {
+                        arr[idx] = serde_json::Value::String(value.to_string());
+                        true
+                    }
+                    _ => false,
+                },
+                _ => false,
+            };
+        }
+        cur = match cur {
+            serde_json::Value::Object(map) => match map.get_mut(*seg) {
+                Some(next) => next,
+                None => return false,
+            },
+            serde_json::Value::Array(arr) => match seg.parse::<usize>() {
+                Ok(idx) if idx < arr.len() => &mut arr[idx],
+                _ => return false,
+            },
+            _ => return false,
+        };
+    }
+    false
 }
 
 /// De-duplicate `(kind, name)` pairs, preserving first-seen order. Checks use
@@ -106,8 +175,10 @@ pub(crate) fn dedup_params(params: Vec<(InputKind, String)>) -> Vec<(InputKind, 
 /// Split a URL into `(before_fragment, fragment)` at the first `#`. The returned
 /// fragment includes the `#`, or is `""` when there is none.
 fn split_fragment(url: &str) -> (&str, &str) {
+    // `find` returns a char boundary, so both slices are in bounds; reading them
+    // through `get` keeps that fact next to the slice instead of two lines away.
     match url.find('#') {
-        Some(i) => (&url[..i], &url[i..]),
+        Some(i) => (url.get(..i).unwrap_or(""), url.get(i..).unwrap_or("")),
         None => (url, ""),
     }
 }
@@ -116,7 +187,7 @@ fn split_fragment(url: &str) -> (&str, &str) {
 /// present) excludes the `?`.
 fn split_query(s: &str) -> (&str, Option<&str>) {
     match s.find('?') {
-        Some(i) => (&s[..i], Some(&s[i + 1..])),
+        Some(i) => (s.get(..i).unwrap_or(s), s.get(i + 1..)),
         None => (s, None),
     }
 }

@@ -46,6 +46,9 @@ pub trait Interceptor: Send + Sync {
 
     /// Inspect/edit/drop a response before it reaches the client. The `request`
     /// is the one that produced it (post-edit), for context.
+    // Response interception only looks at the response; the request is part of
+    // the trait's signature.
+    // audit-allow: B13
     fn on_response(&self, _request: &HttpRequest, response: HttpResponse) -> ResponseDecision {
         ResponseDecision::Forward(response)
     }
@@ -138,45 +141,35 @@ impl QueueInterceptor {
 
     /// Set how long a parked item may wait for an operator decision.
     pub fn set_park_timeout(&self, timeout: Duration) {
-        self.inner
-            .lock()
-            .expect("intercept queue poisoned")
-            .park_timeout = timeout;
+        camio_core::sync::recovered_lock(&self.inner).park_timeout = timeout;
     }
 
     /// Turn interception on or off. Turning it off releases nothing already
     /// parked — resolve those explicitly — but new messages pass straight
     /// through.
     pub fn set_active(&self, active: bool) {
-        let mut g = self.inner.lock().expect("intercept queue poisoned");
+        let mut g = camio_core::sync::recovered_lock(&self.inner);
         g.active = active;
     }
 
     pub fn is_active(&self) -> bool {
-        self.inner.lock().expect("intercept queue poisoned").active
+        camio_core::sync::recovered_lock(&self.inner).active
     }
 
     /// Enable or disable parking of responses (default disabled). Requests are
     /// always governed by [`set_active`](Self::set_active).
     pub fn set_intercept_responses(&self, on: bool) {
-        self.inner
-            .lock()
-            .expect("intercept queue poisoned")
-            .intercept_responses = on;
+        camio_core::sync::recovered_lock(&self.inner).intercept_responses = on;
     }
 
     /// Number of messages currently parked awaiting a decision.
     pub fn pending_count(&self) -> usize {
-        self.inner
-            .lock()
-            .expect("intercept queue poisoned")
-            .queue
-            .len()
+        camio_core::sync::recovered_lock(&self.inner).queue.len()
     }
 
     /// Pull the next parked message for display, if any. Non-blocking.
     pub fn next_pending(&self) -> Option<Pending> {
-        let g = self.inner.lock().expect("intercept queue poisoned");
+        let g = camio_core::sync::recovered_lock(&self.inner);
         let id = *g.queue.front()?;
         match g.slots.get(&id)? {
             Slot::WaitingRequest(req) => Some(Pending::Request {
@@ -204,7 +197,7 @@ impl QueueInterceptor {
     }
 
     fn resolve(&self, id: u64, resolved: Slot) -> bool {
-        let mut g = self.inner.lock().expect("intercept queue poisoned");
+        let mut g = camio_core::sync::recovered_lock(&self.inner);
         let ok = matches!(
             (g.slots.get(&id), &resolved),
             (Some(Slot::WaitingRequest(_)), Slot::ResolvedRequest(_))
@@ -224,7 +217,7 @@ impl QueueInterceptor {
     const MAX_PENDING: usize = 512;
 
     fn park_request(&self, request: HttpRequest) -> RequestDecision {
-        let mut g = self.inner.lock().expect("intercept queue poisoned");
+        let mut g = camio_core::sync::recovered_lock(&self.inner);
         if !g.active || g.queue.len() >= Self::MAX_PENDING {
             return RequestDecision::Forward(request);
         }
@@ -236,10 +229,8 @@ impl QueueInterceptor {
         self.cv.notify_all();
         loop {
             // Poll so a `set_active(false)` toggle can release waiters too.
-            let (guard, _timeout) = self
-                .cv
-                .wait_timeout(g, Duration::from_millis(200))
-                .expect("intercept queue poisoned");
+            let (guard, _timeout) =
+                camio_core::sync::unpoisoned(self.cv.wait_timeout(g, Duration::from_millis(200)));
             g = guard;
             if let Some(Slot::ResolvedRequest(_)) = g.slots.get(&id) {
                 if let Some(Slot::ResolvedRequest(d)) = g.slots.remove(&id) {
@@ -265,7 +256,7 @@ impl QueueInterceptor {
     }
 
     fn park_response(&self, request: &HttpRequest, response: HttpResponse) -> ResponseDecision {
-        let mut g = self.inner.lock().expect("intercept queue poisoned");
+        let mut g = camio_core::sync::recovered_lock(&self.inner);
         if !g.active || !g.intercept_responses {
             return ResponseDecision::Forward(response);
         }
@@ -280,10 +271,8 @@ impl QueueInterceptor {
         let deadline = Instant::now() + g.park_timeout;
         self.cv.notify_all();
         loop {
-            let (guard, _timeout) = self
-                .cv
-                .wait_timeout(g, Duration::from_millis(200))
-                .expect("intercept queue poisoned");
+            let (guard, _timeout) =
+                camio_core::sync::unpoisoned(self.cv.wait_timeout(g, Duration::from_millis(200)));
             g = guard;
             if let Some(Slot::ResolvedResponse(_)) = g.slots.get(&id) {
                 if let Some(Slot::ResolvedResponse(d)) = g.slots.remove(&id) {

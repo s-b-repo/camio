@@ -123,7 +123,10 @@ fn run_version(binary: &str, args: &[&str], timeout: Duration) -> Result<String,
             Ok(Some(_)) => break,
             Ok(None) => {
                 if start.elapsed() > timeout {
-                    let _ = child.kill();
+                    // The version probe hung; kill it. reap() then does the
+                    // wait, so a kill that lost the race with the child's own
+                    // exit needs no report.
+                    camio_core::expected(child.kill());
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(50));
@@ -131,18 +134,19 @@ fn run_version(binary: &str, args: &[&str], timeout: Duration) -> Result<String,
             Err(e) => return Err(IntegrationError::Run(e.to_string())),
         }
     }
-    let _ = child.wait();
+    // Reap the probe: kill is a no-op once exited, wait clears the zombie.
+    camio_core::sync::reap(&mut child);
 
     // Version output is tiny; read both pipes after exit (no deadlock risk).
     let mut combined = String::new();
     if let Some(out) = child.stdout.take() {
         let mut s = String::new();
-        let _ = out.take(8192).read_to_string(&mut s);
+        read_some(out, &mut s, "stdout");
         combined.push_str(&s);
     }
     if let Some(err) = child.stderr.take() {
         let mut s = String::new();
-        let _ = err.take(8192).read_to_string(&mut s);
+        read_some(err, &mut s, "stderr");
         combined.push_str(&s);
     }
     let line = combined
@@ -155,6 +159,16 @@ fn run_version(binary: &str, args: &[&str], timeout: Duration) -> Result<String,
 
 /// Strip ANSI escapes and a leading `[INF]`/`[WRN]`-style log marker from a
 /// tool's version line, so a probed version reads cleanly.
+/// Read at most `limit` bytes of a tool's version output, reporting a read
+/// failure. A failed read and "the tool printed nothing" both end in an empty
+/// string, but only one of them means the tool is missing.
+fn read_some(pipe: impl Read, buf: &mut String, which: &str) {
+    let mut limited = pipe.take(8192);
+    if let Err(e) = limited.read_to_string(buf) {
+        eprintln!("camio-integrations: reading version output ({which}): {e}");
+    }
+}
+
 fn clean_version_line(line: &str) -> String {
     // Drop CSI escape sequences (ESC '[' ... final byte).
     let mut out = String::with_capacity(line.len());

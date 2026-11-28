@@ -267,14 +267,19 @@ impl ProxyServer {
         // connections are handed to a fixed pool and the rest wait briefly.
         let workers = self.config.max_connections.clamp(1, 512);
         if polling {
-            let _ = listener.set_nonblocking(true);
+            // A listener that stays blocking leaves the accept loop stalled on
+            // `accept`, ignoring the shutdown flag forever: an operator-visible
+            // difference from "the proxy stopped", not a peer hang-up.
+            if let Err(e) = listener.set_nonblocking(true) {
+                camio_core::note_failure("could not set the proxy listener nonblocking", e);
+            }
         }
         let (tx, rx) = std::sync::mpsc::channel::<TcpStream>();
         let rx = std::sync::Arc::new(std::sync::Mutex::new(rx));
         for id in 0..workers {
             let server = self.clone();
             let rx = rx.clone();
-            let _ = std::thread::Builder::new()
+            let spawned = std::thread::Builder::new()
                 .name(format!("camio-proxy-{id}"))
                 .spawn(move || loop {
                     // Block for the next connection; a poisoned receiver ends
@@ -291,6 +296,11 @@ impl ProxyServer {
                     };
                     server.handle_conn(stream);
                 });
+            // A failed spawn silently shrinks the worker pool: no one can see
+            // that the proxy is serving on fewer threads than configured.
+            if let Err(e) = spawned {
+                camio_core::note_failure(&format!("could not spawn proxy worker {id}"), e);
+            }
         }
         loop {
             if let Some(flag) = &shutdown {
@@ -300,12 +310,16 @@ impl ProxyServer {
             }
             match listener.accept() {
                 Ok((stream, _)) => {
-                    // Accepted sockets are used with blocking reads.
-                    let _ = stream.set_nonblocking(false);
+                    // Accepted sockets are used with blocking reads; if this
+                    // fails the worker replies with an error to that one
+                    // connection, per connection rather than per request.
+                    camio_core::expected(stream.set_nonblocking(false));
                     // If the pool is saturated the accept still lands in the
                     // queue (channel is unbounded), so no connection is dropped;
-                    // the workers drain it in order.
-                    let _ = tx.send(stream);
+                    // the workers drain it in order. `send` only fails when
+                    // every worker has exited (poisoned receiver), which
+                    // retires the connection along with them.
+                    camio_core::expected(tx.send(stream));
                 }
                 Err(ref e) if polling && e.kind() == io::ErrorKind::WouldBlock => {
                     std::thread::sleep(Duration::from_millis(50));
@@ -329,10 +343,13 @@ impl ProxyServer {
     /// Handle one TCP connection: a run of plain-HTTP proxy requests, or a single
     /// CONNECT that takes over the socket.
     fn handle_conn(self: &Arc<Self>, stream: TcpStream) {
-        let _ = stream.set_read_timeout(self.config.read_timeout);
+        // The idle keep-alive timeout is best-effort on a per-connection socket: if
+        // it cannot be set the connection blocks until the client sends or closes.
+        camio_core::expected(stream.set_read_timeout(self.config.read_timeout));
         let mut conn = Conn::new(stream);
-        // Prime the first bytes so the preface check sees them.
-        let _ = conn.prime();
+        // Prime the first bytes so the preface check sees them. A closed or
+        // reset client is the normal case (`read` below reports the same).
+        camio_core::expected(conn.prime());
         // HTTP/2 with prior knowledge cannot be intercepted as HTTP/1.1 (the
         // intercepted path is HTTP/1.1 by design; the HTTP/2 fingerprint is
         // reproduced by the matched engine toward the target). Say so instead
@@ -343,7 +360,9 @@ impl ProxyServer {
                 "Camio proxy: HTTP/2 (prior knowledge) is not intercepted. \
                  Use an HTTP/1.1 client, or exclude this host from interception to relay it.",
             );
-            let _ = write_response(conn.stream_mut(), &resp, false);
+            // The client asked for something we cannot serve; if it already
+            // closed the socket the synthetic reply is lost, nothing to log.
+            camio_core::expected(write_response(conn.stream_mut(), &resp, false));
             self.capture(
                 &HttpRequest::get("http://h2-prior-knowledge.invalid/"),
                 Some(&resp),
@@ -512,8 +531,13 @@ impl ProxyServer {
         let (mut stream, leftover) = conn.into_parts();
 
         if !decision.is_sendable() {
-            let _ =
-                write_connect_status(&mut stream, 403, "Camio proxy: CONNECT target out of scope");
+            // The refused client commonly hangs up before reading: the refusal
+            // is already captured, so a failed reply is expected.
+            camio_core::expected(write_connect_status(
+                &mut stream,
+                403,
+                "Camio proxy: CONNECT target out of scope",
+            ));
             self.capture_connect(&authority, decision);
             return;
         }
@@ -534,14 +558,7 @@ impl ProxyServer {
         if write_connect_established(&mut stream).is_err() {
             return;
         }
-        blind_relay(
-            stream,
-            leftover,
-            &connect_host,
-            port,
-            self.config.read_timeout,
-            &self.config.upstream,
-        );
+        blind_relay(stream, leftover, &connect_host, port, &self.config.upstream);
     }
 
     /// Terminate TLS for an in-scope CONNECT and serve its plaintext requests.
@@ -579,7 +596,9 @@ impl ProxyServer {
                 .scope
                 .decide(&HttpExchange::new(probe.clone(), Source::Proxy));
             self.capture(&probe, Some(&resp), decision, None, None);
-            let _ = write_response(conn.stream_mut(), &resp, false);
+            // Synthetic reply to a client that asked for an unimplemented
+            // protocol: a hung-up peer is the expected failure.
+            camio_core::expected(write_response(conn.stream_mut(), &resp, false));
             return;
         }
         loop {
@@ -604,7 +623,9 @@ impl ProxyServer {
                     let decision = self.config.scope.decide(&probe);
                     self.capture(&request, Some(&resp), decision, None, None);
                 }
-                let _ = write_response(conn.stream_mut(), &resp, false);
+                // Reply is best-effort: a peer that dropped a WebSocket upgrade
+                // it knows will be refused is still expected behaviour.
+                camio_core::expected(write_response(conn.stream_mut(), &resp, false));
                 return;
             }
             let keep_alive = wants_keep_alive(&head);
@@ -644,7 +665,9 @@ impl ProxyServer {
                 403
             };
             let resp = synthetic(status, "Camio proxy refused the WebSocket (out of scope)");
-            let _ = write_response(&mut client, &resp, false);
+            // A client refused here routinely closes without reading the
+            // reply; the refusal is already captured above.
+            camio_core::expected(write_response(&mut client, &resp, false));
             self.capture(&request, Some(&resp), decision, None, None);
             return;
         }
@@ -662,7 +685,9 @@ impl ProxyServer {
                 "Camio proxy: a TLS WebSocket upgrade is blind-relayed, not intercepted. \
                  Exclude this host from --tls-intercept to relay it fingerprint-true.",
             );
-            let _ = write_response(&mut client, &resp, false);
+            // A TLS upgrade cannot be rebuilt in the clear, so the handshake is
+            // refused; the peer closing before reading that is expected.
+            camio_core::expected(write_response(&mut client, &resp, false));
             self.capture(&request, Some(&resp), decision, None, None);
             return;
         }
@@ -699,7 +724,9 @@ impl ProxyServer {
                             429,
                             "Camio proxy: WebSocket handshake rate-limited (retry shortly)",
                         );
-                        let _ = write_response(&mut client, &resp, false);
+                        // A rate-limited handshake is expected to be retried; the client often
+                        // closes before reading the 429, so the reply is best-effort.
+                        camio_core::expected(write_response(&mut client, &resp, false));
                         self.capture(&request, Some(&resp), decision, None, None);
                         return;
                     }
@@ -717,7 +744,9 @@ impl ProxyServer {
         );
         let Some(upstream) = upstream else {
             let resp = synthetic(502, "Camio proxy: WebSocket upstream connect failed");
-            let _ = write_response(&mut client, &resp, false);
+            // The client is still waiting for an answer; if it has gone the
+            // refusal cannot be delivered, which is the expected failure.
+            camio_core::expected(write_response(&mut client, &resp, false));
             return;
         };
         let raw = reconstruct_upgrade_request(head, &body);
@@ -750,8 +779,10 @@ impl ProxyServer {
         upstream: TcpStream,
         editor: Arc<dyn ws::FrameEditor>,
     ) {
-        let _ = client.set_read_timeout(None);
-        let _ = upstream.set_read_timeout(None);
+        // A relay can legitimately idle, so both sides drop the read timeout; the
+        // failure mode (a timeout that stays set) is handled by the relay loop.
+        camio_core::expected(client.set_read_timeout(None));
+        camio_core::expected(upstream.set_read_timeout(None));
 
         let (mut client_r, mut client_w) = match (client.try_clone(), client) {
             (Ok(r), w) => (r, w),
@@ -765,11 +796,22 @@ impl ProxyServer {
         let editor_c2u = editor.clone();
         let c2u = std::thread::spawn(move || {
             pump_frames(&mut client_r, &mut up_w, editor_c2u.as_ref(), false);
-            let _ = up_w.shutdown(std::net::Shutdown::Write);
+            // Half-close the direction that just ended; the peer closing it
+            // first (the usual case) is an expected failure.
+            camio_core::expected(up_w.shutdown(std::net::Shutdown::Write));
         });
         pump_frames(&mut up_r, &mut client_w, editor.as_ref(), true);
-        let _ = client_w.shutdown(std::net::Shutdown::Write);
-        let _ = c2u.join();
+        // Half-close the direction that just ended; the peer closing it first
+        // (the usual case) is an expected failure.
+        camio_core::expected(client_w.shutdown(std::net::Shutdown::Write));
+        // The pump thread only exits when a peer closes; a panic in it is a
+        // real bug worth reporting rather than swallowing.
+        if let Err(panic) = c2u.join() {
+            camio_core::note_failure(
+                "the ws relay pump thread panicked",
+                camio_core::describe_panic(panic),
+            );
+        }
     }
 
     /// Capture a completed/refused exchange with a synthetic or real response.
@@ -853,7 +895,14 @@ impl ProxyHandle {
     pub fn stop_and_join(mut self) {
         self.shutdown.store(true, Ordering::Release);
         if let Some(join) = self.join.take() {
-            let _ = join.join();
+            // A panicked accept thread is a real bug: the proxy was running
+            // and silently stopped serving, which must not be invisible.
+            if let Err(panic) = join.join() {
+                camio_core::note_failure(
+                    "the proxy accept thread panicked",
+                    camio_core::describe_panic(panic),
+                );
+            }
         }
     }
 }
@@ -970,7 +1019,6 @@ fn blind_relay(
     leftover: Vec<u8>,
     host: &str,
     port: u16,
-    _timeout: Option<Duration>,
     upstream: &upstream::Upstream,
 ) {
     // A blind relay has no scope config of its own: the caller already decided
@@ -979,7 +1027,6 @@ fn blind_relay(
     let Some(upstream) = guarded_connect(host, port, false, false, upstream) else {
         return;
     };
-    let _ = upstream.set_read_timeout(None);
     if !leftover.is_empty() && (&upstream).write_all(&leftover).is_err() {
         return;
     }
@@ -1032,8 +1079,10 @@ fn relay_streams(client: TcpStream, upstream: TcpStream) {
     // but the whole relay gets an idle deadline after which both sides are
     // closed: an abandoned tunnel must not leak threads + sockets forever.
     let deadline = std::time::Instant::now() + RELAY_IDLE_TIMEOUT;
-    let _ = client.set_read_timeout(None);
-    let _ = upstream.set_read_timeout(None);
+    // A relay may legitimately idle, so both sides drop the read timeout; the
+    // poll loop below sets a short one on the socket it actually reads.
+    camio_core::expected(client.set_read_timeout(None));
+    camio_core::expected(upstream.set_read_timeout(None));
 
     let (mut client_r, mut client_w) = match (client.try_clone(), client) {
         (Ok(r), w) => (r, w),
@@ -1045,15 +1094,19 @@ fn relay_streams(client: TcpStream, upstream: TcpStream) {
     };
 
     let c2u = std::thread::spawn(move || {
-        let _ = io::copy(&mut client_r, &mut up_w);
-        let _ = up_w.shutdown(std::net::Shutdown::Write);
+        // A read error is how a closed peer ends the copy; the shutdown that
+        // follows is best-effort for the same reason.
+        camio_core::expected(io::copy(&mut client_r, &mut up_w));
+        camio_core::expected(up_w.shutdown(std::net::Shutdown::Write));
     });
     // Poll for the upstream→client copy's completion so an idle peer cannot
     // outlive the deadline.
     loop {
         if std::time::Instant::now() >= deadline {
-            let _ = up_r.shutdown(std::net::Shutdown::Both);
-            let _ = client_w.shutdown(std::net::Shutdown::Both);
+            // At the idle deadline the tunnel is abandoned: closing a peer
+            // that already closed is the expected failure.
+            camio_core::expected(up_r.shutdown(std::net::Shutdown::Both));
+            camio_core::expected(client_w.shutdown(std::net::Shutdown::Both));
             break;
         }
         match up_r.set_read_timeout(Some(Duration::from_millis(250))) {
@@ -1070,10 +1123,20 @@ fn relay_streams(client: TcpStream, upstream: TcpStream) {
             }
         }
     }
-    let _ = client_w.shutdown(std::net::Shutdown::Write);
-    let _ = c2u.join();
+    // Half-close the direction that just ended; the peer closing it first (the
+    // usual case) is an expected failure.
+    camio_core::expected(client_w.shutdown(std::net::Shutdown::Write));
+    // A panic in the relay's copy thread is a real bug, not a peer event.
+    if let Err(panic) = c2u.join() {
+        camio_core::note_failure(
+            "the relay copy thread panicked",
+            camio_core::describe_panic(panic),
+        );
+    }
 }
 
+/// Current time in milliseconds since the UNIX epoch (0 if the clock is before
+/// the epoch), for timestamping proxy records.
 fn now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
@@ -1386,11 +1449,15 @@ mod tests {
                         }
                     }
                 }
-                let _ = s.write_all(
+                // The fake origin's 101 / echoed frame may race the proxy closing the
+                // socket (the connection is about to end), which is expected.
+                camio_core::expected(s.write_all(
                     b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
-                );
+                ));
                 if let Ok(n) = s.read(&mut tmp) {
-                    let _ = s.write_all(&tmp[..n]); // echo the frame
+                    // Echoing back to a client that already closed the frame
+                    // it sent is the same expected race.
+                    camio_core::expected(s.write_all(&tmp[..n]));
                 }
             }
         });
@@ -1551,11 +1618,16 @@ mod concurrency_tests {
         for _ in 0..5 {
             let mut s = TcpStream::connect(addr).unwrap();
             s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-            let _ = s.write_all(
+            // Each iteration drives one connection's request through the proxy; a peer
+            // (the proxy closing after `Connection: close`) wins that race as
+            // part of the test's own teardown, which is expected here.
+            camio_core::expected(s.write_all(
                 b"GET http://x.test/ HTTP/1.1\r\nHost: x.test\r\nConnection: close\r\n\r\n",
-            );
+            ));
             let mut buf = [0u8; 512];
-            let _ = s.read(&mut buf);
+            // A refused or already-closed connection is what this loop is
+            // checking for resilience against, so the read failure is expected.
+            camio_core::expected(s.read(&mut buf));
         }
         handle.stop_and_join();
     }
@@ -1586,8 +1658,12 @@ mod upstream_relay_tests {
                         Err(_) => break,
                     }
                 }
-                let _ = seen_tx.send(String::from_utf8_lossy(&buf).to_string());
-                let _ = s.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n");
+                // The receiver only exists for this test's observation; a send failure
+                // means the test already finished with it, so it is expected.
+                camio_core::expected(seen_tx.send(String::from_utf8_lossy(&buf).to_string()));
+                // The client closes the tunnel as the test ends, so the 200's
+                // reply losing the race is expected.
+                camio_core::expected(s.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n"));
                 // Hold the tunnel open briefly so the caller can observe it.
                 std::thread::sleep(Duration::from_millis(50));
             }
@@ -1632,6 +1708,12 @@ mod upstream_relay_tests {
             return;
         };
         drop(stream);
-        let _ = acceptor.join();
+        // A panicked acceptor would be a real bug in this test's harness.
+        if let Err(panic) = acceptor.join() {
+            camio_core::note_failure(
+                "the upstream-relay test acceptor panicked",
+                camio_core::describe_panic(panic),
+            );
+        }
     }
 }

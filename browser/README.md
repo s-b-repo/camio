@@ -80,20 +80,31 @@ PATH (which the Camio app's own browser launcher now prefers), and registers a
 
 ### What's baked in
 
-The build's post-package step turns the stock LibreWolf tarball into the Camio
-fork by editing loose config files (no source patching, no `omni.ja` surgery):
+The product name is rebranded at the **source** level: before compile,
+`inject_branding` overwrites the LibreWolf brand strings
+(`browser/branding/*/locales/*/brand.ftl` + `brand.properties`) with
+`branding/brand.ftl` / `brand.properties`, so the compiled binary reports
+**"Camio Browser"** natively — About dialog, window title, menus and
+notifications — not just in a renamed `application.ini`. (For a *prebuilt*
+LibreWolf tarball that was never compiled here, `rebrand.sh` performs the same
+swap inside `omni.ja` and clears the startup cache.)
+
+The build's post-package step then turns the tarball into the Camio fork by
+editing loose config files:
 
 - `camio-userChrome.css` at the app root — the black/blue chrome.
+- `camio-user.js` at the app root — the per-profile stealth baseline.
 - `defaults/pref/camio-autoconfig.js` — disables the autoconfig *sandbox* so the
   `.cfg` can do file I/O.
 - appended to LibreWolf's `librewolf.cfg`: `lockPref` enabling userChrome
-  stylesheets, extra `defaultPref` hardening (battery/netinfo/gamepad/beacon/DNS
-  prefetch/predictor off), and a guarded snippet that copies `camio-userChrome.css`
-  into each profile's `chrome/` on startup.
+  stylesheets + hiding the automation tell, extra `defaultPref` hardening (RFP,
+  timer jitter, battery/netinfo/gamepad/beacon/DNS prefetch/predictor off), and
+  a guarded snippet that copies `camio-userChrome.css` **and** `camio-user.js`
+  into each profile on startup.
 
-So the fork is themed + stealth-preconfigured out of the box. (If a profile-copy
-ever fails, Camio's launcher still applies the same theme + per-persona
-fingerprint at run time, so there's no regression.)
+So the fork is rebranded + themed + stealth-preconfigured out of the box. (If a
+profile-copy ever fails, Camio's launcher still applies the same theme +
+per-persona fingerprint at run time, so there's no regression.)
 
 Camoufox's C++ patches are skipped (upstream suspended), so this is a
 **Camio-branded LibreWolf**; set the `camoufox_repo` input to a reachable source
@@ -115,7 +126,14 @@ usual `--install-root` / browser-binary path.
 
 | File | Purpose |
 |---|---|
-| `build.sh` | Fetch LibreWolf + Camoufox, apply patches, inject branding, build |
-| `branding/userChrome.css` | The black/blue chrome theme (fork default) |
+| `build.sh` | Fetch LibreWolf + Camoufox, apply patches, inject branding, build, package, `.deb` |
+| `rebrand.sh` | Rebrand LibreWolf → Camio in an unpacked tree: `application.ini` + `omni.ja` brand strings (idempotent) |
+| `branding/brand.ftl` | Camio product-name strings (Fluent) compiled into the binary — About dialog, title bar, menus |
+| `branding/brand.properties` | Same brand strings for legacy `.properties` consumers |
+| `branding/userChrome.css` | The black/blue chrome theme (toolbar, tabs, popups, sidebar, findbar) |
 | `branding/theme.json` | The color palette (edit to recolor; same values as the app's "Sentinel Blue") |
-| `branding/camio.cfg` | `autoconfig` defaults (enable userChrome, set theme) |
+| `branding/camio.cfg` | `autoconfig` defaults — baked stealth prefs + `userChrome` enable (locked) |
+| `branding/camio-user.js` | Per-profile `user.js` baseline; the `.cfg` copies it into every new profile |
+| `branding/newtab.html` | Camio-branded start page (stage via `about:home → file://…/newtab.html`) |
+| `branding/camio-browser.desktop` | Application-menu entry for the `.deb` |
+| `branding/camio-browser.svg` | Icon used by the `.desktop` entry |

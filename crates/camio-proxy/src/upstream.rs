@@ -124,10 +124,13 @@ fn socks5_connect(s: &mut TcpStream, host: &str, port: u16) -> std::io::Result<(
     s.write_all(&[0x05, 0x01, 0x00])?;
     let mut choice = [0u8; 2];
     s.read_exact(&mut choice)?;
-    if choice[0] != 0x05 {
+    // Destructured rather than indexed: a fixed array has no out-of-bounds
+    // index to get wrong.
+    let [version, method] = choice;
+    if version != 0x05 {
         return Err(err("upstream proxy is not SOCKS5"));
     }
-    match choice[1] {
+    match method {
         0x00 => {}
         0x02 => return Err(err("upstream SOCKS5 proxy requires authentication")),
         0xff => return Err(err("upstream SOCKS5 proxy has no acceptable auth method")),
@@ -147,10 +150,11 @@ fn socks5_connect(s: &mut TcpStream, host: &str, port: u16) -> std::io::Result<(
     // Reply: version, reply code, reserved, address type, address, port.
     let mut head = [0u8; 4];
     s.read_exact(&mut head)?;
-    if head[1] != 0x00 {
-        return Err(err(&format!("SOCKS5 CONNECT failed (code {})", head[1])));
+    let [_, code, _, atyp] = head;
+    if code != 0x00 {
+        return Err(err(&format!("SOCKS5 CONNECT failed (code {code})")));
     }
-    let skip = match head[3] {
+    let skip = match atyp {
         0x01 => 4,                                // IPv4
         0x03 => 1 + s.read_exact_one()? as usize, // domain
         0x04 => 16,                               // IPv6
@@ -170,7 +174,8 @@ impl<R: Read> ReadOne for R {
     fn read_exact_one(&mut self) -> std::io::Result<u8> {
         let mut b = [0u8; 1];
         self.read_exact(&mut b)?;
-        Ok(b[0])
+        let [byte] = b;
+        Ok(byte)
     }
 }
 
@@ -216,8 +221,23 @@ mod tests {
         let addr = listener.local_addr().unwrap().to_string();
         let handle = std::thread::spawn(move || {
             if let Ok((mut s, _)) = listener.accept() {
-                let mut buf = [0u8; 1024];
-                let _ = s.read(&mut buf);
+                // Drain the whole CONNECT request before replying: dropping a
+                // socket that still has unread data makes the OS send an RST,
+                // which can abort the client's response read mid-stream (the
+                // source of this test's past flakiness). Reading to the end of
+                // the request headers leaves the receive buffer empty, so the
+                // close is a clean FIN.
+                let mut byte = [0u8; 1];
+                let mut seen: Vec<u8> = Vec::with_capacity(64);
+                while let Ok(n) = s.read(&mut byte) {
+                    if n == 0 {
+                        break;
+                    }
+                    seen.push(byte[0]);
+                    if seen.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
                 let _ = s.write_all(status.as_bytes());
                 let _ = s.write_all(b"\r\n\r\n");
             }

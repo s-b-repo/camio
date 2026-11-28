@@ -3,11 +3,17 @@
  * Requires toolkit.legacyUserProfileCustomizations.stylesheets = true
  * (set by camio.cfg in this fork, or by Camio's launcher for a stock binary). */
 :root {
-  --camio-ink: #000000;
-  --camio-surface: #051228;
-  --camio-line: rgba(20, 90, 220, 0.45);
-  --camio-text: #c0d6f0;
-  --camio-accent: #1e80ff;
+  /* Cyber Sec "Sentinel Blue" — cybersec.org.za/assets/styles.css */
+  --camio-ink: #08111f;
+  --camio-ink-2: #0b1423;
+  --camio-surface: #101c2f;
+  --camio-line: #3b5877;
+  --camio-text: #e7eefb;
+  --camio-muted: #afc2dc;
+  --camio-accent: #83bcff;
+  --camio-accent-deep: #215bab;
+  --camio-accent-2: #65d2ed;
+  --camio-warn: #ff8297;
 
   --toolbar-bgcolor: var(--camio-ink) !important;
   --toolbar-color: var(--camio-text) !important;
@@ -21,7 +27,12 @@
   --tab-selected-bgcolor: var(--camio-surface) !important;
   --tabs-border-color: var(--camio-line) !important;
   --lwt-toolbar-field-border-focus: var(--camio-accent) !important;
+  --arrowpanel-background: var(--camio-ink-2) !important;
+  --arrowpanel-color: var(--camio-text) !important;
+  --arrowpanel-border-color: var(--camio-line) !important;
 }
+
+/* === Top-of-window chrome: toolbar + tab strip ============================= */
 #navigator-toolbox {
   background: var(--camio-ink) !important;
   border-bottom: 1px solid var(--camio-line) !important;
@@ -29,11 +40,99 @@
 #urlbar, #searchbar {
   background: var(--camio-surface) !important;
   color: var(--camio-text) !important;
+  border: 1px solid var(--camio-line) !important;
+  border-radius: 6px !important;
 }
-#urlbar[focused="true"] { outline: 1px solid var(--camio-accent) !important; }
+#urlbar[focused="true"] {
+  outline: 1px solid var(--camio-accent) !important;
+  box-shadow: 0 0 0 1px var(--camio-accent) !important;
+}
+#urlbar-input::placeholder, #searchbar input::placeholder {
+  color: var(--camio-muted) !important;
+}
 .tab-background[selected] {
   background: var(--camio-surface) !important;
   box-shadow: inset 0 -2px 0 0 var(--camio-accent) !important;
 }
+.tab-background { background: var(--camio-ink) !important; }
+.tab-label { color: var(--camio-text) !important; }
+.tab-close-button { fill: var(--camio-muted) !important; }
+.tab-close-button:hover { fill: var(--camio-warn) !important; }
 .toolbarbutton-1 { color: var(--camio-text) !important; }
+
+/* === Buttons / accents: the blue the eye tracks ========================== */
 button, .button, menulist { accent-color: var(--camio-accent) !important; }
+.urlbar-input-container::after,
+.urlbar-input-container::before {
+  color: var(--camio-accent) !important;
+}
+#identity-icon-box { color: var(--camio-accent-2) !important; }
+#tracking-protection-icon-container { fill: var(--camio-accent-2) !important; }
+#reload-button, #stop-button, #back-button, #forward-button, #home-button {
+  color: var(--camio-text) !important;
+}
+
+/* === Overflow / page-actions / library popups ============================ */
+panel, menupopup {
+  background: var(--camio-ink-2) !important;
+  color: var(--camio-text) !important;
+  --panel-background: var(--camio-ink-2) !important;
+  --panel-color: var(--camio-text) !important;
+  --panel-border-color: var(--camio-line) !important;
+}
+menuitem, menu {
+  color: var(--camio-text) !important;
+}
+menuitem[_moz-menuactive="true"],
+menu[_moz-menuactive="true"] {
+  background: var(--camio-accent-deep) !important;
+  color: #ffffff !important;
+}
+
+/* === Sidebar (history / bookmarks / synced tabs) ========================= */
+#sidebar-box, #sidebar-header, #sidebar {
+  background: var(--camio-ink-2) !important;
+  color: var(--camio-text) !important;
+  border-right: 1px solid var(--camio-line) !important;
+}
+treechildren::-moz-tree-row(selected),
+treechildren::-moz-tree-row(selected, focus) {
+  background-color: var(--camio-accent-deep) !important;
+  color: #ffffff !important;
+}
+
+/* === Findbar ============================================================== */
+findbar {
+  background: var(--camio-ink-2) !important;
+  color: var(--camio-text) !important;
+  border-top: 1px solid var(--camio-line) !important;
+}
+findbar textbox {
+  background: var(--camio-surface) !important;
+  color: var(--camio-text) !important;
+  border: 1px solid var(--camio-line) !important;
+}
+
+/* === Notification bars / infobars ======================================== */
+.notificationbox-stack {
+  background: var(--camio-ink-2) !important;
+}
+.notification-button {
+  background: var(--camio-accent-deep) !important;
+  color: #ffffff !important;
+  border: 1px solid var(--camio-accent) !important;
+}
+
+/* === Private-browsing + security badges ================================== */
+#private-browsing-indicator-with-label {
+  color: var(--camio-accent-2) !important;
+}
+#identity-icon[lockiconshown] { fill: var(--camio-accent-2) !important; }
+
+/* === Download arrow / in-progress marker ================================= */
+#downloads-indicator-progress {
+  --progress-color: var(--camio-accent) !important;
+}
+#downloads-button[attention="success"] .toolbarbutton-icon {
+  fill: var(--camio-accent-2) !important;
+}

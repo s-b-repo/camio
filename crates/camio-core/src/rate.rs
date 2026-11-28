@@ -64,8 +64,11 @@ impl RateLimiter {
     /// a token is consumed from each only when both can be satisfied.
     pub fn try_acquire_at(&self, host: &str, now: Instant) -> bool {
         // Check availability without consuming, then consume atomically.
-        let mut host_guard = self.buckets.lock().expect("rate limiter poisoned");
-        let mut global_guard = self.global_bucket.lock().expect("rate limiter poisoned");
+        // Poison recovery rather than `expect`: the limiter is shared by every send
+        // path, so one panicking caller used to poison both locks and make every
+        // later request panic too.
+        let mut host_guard = crate::sync::recovered_lock(&self.buckets);
+        let mut global_guard = crate::sync::recovered_lock(&self.global_bucket);
 
         let host_ok = match self.per_host {
             Some(rate) => {

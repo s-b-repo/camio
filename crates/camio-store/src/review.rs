@@ -296,8 +296,10 @@ fn read_review(row: &Row<'_>) -> Result<ReviewTask> {
             name,
             format: row.get(19)?,
             sha256: row.get(20)?,
-            imported: row.get::<_, Option<i64>>(21)?.map(|value| value as usize),
-            warning_count: row.get::<_, i64>(22)? as usize,
+            imported: row
+                .get::<_, Option<i64>>(21)?
+                .map(|value| usize::try_from(value).unwrap_or(0)),
+            warning_count: count_column(row, 22)?,
             warnings: warnings
                 .map(|value| serde_json::from_str(&value))
                 .transpose()?
@@ -318,7 +320,7 @@ fn read_review(row: &Row<'_>) -> Result<ReviewTask> {
             created_at_ms: row.get(6)?,
         },
         query: row.get(2)?,
-        limit: row.get::<_, i64>(3)? as usize,
+        limit: count_column(row, 3)?,
         save: row.get(4)?,
         snapshot: row.get::<_, Option<i64>>(5)?.map(ExchangeId),
         updated_at_ms: row.get(7)?,
@@ -326,13 +328,28 @@ fn read_review(row: &Row<'_>) -> Result<ReviewTask> {
         workflow,
         archive,
         counts: ReviewCounts {
-            examined: row.get::<_, i64>(8)? as usize,
-            scanned: row.get::<_, i64>(9)? as usize,
-            skipped_large: row.get::<_, i64>(10)? as usize,
-            omitted: row.get::<_, i64>(11)? as usize,
-            findings: row.get::<_, i64>(12)? as usize,
+            examined: count_column(row, 8)?,
+            scanned: count_column(row, 9)?,
+            skipped_large: count_column(row, 10)?,
+            omitted: count_column(row, 11)?,
+            findings: count_column(row, 12)?,
         },
     })
+}
+
+/// Read a count column that must never be negative.
+///
+/// `row.get::<i64>() as usize` wraps a negative value to something near
+/// `usize::MAX`, and that value is then used as a loop bound or a capacity — so
+/// one corrupt or hostile `camio.db` turns a single bad row into a hang or an
+/// OOM. Report the row instead.
+fn count_column(row: &rusqlite::Row<'_>, index: usize) -> Result<usize> {
+    let raw: i64 = row.get(index)?;
+    usize::try_from(raw)
+        // The source error is unit-typed and carries no information;
+        // the replacement names the offending byte or column.
+        // audit-allow: B7
+        .map_err(|_| anyhow::anyhow!("column {index} holds a negative count ({raw})"))
 }
 
 fn persist_finding(

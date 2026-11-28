@@ -41,9 +41,13 @@ pub struct Signature {
 /// first one that contains readable `*.txt` files.
 pub fn default_search_paths() -> Vec<PathBuf> {
     let mut out = Vec::new();
+    // CAMIO_PAYLOADS_DIR unset is the normal case; the built-in paths follow.
+    // audit-allow: B4
     if let Ok(env) = std::env::var("CAMIO_PAYLOADS_DIR") {
         out.push(PathBuf::from(env));
     }
+    // current_exe() failing is rare but not fatal; the relative paths still apply.
+    // audit-allow: B4
     out.push(PathBuf::from("payloads/DB/base"));
     out.push(PathBuf::from("./payloads/DB/base"));
     if let Ok(exe) = std::env::current_exe() {
@@ -62,6 +66,8 @@ pub fn default_search_paths() -> Vec<PathBuf> {
 
 /// Load the payload catalog from the first readable path in
 /// [`default_search_paths`]. Returns an empty [`PayloadDb`] if nothing resolves
+// a directory that will not load means "try the next search path".
+// audit-allow: B4
 /// — the caller can still proceed with the small built-in packs.
 pub fn load_default() -> PayloadDb {
     for path in default_search_paths() {

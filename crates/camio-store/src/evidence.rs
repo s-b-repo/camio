@@ -132,12 +132,18 @@ impl Store {
                     continue;
                 }
                 let number = offset + 1;
-                let parsed = if line.len() > MAX_LINE {
-                    Err("record exceeds the 1 MiB line limit")
+                // One error type for all three failures, so the `skipped`
+                // accounting below reports *why* a record was dropped instead
+                // of only how many were.
+                let parsed: Result<_, anyhow::Error> = if line.len() > MAX_LINE {
+                    Err(anyhow::anyhow!("record exceeds the 1 MiB line limit"))
                 } else {
                     serde_json::from_str::<Value>(line)
-                        .map_err(|_| "invalid JSON")
-                        .and_then(|value| parse_observation(format, number, &value))
+                        .map_err(anyhow::Error::from)
+                        .and_then(|value| {
+                            parse_observation(format, number, &value)
+                                .map_err(|reason| anyhow::anyhow!(reason))
+                        })
                 };
                 match parsed {
                     Ok(record) => observations.push(record),
@@ -213,8 +219,10 @@ impl Store {
                 version: row.get(2)?,
                 sha256: row.get(3)?,
                 imported_at_ms: row.get(4)?,
-                records: row.get::<_, i64>(5)? as usize,
-                skipped: row.get::<_, i64>(6)? as usize,
+                // A negative count here is a corrupt row, and `as usize` would
+                // silently wrap it into a huge allocation bound.
+                records: non_negative(row.get::<_, i64>(5)?, 5)?,
+                skipped: non_negative(row.get::<_, i64>(6)?, 6)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -335,9 +343,24 @@ fn parse_observation(
             }
             .into();
         }
-        ArtifactFormat::Raw => unreachable!("raw reports are never parsed"),
+        ArtifactFormat::Raw => {
+            // The `locations` lookup above already returns early for Raw, so
+            // this arm is unreachable — but returning the same error the early
+            // return uses keeps a future reordering from panicking a batch
+            // import over attacker-supplied tool output.
+            return Err("opaque evidence has no structured observations");
+        }
     }
     Ok(observation)
+}
+
+/// Convert a count column inside a `query_map` closure, rejecting a negative
+/// value rather than wrapping it to a huge `usize`.
+fn non_negative(raw: i64, index: usize) -> rusqlite::Result<usize> {
+    // The source error is unit-typed and carries no information;
+    // the replacement names the offending byte or column.
+    // audit-allow: B7
+    usize::try_from(raw).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(index, raw))
 }
 
 fn observed_url(value: &str) -> Option<String> {

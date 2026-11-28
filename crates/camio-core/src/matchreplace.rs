@@ -208,9 +208,10 @@ fn rewrite_header(
 
 /// Rewrite a body only when it is valid UTF-8 (never corrupt binary evidence).
 fn rewrite_body(body: &mut crate::model::Body, find: &Find, replace: &str) -> bool {
-    let text = match std::str::from_utf8(body.as_bytes()) {
-        Ok(t) => t,
-        Err(_) => return false,
+    // `false` means "not rewritten", and a non-UTF-8 body is the only reason it
+    // happens: binary evidence is left alone on purpose.
+    let Some(text) = std::str::from_utf8(body.as_bytes()).ok() else {
+        return false;
     };
     match find.rewrite(text, replace) {
         Some(new) => {

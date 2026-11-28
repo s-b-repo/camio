@@ -40,5 +40,13 @@ jobs:
       - name: Clippy (deny warnings)
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+      # Regex audit of the bad-pattern matrix (docs/BAD_PATTERNS.md), gated on
+      # the sections that must always be zero: lint suppression, weak crypto and
+      # injection. The other sections are advisory — every hit is a candidate
+      # that has to be read in context, so `--strict` (all of A/B/C/L/M/N/O)
+      # stays a manual review tool for now.
+      - name: Bad-pattern audit (zero-tolerance sections)
+        run: scripts/audit-bad-patterns.sh --zero "C L M"
+
       - name: Tests
         run: cargo test --workspace --all-features

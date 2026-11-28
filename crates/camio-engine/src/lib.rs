@@ -18,6 +18,12 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 
+/// WebDriver BiDi network-capture codec for the managed browser (plan §5, F05).
+pub mod bidi;
+
+/// Minimal RFC 6455 WebSocket client transport for the BiDi session (F05).
+pub mod ws;
+
 /// The pinned Camoufox release Camio is built and tested against. Bump this in
 /// lock-step with `camio_core::ALIGNED_FIREFOX_MAJOR`.
 pub const PINNED_VERSION: &str = "158.0.1-beta.41";
@@ -125,7 +131,13 @@ pub fn locate_binary(root: &Path) -> Option<PathBuf> {
         // the whole search and make a valid install look "not found".
         let entries = match fs::read_dir(dir) {
             Ok(entries) => entries,
-            Err(_) => return None,
+            // Distinguish "not installed" from "installed but unreadable": the
+            // second is a permissions problem the operator can fix.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(e) => {
+                eprintln!("camio: reading {}: {e}", dir.display());
+                return None;
+            }
         };
         let mut subdirs = Vec::new();
         for entry in entries.flatten() {
@@ -159,7 +171,8 @@ fn ensure_executable(bin: &Path) -> Result<()> {
         perms.set_mode(perms.mode() | 0o755);
         fs::set_permissions(bin, perms)?;
     }
-    let _ = bin;
+    // Only the mode bits matter on unix; on other platforms the binary path is
+    // not needed at all.
     Ok(())
 }
 
@@ -205,6 +218,9 @@ pub struct LaunchOptions {
     pub headless: bool,
     /// If true, build the command but do not spawn (for inspection/tests).
     pub dry_run: bool,
+    /// Enable the WebDriver BiDi remote agent on this loopback port so Camio can
+    /// connect and capture/intercept traffic (plan §5, F05). `None` leaves it off.
+    pub remote_debugging_port: Option<u16>,
 }
 
 /// A located Camoufox installation.
@@ -249,6 +265,11 @@ impl Camoufox {
             .arg("-new-instance");
         if opts.headless {
             cmd.arg("-headless");
+        }
+        if let Some(port) = opts.remote_debugging_port {
+            // Firefox/Camoufox remote agent: serves WebDriver BiDi on loopback
+            // at ws://127.0.0.1:<port>/session for Camio's capture transport.
+            cmd.arg("-remote-debugging-port").arg(port.to_string());
         }
         if let Some(url) = &opts.url {
             cmd.arg(url);
@@ -321,5 +342,29 @@ mod tests {
         assert!(envs
             .iter()
             .any(|(k, _)| k.to_string_lossy().starts_with("CAMOU_CONFIG_")));
+    }
+
+    #[test]
+    fn remote_debugging_port_adds_the_remote_agent_flag() {
+        let cam = Camoufox {
+            binary: PathBuf::from("/nonexistent/camoufox"),
+        };
+        let prof = FingerprintProfile::new("t", PINNED_VERSION);
+        let opts = LaunchOptions {
+            remote_debugging_port: Some(9222),
+            ..LaunchOptions::default()
+        };
+        let cmd = cam.build_command(&std::env::temp_dir(), &prof, &opts);
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.iter().any(|a| a == "-remote-debugging-port"));
+        assert!(args.iter().any(|a| a == "9222"));
+        // Off by default (no flag).
+        let plain = cam.build_command(&std::env::temp_dir(), &prof, &LaunchOptions::default());
+        assert!(!plain
+            .get_args()
+            .any(|a| a.to_string_lossy() == "-remote-debugging-port"));
     }
 }

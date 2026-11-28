@@ -1,0 +1,329 @@
+{
+  "_comment": "Camio technology fingerprints in the Wappalyzer technologies.json schema. Patterns use Wappalyzer syntax: `regex\\;confidence:N\\;version:\\1`. The loader also accepts a raw upstream Wappalyzer technologies map (no top-level wrapper), so a user may point it at the real database. Authored for Camio; expand or replace freely.",
+  "categories": {
+    "1": "CMS",
+    "6": "Ecommerce",
+    "11": "Blog",
+    "12": "JavaScript Framework",
+    "18": "Web Framework",
+    "19": "Miscellaneous",
+    "22": "Web Server",
+    "23": "Caching",
+    "27": "Programming Language",
+    "31": "CDN",
+    "41": "Reverse Proxy",
+    "59": "JavaScript Library",
+    "62": "PaaS",
+    "64": "Reverse Proxy",
+    "88": "Hosting"
+  },
+  "technologies": {
+    "Nginx": {
+      "cats": [22],
+      "headers": { "Server": "nginx(?:/([\\d.]+))?\\;version:\\1" },
+      "cpe": "cpe:2.3:a:nginx:nginx:*:*:*:*:*:*:*:*",
+      "website": "https://nginx.org"
+    },
+    "Apache HTTP Server": {
+      "cats": [22],
+      "headers": { "Server": "(?:Apache(?:$|/([\\d.]+)|[^/-])|(?:^|\\b)HTTPD)\\;version:\\1" },
+      "cpe": "cpe:2.3:a:apache:http_server:*:*:*:*:*:*:*:*",
+      "website": "https://httpd.apache.org"
+    },
+    "Microsoft IIS": {
+      "cats": [22],
+      "headers": { "Server": "(?:Microsoft-)?IIS(?:/([\\d.]+))?\\;version:\\1" },
+      "cpe": "cpe:2.3:a:microsoft:internet_information_services:*:*:*:*:*:*:*:*",
+      "website": "https://www.iis.net"
+    },
+    "LiteSpeed": {
+      "cats": [22],
+      "headers": { "Server": "LiteSpeed\\;confidence:100" },
+      "website": "https://www.litespeedtech.com"
+    },
+    "Caddy": {
+      "cats": [22],
+      "headers": { "Server": "Caddy\\;confidence:100" },
+      "website": "https://caddyserver.com"
+    },
+    "Envoy": {
+      "cats": [22, 64],
+      "headers": { "Server": "^envoy$\\;confidence:100" },
+      "website": "https://www.envoyproxy.io"
+    },
+    "Tomcat": {
+      "cats": [22],
+      "headers": { "Server": "Apache-Coyote(?:/([\\d.]+))?\\;version:\\1" },
+      "implies": ["Java"],
+      "website": "https://tomcat.apache.org"
+    },
+    "PHP": {
+      "cats": [27],
+      "headers": { "X-Powered-By": "PHP(?:/([\\d.]+))?\\;version:\\1", "Set-Cookie": "PHPSESSID" },
+      "cookies": { "PHPSESSID": "" },
+      "cpe": "cpe:2.3:a:php:php:*:*:*:*:*:*:*:*",
+      "website": "https://www.php.net"
+    },
+    "ASP.NET": {
+      "cats": [18, 27],
+      "headers": {
+        "X-Powered-By": "ASP\\.NET",
+        "X-AspNet-Version": "(.+)\\;version:\\1",
+        "X-AspNetMvc-Version": "(.+)\\;version:ASP.NET MVC \\1"
+      },
+      "cookies": { "ASP.NET_SessionId": "", "ASPSESSIONID": "" },
+      "html": "<input[^>]+name=\"__VIEWSTATE",
+      "website": "https://www.asp.net"
+    },
+    "Express": {
+      "cats": [18],
+      "headers": { "X-Powered-By": "^Express$\\;confidence:40" },
+      "implies": ["Node.js"],
+      "website": "https://expressjs.com"
+    },
+    "Node.js": {
+      "cats": [27],
+      "cpe": "cpe:2.3:a:nodejs:node.js:*:*:*:*:*:*:*:*",
+      "website": "https://nodejs.org"
+    },
+    "Java": {
+      "cats": [27],
+      "cookies": { "JSESSIONID": "" },
+      "cpe": "cpe:2.3:a:oracle:jdk:*:*:*:*:*:*:*:*",
+      "website": "https://www.java.com"
+    },
+    "Ruby on Rails": {
+      "cats": [18],
+      "headers": { "X-Powered-By": "Phusion Passenger", "Server": "Phusion Passenger(?: ?\\(?([\\d.]+)\\)?)?\\;version:\\1" },
+      "cookies": { "_rails_session": "", "request_method": "" },
+      "html": "<[^>]+name=\"csrf-param\"[^>]+content=\"authenticity_token",
+      "implies": ["Ruby"],
+      "website": "https://rubyonrails.org"
+    },
+    "Ruby": {
+      "cats": [27],
+      "cpe": "cpe:2.3:a:ruby-lang:ruby:*:*:*:*:*:*:*:*",
+      "website": "https://www.ruby-lang.org"
+    },
+    "Django": {
+      "cats": [18],
+      "cookies": { "django_language": "", "csrftoken": "" },
+      "html": "<input[^>]+name=\"csrfmiddlewaretoken",
+      "implies": ["Python"],
+      "website": "https://www.djangoproject.com"
+    },
+    "Flask": {
+      "cats": [18],
+      "headers": { "Server": "Werkzeug(?:/([\\d.]+))?\\;version:\\1" },
+      "implies": ["Python"],
+      "website": "https://flask.palletsprojects.com"
+    },
+    "Python": {
+      "cats": [27],
+      "headers": { "Server": "Python(?:/([\\d.]+))?\\;version:\\1" },
+      "cpe": "cpe:2.3:a:python:python:*:*:*:*:*:*:*:*",
+      "website": "https://www.python.org"
+    },
+    "Laravel": {
+      "cats": [18],
+      "cookies": { "laravel_session": "" },
+      "headers": { "Set-Cookie": "laravel_session" },
+      "implies": ["PHP"],
+      "website": "https://laravel.com"
+    },
+    "Symfony": {
+      "cats": [18],
+      "cookies": { "symfony": "" },
+      "html": "<[^>]+Powered by Symfony",
+      "implies": ["PHP"],
+      "website": "https://symfony.com"
+    },
+    "Spring": {
+      "cats": [18],
+      "headers": { "X-Application-Context": "\\;confidence:40" },
+      "implies": ["Java"],
+      "website": "https://spring.io"
+    },
+    "Next.js": {
+      "cats": [18, 12],
+      "headers": { "X-Powered-By": "Next\\.js(?: ?([\\d.]+))?\\;version:\\1" },
+      "html": "<script[^>]+/_next/static/",
+      "scriptSrc": "/_next/static/",
+      "implies": ["React", "Node.js"],
+      "website": "https://nextjs.org"
+    },
+    "Nuxt.js": {
+      "cats": [18, 12],
+      "html": "<script[^>]+/_nuxt/",
+      "scriptSrc": "/_nuxt/",
+      "implies": ["Vue.js", "Node.js"],
+      "website": "https://nuxtjs.org"
+    },
+    "WordPress": {
+      "cats": [1, 11],
+      "cookies": { "wordpress_": "", "wp-settings": "" },
+      "meta": { "generator": "WordPress ?([\\d.]+)?\\;version:\\1" },
+      "html": "<link[^>]+/wp-(?:content|includes)/",
+      "scriptSrc": "/wp-(?:content|includes)/",
+      "implies": ["PHP", "MySQL"],
+      "cpe": "cpe:2.3:a:wordpress:wordpress:*:*:*:*:*:*:*:*",
+      "website": "https://wordpress.org"
+    },
+    "Drupal": {
+      "cats": [1],
+      "headers": { "X-Generator": "Drupal(?: ([\\d]+))?\\;version:\\1", "X-Drupal-Cache": "", "X-Drupal-Dynamic-Cache": "" },
+      "meta": { "generator": "Drupal(?: ([\\d.]+))?\\;version:\\1" },
+      "html": "(?:<[^>]+(?:data-drupal-|/sites/(?:default|all)/)|Drupal\\.settings)",
+      "implies": ["PHP"],
+      "cpe": "cpe:2.3:a:drupal:drupal:*:*:*:*:*:*:*:*",
+      "website": "https://www.drupal.org"
+    },
+    "Joomla": {
+      "cats": [1],
+      "meta": { "generator": "Joomla!(?: ([\\d.]+))?\\;version:\\1" },
+      "html": "(?:/media/jui/|/components/com_|Joomla!)",
+      "implies": ["PHP"],
+      "cpe": "cpe:2.3:a:joomla:joomla:*:*:*:*:*:*:*:*",
+      "website": "https://www.joomla.org"
+    },
+    "Magento": {
+      "cats": [6],
+      "cookies": { "frontend": "" },
+      "html": "(?:/skin/frontend/|Mage\\.Cookies|/static/version\\d+/frontend/)",
+      "scriptSrc": "/(?:skin|static)/[^\"']*(?:mage|magento)",
+      "implies": ["PHP"],
+      "website": "https://magento.com"
+    },
+    "Shopify": {
+      "cats": [6],
+      "headers": { "X-ShopId": "\\;confidence:100", "X-Shopify-Stage": "\\;confidence:100" },
+      "cookies": { "_shopify_": "" },
+      "html": "(?:cdn\\.shopify\\.com|Shopify\\.theme)",
+      "scriptSrc": "cdn\\.shopify\\.com",
+      "website": "https://www.shopify.com"
+    },
+    "WooCommerce": {
+      "cats": [6],
+      "html": "<[^>]+woocommerce",
+      "scriptSrc": "/plugins/woocommerce",
+      "implies": ["WordPress"],
+      "website": "https://woocommerce.com"
+    },
+    "React": {
+      "cats": [12],
+      "html": "(?:<[^>]+data-reactroot|<[^>]+data-reactid)",
+      "scriptSrc": "(?:react(?:-dom)?(?:\\.production|\\.development)?(?:\\.min)?\\.js)",
+      "website": "https://react.dev"
+    },
+    "Vue.js": {
+      "cats": [12],
+      "html": "<[^>]+data-v-[0-9a-f]{8}",
+      "scriptSrc": "(?:vue(?:\\.runtime)?(?:\\.global)?(?:\\.prod|\\.common)?(?:\\.min)?\\.js)",
+      "website": "https://vuejs.org"
+    },
+    "Angular": {
+      "cats": [12],
+      "html": "<[^>]+(?:ng-version=\"([\\d.]+)\"|ng-app)\\;version:\\1",
+      "scriptSrc": "(?:angular(?:\\.min)?\\.js|main\\.[0-9a-f]+\\.js)",
+      "website": "https://angular.io"
+    },
+    "jQuery": {
+      "cats": [59],
+      "scriptSrc": "jquery(?:-([\\d.]+))?(?:\\.slim)?(?:\\.min)?\\.js\\;version:\\1",
+      "cpe": "cpe:2.3:a:jquery:jquery:*:*:*:*:*:*:*:*",
+      "website": "https://jquery.com"
+    },
+    "Bootstrap": {
+      "cats": [59],
+      "html": "<[^>]+(?:class=\"[^\"]*\\b(?:container-fluid|col-(?:xs|sm|md|lg)-\\d))",
+      "scriptSrc": "bootstrap(?:[.-]([\\d.]+))?(?:\\.bundle)?(?:\\.min)?\\.js\\;version:\\1",
+      "website": "https://getbootstrap.com"
+    },
+    "Lodash": {
+      "cats": [59],
+      "scriptSrc": "lodash(?:[.-]([\\d.]+))?(?:\\.min)?\\.js\\;version:\\1",
+      "website": "https://lodash.com"
+    },
+    "Cloudflare": {
+      "cats": [31, 41],
+      "headers": { "Server": "cloudflare\\;confidence:100", "CF-RAY": "" },
+      "website": "https://www.cloudflare.com"
+    },
+    "Fastly": {
+      "cats": [31],
+      "headers": { "X-Served-By": "cache-[a-z0-9]+", "Fastly-Debug-Digest": "" },
+      "website": "https://www.fastly.com"
+    },
+    "Amazon CloudFront": {
+      "cats": [31],
+      "headers": { "Via": "CloudFront", "X-Amz-Cf-Id": "" },
+      "website": "https://aws.amazon.com/cloudfront"
+    },
+    "Akamai": {
+      "cats": [31],
+      "headers": { "Server": "AkamaiGHost", "X-Akamai-Transformed": "" },
+      "website": "https://www.akamai.com"
+    },
+    "Varnish": {
+      "cats": [23],
+      "headers": { "Via": "varnish", "X-Varnish": "", "X-Varnish-Cache": "" },
+      "website": "https://varnish-cache.org"
+    },
+    "Heroku": {
+      "cats": [62],
+      "headers": { "Via": "vegur", "Server": "Cowboy" },
+      "website": "https://www.heroku.com"
+    },
+    "Vercel": {
+      "cats": [88],
+      "headers": { "Server": "Vercel", "X-Vercel-Id": "", "X-Vercel-Cache": "" },
+      "website": "https://vercel.com"
+    },
+    "Netlify": {
+      "cats": [88],
+      "headers": { "Server": "Netlify", "X-Nf-Request-Id": "" },
+      "website": "https://www.netlify.com"
+    },
+    "Google Analytics": {
+      "cats": [19],
+      "cookies": { "_ga": "" },
+      "html": "(?:www\\.google-analytics\\.com/analytics\\.js|googletagmanager\\.com/gtag|gtag\\('config')",
+      "scriptSrc": "(?:google-analytics\\.com|googletagmanager\\.com/gtag)",
+      "website": "https://analytics.google.com"
+    },
+    "MySQL": {
+      "cats": [19],
+      "cpe": "cpe:2.3:a:mysql:mysql:*:*:*:*:*:*:*:*",
+      "website": "https://www.mysql.com"
+    },
+    "OpenResty": {
+      "cats": [22],
+      "headers": { "Server": "openresty(?:/([\\d.]+))?\\;version:\\1" },
+      "implies": ["Nginx"],
+      "website": "https://openresty.org"
+    },
+    "Phusion Passenger": {
+      "cats": [22],
+      "headers": { "X-Powered-By": "Phusion Passenger(?: ([\\d.]+))?\\;version:\\1" },
+      "website": "https://www.phusionpassenger.com"
+    },
+    "Gunicorn": {
+      "cats": [22],
+      "headers": { "Server": "gunicorn(?:/([\\d.]+))?\\;version:\\1" },
+      "implies": ["Python"],
+      "website": "https://gunicorn.org"
+    },
+    "Kestrel": {
+      "cats": [22],
+      "headers": { "Server": "Kestrel" },
+      "implies": ["ASP.NET"],
+      "website": "https://learn.microsoft.com/aspnet/core/fundamentals/servers/kestrel"
+    },
+    "GraphQL": {
+      "cats": [19],
+      "html": "(?:__schema|graphql-playground|/graphql)",
+      "scriptSrc": "graphql",
+      "website": "https://graphql.org"
+    }
+  }
+}

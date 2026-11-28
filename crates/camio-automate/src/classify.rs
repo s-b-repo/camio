@@ -19,6 +19,96 @@ pub struct Baseline {
     pub body_len: usize,
 }
 
+/// A bucketed view of the response statuses across a batch of sends — the "how
+/// did the target respond?" summary the automation surfaces (plan §10 "Results
+/// and filters"). After a sweep, 2xx-vs-5xx is the first thing worth seeing: a
+/// cluster of `5xx`s usually marks an input the server choked on (a likely
+/// injection point), while a `2xx` where a `4xx` was expected marks an
+/// authorization or method flaw.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusSummary {
+    /// Total responses considered (including ones with no response).
+    pub total: usize,
+    /// Sends that produced no response (refused, transport error).
+    pub no_response: usize,
+    /// 1xx informational.
+    pub informational: usize,
+    /// 2xx success.
+    pub success: usize,
+    /// 3xx redirection.
+    pub redirect: usize,
+    /// 4xx client error.
+    pub client_error: usize,
+    /// 5xx server error — the bucket most worth attention after a campaign.
+    pub server_error: usize,
+    /// Exact `(status code, count)` pairs, ascending by code.
+    pub by_code: Vec<(u16, usize)>,
+}
+
+impl StatusSummary {
+    /// Bucket an iterator of optional status codes (`None` = no response).
+    pub fn from_statuses<I: IntoIterator<Item = Option<u16>>>(iter: I) -> Self {
+        let mut summary = StatusSummary::default();
+        let mut codes: std::collections::BTreeMap<u16, usize> = std::collections::BTreeMap::new();
+        for status in iter {
+            summary.total += 1;
+            match status {
+                None => summary.no_response += 1,
+                Some(code) => {
+                    *codes.entry(code).or_insert(0) += 1;
+                    match code {
+                        100..=199 => summary.informational += 1,
+                        200..=299 => summary.success += 1,
+                        300..=399 => summary.redirect += 1,
+                        400..=499 => summary.client_error += 1,
+                        500..=599 => summary.server_error += 1,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        summary.by_code = codes.into_iter().collect();
+        summary
+    }
+
+    /// Bucket the responses of a batch of completed exchanges.
+    pub fn from_exchanges<'a, I: IntoIterator<Item = &'a HttpExchange>>(iter: I) -> Self {
+        Self::from_statuses(
+            iter.into_iter()
+                .map(|ex| ex.response.as_ref().map(|r| r.status)),
+        )
+    }
+
+    /// A compact one-line rendering, e.g. `2xx:12 3xx:1 4xx:3 5xx:2` (only
+    /// non-zero buckets, with `no-resp` appended when some sends had no reply).
+    pub fn oneline(&self) -> String {
+        let mut parts = Vec::new();
+        if self.informational > 0 {
+            parts.push(format!("1xx:{}", self.informational));
+        }
+        if self.success > 0 {
+            parts.push(format!("2xx:{}", self.success));
+        }
+        if self.redirect > 0 {
+            parts.push(format!("3xx:{}", self.redirect));
+        }
+        if self.client_error > 0 {
+            parts.push(format!("4xx:{}", self.client_error));
+        }
+        if self.server_error > 0 {
+            parts.push(format!("5xx:{}", self.server_error));
+        }
+        if self.no_response > 0 {
+            parts.push(format!("no-resp:{}", self.no_response));
+        }
+        if parts.is_empty() {
+            "none".to_string()
+        } else {
+            parts.join(" ")
+        }
+    }
+}
+
 /// One classified campaign result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClassifiedResult {
@@ -363,5 +453,71 @@ mod reflection_tests {
             None,
         );
         assert!(!out[0].flags.iter().any(|f| f == "reflected"));
+    }
+}
+
+#[cfg(test)]
+mod status_summary_tests {
+    use super::*;
+    use camio_core::{Body, HeaderList, HttpRequest, HttpResponse, HttpVersion, Source};
+
+    #[test]
+    fn buckets_by_status_class() {
+        let s = StatusSummary::from_statuses([
+            Some(200),
+            Some(201),
+            Some(301),
+            Some(404),
+            Some(403),
+            Some(500),
+            Some(500),
+            None,
+        ]);
+        assert_eq!(s.total, 8);
+        assert_eq!(s.success, 2);
+        assert_eq!(s.redirect, 1);
+        assert_eq!(s.client_error, 2);
+        assert_eq!(s.server_error, 2);
+        assert_eq!(s.no_response, 1);
+        // by_code is ascending and exact.
+        assert_eq!(
+            s.by_code,
+            vec![(200, 1), (201, 1), (301, 1), (403, 1), (404, 1), (500, 2)]
+        );
+    }
+
+    #[test]
+    fn oneline_lists_only_nonzero_buckets() {
+        let s = StatusSummary::from_statuses([Some(200), Some(200), Some(500), None]);
+        assert_eq!(s.oneline(), "2xx:2 5xx:1 no-resp:1");
+        assert_eq!(StatusSummary::default().oneline(), "none");
+    }
+
+    #[test]
+    fn summarizes_exchanges() {
+        fn ex(status: u16) -> HttpExchange {
+            let resp = HttpResponse {
+                status,
+                version: HttpVersion::Http11,
+                reason: None,
+                headers: HeaderList::new(),
+                body: Body::empty(),
+            };
+            HttpExchange::new(HttpRequest::get("https://x.test/"), Source::Automate)
+                .with_response(resp)
+        }
+        let exchanges = vec![ex(200), ex(500), ex(404)];
+        let s = StatusSummary::from_exchanges(&exchanges);
+        assert_eq!(s.success, 1);
+        assert_eq!(s.server_error, 1);
+        assert_eq!(s.client_error, 1);
+    }
+
+    #[test]
+    fn serde_roundtrips() {
+        let s = StatusSummary::from_statuses([Some(200), Some(500)]);
+        let json = serde_json::to_string(&s).unwrap();
+        let back: StatusSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(s, back);
     }
 }

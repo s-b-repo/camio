@@ -11,3 +11,9 @@ description = "Automate/Intruder: input positions, payload sets, attack types, b
 camio-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# SHA-256 for the proof-of-work challenge solver (Anubis / hashcash / mCaptcha
+# style anti-bot walls). Same crate already in the workspace tree.
+sha2.workspace = true
+# Hardened XML reader for enumerating XML-body injection points (F10). Same
+# pinned 0.41 the importer uses (RUSTSEC-2026-0194/0195 fixed).
+quick-xml.workspace = true

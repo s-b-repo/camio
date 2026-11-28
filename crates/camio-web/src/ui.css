@@ -1,5 +1,12 @@
 @font-face {
   font-family: "Chakra Petch";
+  src: url("/fonts/chakrapetch-600.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Chakra Petch";
   src: url("/fonts/chakrapetch-700.woff2") format("woff2");
   font-style: normal;
   font-weight: 700;
@@ -21,24 +28,29 @@
 }
 
 :root {
+  /* Cyber Sec "Sentinel Blue" — cybersec.org.za/assets/styles.css. */
   color-scheme: dark;
-  --ink: #000;
-  --rail: #040810;
-  --panel: #070f1c;
-  --raised: #0b1628;
-  --input: #040a13;
-  --line: #192d49;
-  --line-bright: #2a486c;
-  --text: #c0d6f0;
-  --strong: #eef5ff;
-  --muted: #90a9ca;
-  --accent: #1e80ff;
-  --accent-text: #75b4ff;
-  --accent-fill: #0956c2;
-  --ok: #5cddb4;
-  --warn: #ffc487;
-  --bad: #ff929e;
-  --radius: 12px;
+  --ink: #08111f;
+  --rail: #0b1423;
+  --panel: #101c2f;
+  --raised: #17263c;
+  --input: #0b1423;
+  --line: #3b5877;
+  --line-bright: #4a6a90;
+  --line-soft: #263a54;
+  --text: #e7eefb;
+  --strong: #ffffff;
+  --muted: #afc2dc;
+  --faint: #9cb2ce;
+  --accent: #83bcff;
+  --accent-text: #83bcff;
+  --accent-fill: #215bab;
+  --accent-2: #65d2ed;
+  --accent-glow: rgba(62, 143, 255, 0.17);
+  --ok: #65d2ed;
+  --warn: #ffb27a;
+  --bad: #ff8297;
+  --radius: 14px;
   --display: "Chakra Petch", system-ui, sans-serif;
   --body: "IBM Plex Sans", system-ui, sans-serif;
   --mono: "JetBrains Mono", ui-monospace, monospace;
@@ -50,7 +62,47 @@ body {
   background: var(--ink);
   color: var(--text);
   font: 15px/1.5 var(--body);
+  isolation: isolate;
 }
+
+/* ---- atmosphere: Cyber Sec's .bg-grid + animated #bg-canvas wave field.
+   Negative z-index + body isolation keeps them in front of the body fill but
+   behind all app chrome, so they show through the translucent topbar/panels. */
+.bg-grid {
+  position: fixed; inset: 0; z-index: -12; pointer-events: none;
+  background:
+    radial-gradient(1100px 600px at 78% -8%, var(--accent-glow), transparent 60%),
+    radial-gradient(900px 700px at 5% 18%, rgba(101,210,237,.05), transparent 55%),
+    linear-gradient(var(--ink), var(--ink));
+}
+.bg-grid::before {
+  content: ""; position: absolute; inset: 0; opacity: .35;
+  background-image:
+    linear-gradient(rgba(20,100,220,.06) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(20,100,220,.06) 1px, transparent 1px);
+  background-size: 54px 54px;
+  -webkit-mask-image: radial-gradient(120% 90% at 50% 0%, #000 35%, transparent 78%);
+          mask-image: radial-gradient(120% 90% at 50% 0%, #000 35%, transparent 78%);
+}
+#bg-canvas { position: fixed; inset: 0; z-index: -6; width: 100%; height: 100%; pointer-events: none; }
+@media (prefers-reduced-motion: reduce) { #bg-canvas { display: none; } }
+/* Honor the OS "reduce motion" setting AND the explicit Settings toggle
+   (data-motion="reduced") for every animation/transition, not just the canvas. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+html[data-motion="reduced"] *, html[data-motion="reduced"] *::before, html[data-motion="reduced"] *::after {
+  animation-duration: .001ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: .001ms !important;
+  scroll-behavior: auto !important;
+}
+
 [hidden] { display: none !important; }
 ::selection { background: var(--accent-fill); color: #fff; }
 :focus-visible { outline: 2px solid var(--accent-text); outline-offset: 3px; }
@@ -75,7 +127,7 @@ p { margin-bottom: 14px; }
   top: 0;
   z-index: 5;
   padding: 0 24px;
-  background: #040810f2;
+  background: rgba(11, 20, 35, 0.82);
   backdrop-filter: blur(12px);
   border-bottom: 1px solid var(--line);
 }
@@ -86,41 +138,39 @@ p { margin-bottom: 14px; }
   color: var(--strong);
   display: flex;
   align-items: center;
-  gap: 10px;
-  flex: 0 0 187px;
+  gap: 9px;
+  flex: 0 0 auto;
   text-align: left;
-  font: 700 23px/1 var(--display);
-  letter-spacing: .08em;
 }
+/* Cyber Sec brand lockup: animated globe mark + stacked CAMIO / CYBER_SEC_. */
 .brand-mark {
-  display: block;
-  width: 31px;
-  height: 31px;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
   position: relative;
-  border: 1px solid #367bd0;
-  border-radius: 8px;
-  background: linear-gradient(135deg, #123666, #06101e);
-  box-shadow: inset 0 0 12px #1e80ff28, 0 0 14px #1e80ff26;
+  color: var(--accent);
 }
-.brand-mark::before, .brand-mark::after {
-  content: "";
-  position: absolute;
-  left: 7px;
-  top: 7px;
-  width: 16px;
-  height: 16px;
-  border: 1.5px solid var(--accent-text);
-  border-right-color: transparent;
-  border-radius: 50%;
-  transform: rotate(-31deg);
+.brand-mark canvas { display: block; }
+.brand-text {
+  font-family: var(--display);
+  font-weight: 700;
+  font-size: 1.02rem;
+  letter-spacing: .02em;
+  display: flex;
+  flex-direction: column;
+  line-height: 1;
+  color: var(--strong);
 }
-.brand-mark::after {
-  width: 6px;
-  height: 6px;
-  left: 12px;
-  top: 12px;
-  background: var(--accent-text);
-  border: 0;
+.brand-text i {
+  font-family: var(--mono);
+  font-style: normal;
+  font-weight: 400;
+  font-size: .56rem;
+  letter-spacing: .14em;
+  color: var(--faint);
+  margin-top: 4px;
+  text-transform: uppercase;
 }
 .crumb {
   display: flex;
@@ -229,6 +279,16 @@ main {
 main:focus { outline: none; }
 .section-shell { animation: reveal .22s ease both; }
 @keyframes reveal { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+
+/* Compact density (F24): tighter spacing + slightly smaller type for operators
+   who want more rows on screen. Toggled from Settings; persisted per browser. */
+html[data-density="compact"] { font-size: 14px; }
+html[data-density="compact"] main { padding: clamp(10px, 1.6vw, 22px); }
+html[data-density="compact"] .card { padding: 11px 13px; }
+html[data-density="compact"] th,
+html[data-density="compact"] td { padding: 4px 7px; }
+html[data-density="compact"] .metric { padding: 11px; }
+html[data-density="compact"] textarea { min-height: 70px; }
 .hint { color: var(--muted); font-size: 13px; margin: 0 0 14px; }
 .surface > .hint:first-of-type, .surface > h2 + .hint { font-size: 15px; margin-bottom: 22px; }
 .surface { max-width: 1060px; }
@@ -247,7 +307,7 @@ main:focus { outline: none; }
   border: 1px solid #264977;
   border-radius: 15px;
   background: linear-gradient(110deg, #060b15 15%, #08172b 74%, #0b2345);
-  box-shadow: 0 12px 50px -26px #1e80ff84;
+  box-shadow: 0 12px 50px -26px #83bcff84;
 }
 .hero > :not(.hero-grid) { position: relative; z-index: 1; min-width: 0; }
 .hero-grid {
@@ -271,7 +331,7 @@ main:focus { outline: none; }
   position: absolute;
   content: "";
   inset: 0;
-  background: linear-gradient(110deg, transparent 12%, #1e80ff26 46%, #79c0ff48 50%, transparent 62%);
+  background: linear-gradient(110deg, transparent 12%, #83bcff26 46%, #79c0ff48 50%, transparent 62%);
   transform: translateX(-105%);
   animation: sweep 11s ease-in-out 1.5s infinite;
 }
@@ -295,10 +355,10 @@ main:focus { outline: none; }
   height: 7px;
   background: var(--accent);
   border-radius: 50%;
-  box-shadow: 0 0 0 0 #1e80ff72;
+  box-shadow: 0 0 0 0 #83bcff72;
   animation: pulse 2.8s cubic-bezier(.2,.55,.3,1) infinite;
 }
-@keyframes pulse { 70%, 100% { box-shadow: 0 0 0 9px #1e80ff00; } }
+@keyframes pulse { 70%, 100% { box-shadow: 0 0 0 9px #83bcff00; } }
 .hero h1 { margin-bottom: 8px; font-size: clamp(37px, 4.25vw, 67px); overflow-wrap: anywhere; }
 .hero .hint { max-width: 440px; margin-bottom: 22px; font-size: 15.5px; }
 .hero-actions { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
@@ -534,6 +594,7 @@ dialog::backdrop { background: #01040bcc; }
 .command-results button { text-align: left; }
 .inspector-content .kv { font-size: 13px; }
 .inspector-subtitle { margin-bottom: 10px; overflow-wrap: anywhere; }
+.inspector-section { margin: 16px 0 6px; font: 600 12px var(--sans, system-ui); letter-spacing: .04em; text-transform: uppercase; color: var(--accent-text, #83bcff); }
 .message-preview { max-height: 34vh; }
 .sr-only, .skip:not(:focus) {
   position: absolute;
@@ -638,7 +699,7 @@ html[data-motion="reduced"] *, html[data-motion="reduced"] *::before, html[data-
   border: 1px solid #264977;
   border-radius: var(--radius);
   background: linear-gradient(110deg, var(--ink), #091c35);
-  box-shadow: 0 0 28px -12px #1e80ff77;
+  box-shadow: 0 0 28px -12px #83bcff77;
 }
 .inventory-banner-copy { position: relative; z-index: 1; }
 .inventory-banner h1 { margin-bottom: 7px; }

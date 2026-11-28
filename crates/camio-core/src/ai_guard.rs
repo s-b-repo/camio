@@ -64,6 +64,8 @@ impl SessionKey {
     /// `SHA-256(time | pid | counter)` seed — weaker but deterministic to
     /// debug. Prefer [`SessionKey::from_bytes`] in tests.
     pub fn generate() -> Self {
+        // /dev/urandom missing means "use the getrandom path"; probing is intended.
+        // audit-allow: B4
         if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
             let mut buf = [0u8; 32];
             if f.read_exact(&mut buf).is_ok() {
@@ -191,7 +193,8 @@ pub enum AiGuardError {
     /// The URL could not be parsed well enough to extract a host.
     MalformedUrl(String),
     /// The caller passed a hex string that isn't valid hex.
-    BadHex(String),
+    /// The binding's tag is not valid hex — plus what the decoder said.
+    BadHex { tag: String, source: String },
     /// An integrity-locked path changed mid-session. `path` names the
     /// first divergence; the full list is in [`verify_integrity`]'s
     /// return value. Treat this as a cold-stop: refuse the operation,
@@ -228,7 +231,9 @@ impl fmt::Display for AiGuardError {
                 )
             }
             AiGuardError::MalformedUrl(u) => write!(f, "AI-guard: malformed URL `{u}`"),
-            AiGuardError::BadHex(s) => write!(f, "AI-guard: invalid hex `{s}`"),
+            AiGuardError::BadHex { tag, source } => {
+                write!(f, "AI-guard: invalid hex `{tag}`: {source}")
+            }
             AiGuardError::IntegrityBreach(p) => write!(
                 f,
                 "AI-guard: integrity-locked path changed during session: {p}"
@@ -370,8 +375,10 @@ pub fn verify_binding(binding: &SessionBinding, key: &SessionKey) -> Result<(), 
         integrity_hash: binding.integrity_hash.clone(),
     };
     let fresh = sign_unsigned(&unsigned, key);
-    let claimed =
-        hex_decode(&binding.tag).map_err(|_| AiGuardError::BadHex(binding.tag.clone()))?;
+    let claimed = hex_decode(&binding.tag).map_err(|e| AiGuardError::BadHex {
+        tag: binding.tag.clone(),
+        source: e.to_string(),
+    })?;
     if ct_eq(&fresh, &claimed) {
         Ok(())
     } else {
@@ -608,16 +615,31 @@ fn hex_encode(bytes: &[u8]) -> String {
     out
 }
 
-fn hex_decode(s: &str) -> Result<Vec<u8>, ()> {
+/// Decode hex, naming the first byte that is not a hex digit. Returning a
+/// bare `()` made a forged tag and a truncated one indistinguishable.
+fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
     if !s.len().is_multiple_of(2) {
-        return Err(());
+        return Err(format!("{} is not an even number of hex digits", s.len()));
     }
     let mut out = Vec::with_capacity(s.len() / 2);
     let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        let h = from_hex(bytes[i])?;
-        let l = from_hex(bytes[i + 1])?;
+        // The source error is unit-typed and carries no information;
+        // the replacement names the offending byte or column.
+        // audit-allow: B7
+        let h = from_hex(bytes[i])
+            .map_err(|_| format!("byte {i} (`{}`) is not a hex digit", bytes[i] as char))?;
+        // The source error is unit-typed and carries no information;
+        // the replacement names the offending byte or column.
+        // audit-allow: B7
+        let l = from_hex(bytes[i + 1]).map_err(|_| {
+            format!(
+                "byte {} (`{}`) is not a hex digit",
+                i + 1,
+                bytes[i + 1] as char
+            )
+        })?;
         out.push((h << 4) | l);
         i += 2;
     }
@@ -1076,6 +1098,7 @@ mod tests {
             detail: "".into(),
             evidence: vec![ExchangeId(1)],
             created_at_ms: 0,
+            rule: None,
         };
         let f2 = Finding {
             id: FindingId(2),
@@ -1085,6 +1108,7 @@ mod tests {
             detail: "".into(),
             evidence: vec![ExchangeId(2)],
             created_at_ms: 0,
+            rule: None,
         };
         let out = authorize_findings(&b, vec![f1.clone(), f2.clone()], |id| match id {
             ExchangeId(1) => Some("authorized.test".into()),

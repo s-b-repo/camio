@@ -23,41 +23,57 @@ use std::sync::OnceLock;
 
 mod banner;
 mod basic_auth;
+mod captcha_detect;
 mod cookies;
 mod cors;
 mod directory_listing;
+mod dom_xss;
 mod exposed_api_docs;
 mod graphql_introspection;
 mod input_echo;
 mod js_endpoints;
 mod js_secrets;
 mod mixed_content;
+mod pow_detect;
 mod reflected_input;
 mod security_headers;
+mod subdomain_takeover;
+mod tech_fingerprint;
+pub mod techdb;
+mod waf_detect;
 mod sensitive_json_fields;
 mod sensitive_path_exposure;
 mod sensitive_url;
 mod source_map_exposed;
 mod verbose_error;
+mod weak_csp;
 
 pub use banner::ServerBannerDisclosure;
 pub use basic_auth::BasicAuthOverHttp;
+pub use captcha_detect::{detect_in_html as detect_captcha_in_html, CaptchaKind, CaptchaPresence};
 pub use cookies::InsecureCookies;
 pub use cors::CorsMisconfig;
 pub use directory_listing::DirectoryListing;
+pub use dom_xss::DomXssSinks;
 pub use exposed_api_docs::ExposedApiDocs;
 pub use graphql_introspection::GraphqlIntrospection;
 pub use input_echo::InputEcho;
 pub use js_endpoints::JsEndpoints;
 pub use js_secrets::JsSecretsLeak;
 pub use mixed_content::MixedContent;
+pub use pow_detect::{detect as detect_pow_in_response, PowChallengePresence, PowSystem};
 pub use reflected_input::ReflectedInput;
 pub use security_headers::MissingSecurityHeaders;
 pub use sensitive_json_fields::SensitiveJsonFields;
 pub use sensitive_path_exposure::SensitivePathExposure;
 pub use sensitive_url::SensitiveDataInUrl;
 pub use source_map_exposed::SourceMapExposed;
+pub use subdomain_takeover::{detect as detect_takeover, SubdomainTakeover};
+pub use tech_fingerprint::{detect as detect_tech, TechFingerprint};
+pub use techdb::{DetectedTech, TechDb};
 pub use verbose_error::VerboseError;
+pub use waf_detect::{detect as detect_waf, WafDetection};
+pub use weak_csp::WeakCsp;
 
 // ---------------------------------------------------------------------------
 // Finding construction
@@ -84,6 +100,8 @@ pub(crate) fn finding(
         detail: detail.into(),
         evidence: vec![evidence],
         created_at_ms: 0,
+        // The runner (`scan_all_with_profile`) tags each finding with its check id.
+        rule: None,
     }
 }
 

@@ -89,7 +89,6 @@ pub struct FindingReview {
     pub finding: Finding,
     pub state: ReviewState,
     pub note: String,
-    pub rule: Option<String>,
     pub last_seen_at_ms: i64,
 }
 
@@ -299,7 +298,8 @@ impl Store {
     pub fn finding_report(&self, state: Option<ReviewState>) -> Result<FindingReport> {
         // Project only fields allowed in the report, preserving stable ordering.
         let sql = format!(
-            "SELECT f.id, f.severity, f.confidence, COALESCE(r.state, 'open'), k.rule,
+            "SELECT f.id, f.severity, f.confidence, COALESCE(r.state, 'open'),
+                    COALESCE(k.rule, json_extract(f.data_json, '$.rule')),
                     COALESCE(json_extract(f.data_json, '$.evidence'), '[]')
              FROM findings f LEFT JOIN finding_reviews r ON r.finding_id = f.id
              LEFT JOIN passive_keys k ON k.finding_id = f.id
@@ -349,6 +349,11 @@ fn read_finding(row: &Row<'_>) -> Result<FindingReview> {
     let data: String = row.get(1)?;
     let mut finding: Finding = serde_json::from_str(&data)?;
     finding.id = FindingId(row.get(0)?);
+    // Prefer the passive_keys rule; fall back to the finding's own `rule` (set
+    // by the scan/active runners). One canonical `rule` key — no serde-flatten
+    // collision with the flattened `Finding`.
+    let keyed_rule: Option<String> = row.get(4)?;
+    finding.rule = keyed_rule.or(finding.rule.take());
     let state: Option<String> = row.get(2)?;
     let state = state
         .map(|s| serde_json::from_value(serde_json::Value::String(s)))
@@ -358,7 +363,6 @@ fn read_finding(row: &Row<'_>) -> Result<FindingReview> {
         finding,
         state,
         note: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
-        rule: row.get(4)?,
         last_seen_at_ms: row.get(5)?,
     })
 }

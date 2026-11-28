@@ -82,7 +82,7 @@ pub fn parse_raw_response(bytes: &[u8]) -> Result<HttpResponse, ImportError> {
     let status_token = tokens.next().unwrap_or("");
     let status: u16 = status_token
         .parse()
-        .map_err(|_| ImportError::Parse(format!("invalid status code: {status_token:?}")))?;
+        .map_err(|e| ImportError::Parse(format!("invalid status code {status_token:?}: {e}")))?;
     let reason_text = tokens.collect::<Vec<_>>().join(" ");
     let reason = {
         let trimmed = reason_text.trim();

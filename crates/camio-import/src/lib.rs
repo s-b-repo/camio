@@ -21,11 +21,15 @@
 //! tests) can reuse the exact same tolerant parser.
 
 mod burp;
+mod graphql;
 mod har;
+mod openapi;
 mod raw;
 
 pub use burp::import_burp_xml;
+pub use graphql::import_graphql;
 pub use har::import_har;
+pub use openapi::import_openapi;
 pub use raw::{parse_raw_request, parse_raw_response};
 
 use camio_core::HttpExchange;

@@ -47,25 +47,49 @@ fn motion_enabled() -> bool {
 
 impl Default for Theme {
     fn default() -> Self {
+        // A built-in list, not data that can be empty — but if it ever were,
+        // the first `unwrap_or` fallback keeps the UI bootable instead of
+        // panicking before a single frame is drawn.
         Self::presets()
             .into_iter()
             .next()
-            .expect("at least one preset")
+            .unwrap_or_else(Theme::fallback)
     }
 }
 
 impl Theme {
+    /// A hard-coded single theme, used only if the preset list above is ever
+    /// emptied. Constructed here so `Default` never has to panic.
+    fn fallback() -> Theme {
+        Theme {
+            name: "Camio".into(),
+            dark: true,
+            // Cyber Sec "Sentinel Blue": navy ink, sky-blue accent, blue-white
+            // text — the exact palette from cybersec.org.za's styles.css.
+            accent: [131, 188, 255],
+            window: [8, 17, 31],
+            panel: [16, 28, 47],
+            text: [231, 238, 251],
+            rounding: 14.0,
+            bg_image: None,
+            bg_opacity: 0.18,
+            motion: true,
+        }
+    }
+
     /// The built-in theme presets.
     pub fn presets() -> Vec<Theme> {
         vec![
             Theme {
+                // Cyber Sec's house palette (cybersec.org.za → styles.css):
+                // navy ink #08111f, sky-blue accent #83bcff, blue-white text.
                 name: "Sentinel Blue".into(),
                 dark: true,
-                accent: [30, 128, 255],
-                window: [0, 0, 0],
-                panel: [7, 15, 28],
-                text: [192, 214, 240],
-                rounding: 8.0,
+                accent: [131, 188, 255],
+                window: [8, 17, 31],
+                panel: [16, 28, 47],
+                text: [231, 238, 251],
+                rounding: 14.0,
                 bg_image: None,
                 bg_opacity: 0.18,
                 motion: true,
@@ -182,18 +206,19 @@ impl Theme {
         v.extreme_bg_color = col(scale(self.window, 0.6));
         v.override_text_color = Some(col(self.text));
         if self.name == "Sentinel Blue" {
-            // Black surfaces with visibly *blue* buttons: idle controls carry a
-            // blue fill derived from the accent (#1e80ff), brightening on hover
-            // and active — matching the black/blue site theme.
+            // Cyber Sec's navy surfaces with visibly *blue* controls: idle
+            // widgets carry a sky-blue fill derived from the accent (#83bcff),
+            // brightening on hover/active. Borders/surfaces use the site's
+            // --line (#3b5877), --line-soft (#263a54) and --surface-2 (#17263c).
             v.widgets.noninteractive.bg_stroke =
-                Stroke::new(1.0_f32, Color32::from_rgb(26, 47, 76));
-            v.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, accent.gamma_multiply(0.75));
-            v.widgets.inactive.weak_bg_fill = accent.gamma_multiply(0.22);
-            v.widgets.inactive.bg_fill = accent.gamma_multiply(0.34);
-            v.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(210, 226, 248));
-            v.extreme_bg_color = Color32::from_rgb(4, 10, 19);
-            v.faint_bg_color = Color32::from_rgb(10, 20, 35);
-            v.window_stroke = Stroke::new(1.0_f32, Color32::from_rgb(38, 65, 103));
+                Stroke::new(1.0_f32, Color32::from_rgb(38, 58, 84)); // --line-soft
+            v.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, accent.gamma_multiply(0.7));
+            v.widgets.inactive.weak_bg_fill = accent.gamma_multiply(0.18);
+            v.widgets.inactive.bg_fill = accent.gamma_multiply(0.28);
+            v.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(231, 238, 251)); // --text
+            v.extreme_bg_color = Color32::from_rgb(11, 20, 35); // --ink-2
+            v.faint_bg_color = Color32::from_rgb(23, 38, 60); // --surface-2
+            v.window_stroke = Stroke::new(1.0_f32, Color32::from_rgb(59, 88, 119)); // --line
         }
 
         let r = Rounding::same(self.rounding);

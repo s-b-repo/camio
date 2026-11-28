@@ -19,6 +19,8 @@ pub trait ExchangeSink: Send + Sync {
 pub struct NullSink;
 
 impl ExchangeSink for NullSink {
+    // A sink that records nothing still has to satisfy `ExchangeSink`.
+    // audit-allow: B13
     fn record(&self, _exchange: &HttpExchange) {}
 }
 
@@ -44,12 +46,12 @@ impl VecSink {
 
     /// A snapshot of everything captured so far.
     pub fn snapshot(&self) -> Vec<HttpExchange> {
-        self.items.lock().expect("vec sink poisoned").clone()
+        camio_core::sync::recovered_lock(&self.items).clone()
     }
 
     /// How many exchanges have been captured.
     pub fn len(&self) -> usize {
-        self.items.lock().expect("vec sink poisoned").len()
+        camio_core::sync::recovered_lock(&self.items).len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -59,9 +61,6 @@ impl VecSink {
 
 impl ExchangeSink for VecSink {
     fn record(&self, exchange: &HttpExchange) {
-        self.items
-            .lock()
-            .expect("vec sink poisoned")
-            .push(exchange.clone());
+        camio_core::sync::recovered_lock(&self.items).push(exchange.clone());
     }
 }

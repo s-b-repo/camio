@@ -292,6 +292,14 @@ impl HttpRequest {
             .unwrap_or_default()
     }
 
+    /// Resolve this request's URL against a redirect `Location` (absolute,
+    /// scheme-relative, origin-relative, or path-relative), returning the next
+    /// absolute URL, or `None` if either cannot be parsed. The caller must still
+    /// re-check the result against scope before sending it.
+    pub fn resolve_redirect(&self, location: &str) -> Option<String> {
+        resolve_redirect(&self.url, location)
+    }
+
     pub fn query(&self) -> Option<String> {
         self.parsed_url()
             .and_then(|u| u.query().map(|s| s.to_string()))
@@ -519,6 +527,15 @@ pub enum Confidence {
     Certain,
 }
 
+/// Resolve a redirect `Location` against the URL it came from (absolute,
+/// scheme-relative, origin-relative, or path-relative), returning the next
+/// absolute URL or `None`. Shared by every Replay/send path so redirect
+/// following behaves identically; callers re-check the result against scope.
+pub fn resolve_redirect(base: &str, location: &str) -> Option<String> {
+    let base = Url::parse(base).ok()?;
+    base.join(location.trim()).ok().map(|u| u.to_string())
+}
+
 /// A security finding with evidence linking back to exchanges (plan §8).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Finding {
@@ -531,6 +548,21 @@ pub struct Finding {
     /// Exchanges that are evidence for this finding.
     pub evidence: Vec<ExchangeId>,
     pub created_at_ms: i64,
+    /// Stable, kebab-case id of the check that produced this finding (e.g.
+    /// `reflected-xss`, `http-method-audit`). Used as the report/SARIF `ruleId`
+    /// and as a stable key for cross-run deduplication (plan §4.1, §F14). Added
+    /// additively: older stored findings decode with `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule: Option<String>,
+}
+
+impl Finding {
+    /// Set this finding's producing-check id (its report/SARIF `ruleId`).
+    #[must_use]
+    pub fn with_rule(mut self, rule: impl Into<String>) -> Self {
+        self.rule = Some(rule.into());
+        self
+    }
 }
 
 impl Finding {
@@ -560,6 +592,11 @@ impl Finding {
     /// if `vector` is not a valid CVSS string (ergonomic during construction).
     #[must_use]
     pub fn with_cvss(mut self, vector: &str) -> Self {
+        // The builder contract is "leave the severity unchanged if the vector
+        // is not a valid CVSS string" — ignoring the error *is* the documented
+        // behaviour, and the alternative (panicking, or forcing every caller to
+        // handle a parse error) would be worse for a convenience constructor.
+        // audit-allow: B5
         let _ = self.apply_cvss(vector);
         self
     }
@@ -578,6 +615,7 @@ mod finding_cvss_tests {
             detail: "parameter id".into(),
             evidence: vec![],
             created_at_ms: 0,
+            rule: None,
         }
     }
 

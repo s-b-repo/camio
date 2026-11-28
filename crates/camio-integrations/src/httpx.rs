@@ -15,7 +15,7 @@
 //! operator reviewed. httpx's update check is disabled so opening a project
 //! never reaches out on its own (plan §5.1).
 
-use crate::{IntegrationError, MAX_OUTPUT_BYTES};
+use crate::{join_output, IntegrationError, MAX_OUTPUT_BYTES};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
@@ -277,12 +277,17 @@ pub fn health(binary: &str, timeout: Duration) -> HttpxHealth {
             compatible: false,
         };
     };
+    // A failed read here used to look identical to "httpx printed nothing", which
+    // is then reported as "httpx is not compatible" — the wrong diagnosis for a
+    // broken pipe. Report the difference and carry on with what we got.
     let out = child
         .stdout
         .take()
         .map(|mut s| {
             let mut buf = String::new();
-            let _ = std::io::Read::read_to_string(&mut s, &mut buf);
+            if let Err(e) = std::io::Read::read_to_string(&mut s, &mut buf) {
+                eprintln!("camio-integrations: reading the httpx version line: {e}");
+            }
             buf
         })
         .unwrap_or_default();
@@ -292,7 +297,10 @@ pub fn health(binary: &str, timeout: Duration) -> HttpxHealth {
             Ok(Some(_)) => break,
             Ok(None) => {
                 if start.elapsed() > timeout {
-                    let _ = child.kill();
+                    // The version probe hung; kill it. reap() then does the
+                    // wait, so a kill that lost the race with the child's own
+                    // exit needs no report.
+                    camio_core::expected(child.kill());
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(25));
@@ -300,7 +308,8 @@ pub fn health(binary: &str, timeout: Duration) -> HttpxHealth {
             Err(_) => break,
         }
     }
-    let _ = child.wait();
+    // Reap the probe: kill is a no-op once exited, wait clears the zombie.
+    camio_core::sync::reap(&mut child);
     let first = out
         .lines()
         .map(str::trim)
@@ -427,7 +436,10 @@ pub fn run_httpx_raw<C: Fn() -> bool>(
     // Feed targets on stdin, then close it so httpx starts.
     if let Some(mut stdin) = child.stdin.take() {
         for t in bounded {
-            let _ = writeln!(stdin, "{t}");
+            // The child is already gone (or the pipe broke) mid-feed: the
+            // stdout records show which targets it actually accepted, and the
+            // drop of stdin closes the pipe so the wait below still ends.
+            camio_core::expected(writeln!(stdin, "{t}"));
         }
     }
 
@@ -460,7 +472,9 @@ pub fn run_httpx_raw<C: Fn() -> bool>(
             Ok(Some(_)) => break,
             Ok(None) => {
                 if start.elapsed() > opts.timeout || should_cancel() {
-                    let _ = child.kill();
+                    // Overran its bound or was cancelled: kill it before the
+                    // reap below, which does the wait either way.
+                    camio_core::expected(child.kill());
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(100));
@@ -468,14 +482,18 @@ pub fn run_httpx_raw<C: Fn() -> bool>(
             Err(e) => return Err(IntegrationError::Run(e.to_string())),
         }
     }
-    let _ = child.wait();
-    let output = reader.join().unwrap_or_default();
+    // Reap the finished run: kill is a no-op once exited, wait clears the
+    // zombie so a long-lived Camio process does not accumulate them.
+    camio_core::sync::reap(&mut child);
+    // A reader thread that panicked leaves the output empty, which is
+    // indistinguishable from "the tool found nothing" — say which it was.
+    let output = join_output(reader, "httpx");
     // Response-size bound (client-side, exact for any installed version).
     let output = match opts.max_response_bytes {
         Some(max) => cap_response_sizes(&output, max),
         None => output,
     };
-    let diagnostics = stderr_reader.join().unwrap_or_default();
+    let diagnostics = join_output(stderr_reader, "httpx diagnostics");
     if output.trim().is_empty() && !diagnostics.trim().is_empty() {
         return Err(IntegrationError::Run(format!(
             "httpx produced no probe records: {}",

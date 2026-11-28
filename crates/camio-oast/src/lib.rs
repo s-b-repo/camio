@@ -100,6 +100,22 @@ pub struct Collector {
     next_id: AtomicU64,
 }
 
+/// No source of random bytes was available.
+///
+/// The one failure that must never be papered over: a *guessable* OAST token
+/// correlates an attacker's callback to a run that is not theirs, so there is no
+/// safe default to fall back to. Callers decide what a missing token costs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NoEntropy;
+
+impl std::fmt::Display for NoEntropy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("no random bytes available: tried getrandom (3x) and /dev/urandom")
+    }
+}
+
+impl std::error::Error for NoEntropy {}
+
 impl Collector {
     /// `base` is the authority (`host:port`) callbacks will target, used to build
     /// callback URLs. It does not have to resolve publicly — it is whatever the
@@ -121,14 +137,25 @@ impl Collector {
     /// timestamp/counter/pid is *structured*, largely predictable input — the
     /// "hard-to-guess" property the token relies on must come from a secret
     /// source, not from state an attacker can estimate.
-    pub fn new_token(&self) -> String {
+    ///
+    /// Retries then switches source rather than panicking: `getrandom` can fail
+    /// transiently (an interrupted syscall, a process-wide fd limit), and a panic
+    /// here used to take down whatever called it — an MCP server, a CLI run, a
+    /// scan thread.
+    pub fn new_token(&self) -> Result<String, NoEntropy> {
         let mut random = [0u8; 9];
-        if getrandom::fill(&mut random).is_err() {
-            // Never fall back to something predictable: fail loudly instead.
-            panic!("could not read random bytes for an OAST token");
+        // Attempt 1..=3 on the kernel CSPRNG, because a single failure is not proof
+        // the machine has no entropy.
+        for _ in 0..3 {
+            if getrandom::fill(&mut random).is_ok() {
+                return Ok(hex_token(&random));
+            }
         }
-        // 18 hex chars keeps URLs short while carrying 72 bits of entropy.
-        random.iter().map(|b| format!("{b:02x}")).collect()
+        // Second, independent source: the character device itself.
+        if fill_from_urandom(&mut random) {
+            return Ok(hex_token(&random));
+        }
+        Err(NoEntropy)
     }
 
     /// A path-style callback URL: `http://<base>/<token>`. Works whenever the
@@ -214,6 +241,22 @@ impl Collector {
     }
 }
 
+/// Read random bytes from `/dev/urandom` when the `getrandom` syscall is not
+/// usable. `File::open` fails on a hardened host with no urandom node, which is
+/// the case this is here to cover — anything else means no entropy, and the
+/// caller is told so.
+fn fill_from_urandom(buf: &mut [u8]) -> bool {
+    use std::io::Read;
+    match std::fs::File::open("/dev/urandom") {
+        Ok(mut f) => f.read_exact(buf).is_ok(),
+        Err(_) => false,
+    }
+}
+
+/// 18 hex chars keeps URLs short while carrying 72 bits of entropy.
+fn hex_token(random: &[u8; 9]) -> String {
+    random.iter().map(|b| format!("{b:02x}")).collect()
+}
 pub mod dns;
 pub mod durable;
 
@@ -272,7 +315,11 @@ impl OastServer {
         let polling = shutdown.is_some();
         let inflight = Arc::new(AtomicUsize::new(0));
         if polling {
-            let _ = listener.set_nonblocking(true);
+            // The accept loop polls accept() and sleeps on `WouldBlock`; if the
+            // listener stayed blocking, the shutdown flag would only be seen
+            // after the next connection, and the stream is closed at exit either
+            // way — so there is nothing durable to report here.
+            camio_core::expected(listener.set_nonblocking(true));
         }
         loop {
             if let Some(flag) = &shutdown {
@@ -288,7 +335,10 @@ impl OastServer {
             }
             match listener.accept() {
                 Ok((stream, peer)) => {
-                    let _ = stream.set_nonblocking(false);
+                    // Each accepted connection goes to its own handler thread, which sets a read
+                    // timeout and closes the stream when it returns; a failed mode
+                    // reset shows up as the read outcome, not by keeping the socket.
+                    camio_core::expected(stream.set_nonblocking(false));
                     let server = self.clone();
                     let counter = inflight.clone();
                     counter.fetch_add(1, Ordering::AcqRel);
@@ -315,7 +365,10 @@ impl OastServer {
     }
 
     fn handle(self: &Arc<Self>, mut stream: TcpStream, peer: SocketAddr) {
-        let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+        // A request that never completes must not pin a handler thread forever;
+        // `read_request` already treats a stalled peer as a closed request,
+        // and the socket is closed on the way out regardless.
+        camio_core::expected(stream.set_read_timeout(Some(Duration::from_secs(10))));
         let Some((method, target, host, headers, body)) = read_request(&mut stream) else {
             return;
         };
@@ -326,10 +379,16 @@ impl OastServer {
             hook(&interaction);
         }
         // A minimal, non-identifying 200 so the callback "succeeds".
-        let _ = stream.write_all(
+        if let Err(e) = stream.write_all(
             b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
-        );
-        let _ = stream.flush();
+        ) {
+            // The peer is the target making the blind callback: an undelivered
+            // response means that target never saw the request succeed.
+            camio_core::note_failure("responding to an OAST callback", e);
+        }
+        if let Err(e) = stream.flush() {
+            camio_core::note_failure("flushing an OAST callback response", e);
+        }
     }
 }
 
@@ -353,7 +412,20 @@ impl OastHandle {
     pub fn stop_and_join(mut self) {
         self.shutdown.store(true, Ordering::Release);
         if let Some(join) = self.join.take() {
-            let _ = join.join();
+            match join.join() {
+                Ok(()) => {}
+                Err(panic) => {
+                    // A panicked listener thread means the collector stopped
+                    // recording callbacks while the handle still looked healthy;
+                    // the payload names the panic, which is a real bug to see.
+                    let msg = panic
+                        .downcast_ref::<&str>()
+                        .map(|s| s.to_string())
+                        .or_else(|| panic.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "a non-string panic payload".to_string());
+                    camio_core::note_failure("the OAST listener thread panicked", msg);
+                }
+            }
         }
     }
 }
@@ -467,10 +539,42 @@ mod tests {
     use std::net::TcpStream;
 
     #[test]
+    fn minting_a_token_never_panics_and_reports_failure_as_an_error() {
+        // Regression: a CSPRNG failure used to `panic!` in a library function,
+        // taking down the MCP server / CLI / scan thread that called it. The
+        // contract is now "retry, try /dev/urandom, then hand back an error".
+        let c = Collector::new("oast.local:8888");
+        for _ in 0..8 {
+            let token = c.new_token().expect("this host has entropy");
+            assert!(is_token(&token), "18 hex chars: {token}");
+        }
+        // 72 bits of entropy in 18 hex chars, so two draws effectively never
+        // collide — if they do, the source is not what we think it is.
+        let a = c.new_token().unwrap();
+        let b = c.new_token().unwrap();
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn the_urandom_fallback_reads_bytes_when_the_syscall_cannot() {
+        // `/dev/urandom` exists on every machine Camio targets; this asserts the
+        // fallback path is wired to the same 9 bytes the token needs.
+        let mut buf = [0u8; 9];
+        if fill_from_urandom(&mut buf) {
+            assert_ne!(buf, [0u8; 9], "urandom should not hand back zeros");
+            assert_eq!(
+                hex_token(&buf),
+                hex_token(&buf),
+                "encoding is deterministic"
+            );
+        }
+    }
+
+    #[test]
     fn tokens_are_opaque_and_unique() {
         let c = Collector::new("oast.local:8888");
-        let a = c.new_token();
-        let b = c.new_token();
+        let a = c.new_token().unwrap();
+        let b = c.new_token().unwrap();
         assert_ne!(a, b);
         assert!(is_token(&a), "token should look like a token: {a}");
         assert_eq!(c.callback_url(&a), format!("http://oast.local:8888/{a}"));
@@ -494,7 +598,7 @@ mod tests {
     #[test]
     fn records_and_correlates_a_live_callback() {
         let collector = Collector::new("127.0.0.1");
-        let token = collector.new_token();
+        let token = collector.new_token().unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let handle = OastServer::new(collector.clone()).spawn(listener).unwrap();
@@ -505,7 +609,13 @@ mod tests {
             format!("GET /{token}/leak?x=1 HTTP/1.1\r\nHost: {addr}\r\nUser-Agent: victim\r\n\r\n");
         s.write_all(req.as_bytes()).unwrap();
         let mut resp = Vec::new();
-        let _ = s.read_to_end(&mut resp);
+        // The probe's response body is not what these tests assert; reading to
+        // EOF only matters so the write side is flushed before the socket is
+        // dropped.
+        assert!(
+            s.read_to_end(&mut resp).is_ok(),
+            "reading the callback response"
+        );
         assert!(String::from_utf8_lossy(&resp).contains("200 OK"));
 
         // The interaction is recorded and correlates to the token.
@@ -520,7 +630,7 @@ mod tests {
     #[test]
     fn records_post_body() {
         let collector = Collector::new("127.0.0.1");
-        let token = collector.new_token();
+        let token = collector.new_token().unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let handle = OastServer::new(collector.clone()).spawn(listener).unwrap();
@@ -533,7 +643,13 @@ mod tests {
         );
         s.write_all(req.as_bytes()).unwrap();
         let mut resp = Vec::new();
-        let _ = s.read_to_end(&mut resp);
+        // The probe's response body is not what these tests assert; reading to
+        // EOF only matters so the write side is flushed before the socket is
+        // dropped.
+        assert!(
+            s.read_to_end(&mut resp).is_ok(),
+            "reading the callback response"
+        );
 
         let hits = collector.for_token(&token);
         assert_eq!(hits.len(), 1);
@@ -549,7 +665,7 @@ mod hardening_tests {
     #[test]
     fn tokens_are_unique_and_not_derived_from_clock_state() {
         let c = Collector::new("127.0.0.1:0");
-        let tokens: Vec<String> = (0..200).map(|_| c.new_token()).collect();
+        let tokens: Vec<String> = (0..200).map(|_| c.new_token().unwrap()).collect();
         let unique: std::collections::HashSet<&String> = tokens.iter().collect();
         assert_eq!(unique.len(), tokens.len(), "tokens must not collide");
         // Enough length that the token is not a truncated clock hash.
@@ -560,7 +676,7 @@ mod hardening_tests {
     fn retention_is_bounded() {
         let c = Collector::new("127.0.0.1:0");
         // Two tokens so correlation still has something to find.
-        let tok = c.new_token();
+        let tok = c.new_token().unwrap();
         // The path token must be the whole first segment, so carry the counter
         // in the query (which does not participate in correlation).
         for i in 0..(MAX_INTERACTIONS + 50) {

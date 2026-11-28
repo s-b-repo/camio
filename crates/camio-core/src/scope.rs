@@ -152,6 +152,9 @@ impl Scope {
 /// address, the whole link-local range, and the well-known metadata hostnames.
 pub fn is_metadata_host(host: &str) -> bool {
     let h = host.trim_start_matches('[').trim_end_matches(']');
+    // an unparseable host is not an IP literal; the SSRF guard handles it as a
+    // name. Probing is the point of the match.
+    // audit-allow: B4
     if let Ok(ip) = h.parse::<IpAddr>() {
         return is_metadata_ip(ip);
     }
@@ -172,7 +175,7 @@ pub fn is_metadata_ip(ip: IpAddr) -> bool {
                 return false; // loopback is covered by allow_private
             }
             let seg = v6.segments();
-            (seg[0] & 0xffc0) == 0xfe80 // fe80::/10
+            (seg.first().copied().unwrap_or(0) & 0xffc0) == 0xfe80 // fe80::/10
         }
     }
 }
@@ -190,6 +193,8 @@ fn is_guarded_name(host: &str) -> bool {
 
 /// Whether a request host must be blocked by the SSRF guard: a dangerous IP
 /// literal, or a known-internal hostname.
+// an unparseable host is not an IP literal; it is then treated as a name.
+// audit-allow: B4
 pub fn is_guarded_host(host: &str) -> bool {
     // Strip IPv6 brackets if present (url::Host keeps them off, but be safe).
     let h = host.trim_start_matches('[').trim_end_matches(']');
@@ -223,11 +228,11 @@ fn is_guarded_v6(a: Ipv6Addr) -> bool {
     }
     let seg = a.segments();
     // Unique local fc00::/7.
-    if (seg[0] & 0xfe00) == 0xfc00 {
+    if (seg.first().copied().unwrap_or(0) & 0xfe00) == 0xfc00 {
         return true;
     }
     // Link-local fe80::/10.
-    if (seg[0] & 0xffc0) == 0xfe80 {
+    if (seg.first().copied().unwrap_or(0) & 0xffc0) == 0xfe80 {
         return true;
     }
     // IPv4-mapped (::ffff:a.b.c.d) → apply the v4 guard to the embedded address.

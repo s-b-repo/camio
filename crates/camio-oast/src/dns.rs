@@ -94,7 +94,9 @@ impl DnsResponder {
         let join = std::thread::Builder::new()
             .name("camio-oast-dns".into())
             .spawn(move || {
-                let _ = self.serve_with_socket(socket);
+                if let Err(e) = self.serve_with_socket(socket) {
+                    camio_core::note_failure("serving DNS", e);
+                }
             })?;
         Ok(DnsHandle {
             shutdown,
@@ -109,15 +111,18 @@ impl DnsResponder {
         // The leftmost label is the correlation token when it looks like one.
         let first = parsed.qname.split('.').next().unwrap_or("");
         if !crate::is_token(first) {
-            return Some(self_notimp(query));
+            return self_notimp(query);
         }
         let token = first.to_ascii_lowercase();
 
         // Record the lookup as an interaction (correlated by token) through the
-        // sink, so a durable collector persists it like any other callback.
-        let _ = self.sink.note_dns_lookup(&token, &parsed.qname);
+        // sink, so a durable collector persists it like any other callback. A
+        // dropped record is a callback the operator never sees.
+        if let Err(e) = self.sink.note_dns_lookup(&token, &parsed.qname) {
+            camio_core::note_failure("recording a DNS lookup", e);
+        }
 
-        Some(answer(query, &parsed.qname, self.answer_ip, parsed.qtype))
+        answer(query, &parsed.qname, self.answer_ip, parsed.qtype)
     }
 }
 
@@ -145,15 +150,18 @@ struct Question {
 /// Parse the header + question of a DNS query. Returns `None` for anything that
 /// is not a well-formed standard query with exactly one question we understand.
 fn parse_query(query: &[u8]) -> Option<Question> {
+    // Every header field is read through `get`: the 12-byte floor is checked
+    // once here, and a hostile short packet cannot produce an index that reads
+    // past the buffer.
     if query.len() < 12 {
         return None;
     }
-    let flags = u16::from_be_bytes([query[2], query[3]]);
+    let flags = u16::from_be_bytes([query.get(2).copied()?, query.get(3).copied()?]);
     // QR must be 0 (a query) and opcode 0 (standard).
     if flags & 0x8000 != 0 || (flags >> 11) & 0xF != 0 {
         return None;
     }
-    let qdcount = u16::from_be_bytes([query[4], query[5]]);
+    let qdcount = u16::from_be_bytes([query.get(4).copied()?, query.get(5).copied()?]);
     if qdcount != 1 {
         return None;
     }
@@ -190,8 +198,17 @@ fn parse_query(query: &[u8]) -> Option<Question> {
     })
 }
 
-/// Build an `A` answer (or NOTIMP for other qtypes).
-fn answer(query: &[u8], qname: &str, ip: [u8; 4], qtype: u16) -> Vec<u8> {
+/// Build an `A` answer (or NOTIMP for other qtypes); `None` for a packet too
+/// short to echo, which the responder then drops rather than answering with an
+/// empty datagram.
+fn answer(query: &[u8], qname: &str, ip: [u8; 4], qtype: u16) -> Option<Vec<u8>> {
+    // Callers reach this only through `parse_query`, which enforces a 12-byte
+    // header plus a full question. Re-check rather than assume it: a short
+    // packet that ever arrives here (new caller, new qtype branch) would panic
+    // on the slices below inside the responder thread.
+    if query.len() < 12 {
+        return None;
+    }
     if qtype != 1 {
         return self_notimp(query);
     }
@@ -213,28 +230,31 @@ fn answer(query: &[u8], qname: &str, ip: [u8; 4], qtype: u16) -> Vec<u8> {
     out.extend_from_slice(&4u16.to_be_bytes()); // rdlength
     out.extend_from_slice(&ip);
     let _ = qname;
-    out
+    Some(out)
 }
 
 /// Alias so the responder can call the module's NOTIMP builder.
-fn self_notimp(query: &[u8]) -> Vec<u8> {
+fn self_notimp(query: &[u8]) -> Option<Vec<u8>> {
     notimp(query)
 }
 
-/// A NOTIMP response with the question echoed when possible.
-fn notimp(query: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(query.len());
-    if query.len() >= 12 {
-        out.extend_from_slice(&query[..2]);
-        out.extend_from_slice(&0x8404u16.to_be_bytes()); // QR + rcode 4 (NOTIMP)
-        let qd = u16::from_be_bytes([query[4], query[5]]);
-        out.extend_from_slice(&qd.to_be_bytes());
-        out.extend_from_slice(&0u16.to_be_bytes());
-        out.extend_from_slice(&0u16.to_be_bytes());
-        out.extend_from_slice(&0u16.to_be_bytes());
-        out.extend_from_slice(&query[12..]);
+/// A NOTIMP response with the question echoed; `None` when the packet is too
+/// short to echo, so the responder drops it instead of sending an empty
+/// datagram.
+fn notimp(query: &[u8]) -> Option<Vec<u8>> {
+    if query.len() < 12 {
+        return None;
     }
-    out
+    let mut out = Vec::with_capacity(query.len());
+    out.extend_from_slice(query.get(..2)?);
+    out.extend_from_slice(&0x8404u16.to_be_bytes()); // QR + rcode 4 (NOTIMP)
+    let qd = u16::from_be_bytes([query.get(4).copied()?, query.get(5).copied()?]);
+    out.extend_from_slice(&qd.to_be_bytes());
+    out.extend_from_slice(&0u16.to_be_bytes());
+    out.extend_from_slice(&0u16.to_be_bytes());
+    out.extend_from_slice(&0u16.to_be_bytes());
+    out.extend_from_slice(&query[12..]);
+    Some(out)
 }
 
 use std::net::ToSocketAddrs;
@@ -278,6 +298,26 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].method, "DNS");
         assert_eq!(found[0].target, "deadbeefcafe0123.camio.test");
+    }
+
+    #[test]
+    fn a_packet_too_short_to_echo_is_dropped_not_panicked() {
+        // Regression: `answer` used to slice &query[..2] and &query[12..]
+        // directly. It is only reached through `parse_query` today, so this
+        // asserts the guard that keeps a short packet from panicking the
+        // responder thread if that ever changes.
+        let collector = Collector::new("127.0.0.1:0");
+        let responder = DnsResponder::new(collector.clone(), [127, 0, 0, 1]);
+        assert!(responder.handle_query(&[]).is_none(), "empty packet");
+        assert!(responder.handle_query(&[0x12, 0x34]).is_none(), "id only");
+        assert!(
+            responder
+                .handle_query(&query("deadbeefcafe0123.camio.test", 1)[..11])
+                .is_none(),
+            "a truncated header/question never reaches an answer"
+        );
+        assert_eq!(answer(&[0xAA, 0xBB], "x.test", [127, 0, 0, 1], 1), None);
+        assert_eq!(collector.len(), 0);
     }
 
     #[test]

@@ -68,6 +68,9 @@ impl DurableCollector {
         let store = self
             .store
             .lock()
+            // `PoisonError` carries nothing beyond "a panic happened while
+            // this lock was held"; the message names the affected component.
+            // audit-allow: B7
             .map_err(|_| "durable OAST store lock poisoned".to_string())?;
         let trimmed = super::trim_for_store(interaction);
         let row = camio_store::OastRow {
@@ -94,18 +97,25 @@ impl DurableCollector {
 
     /// Interactions persisted for `token` (survives a restart).
     pub fn for_token(&self, token: &str) -> Vec<camio_store::OastRow> {
-        match self.store.lock() {
-            Ok(store) => store.oast_interactions_for_token(token).unwrap_or_default(),
-            Err(_) => Vec::new(),
-        }
+        // A read failure and a genuinely empty result are not the same thing:
+        // one means "no callback arrived", the other means "we could not look".
+        // Callers display this list, so log the difference.
+        let store = camio_core::sync::recovered_lock(&self.store);
+        store
+            .oast_interactions_for_token(token)
+            .unwrap_or_else(|e| {
+                eprintln!("camio: reading persisted OAST interactions: {e}");
+                Vec::new()
+            })
     }
 
     /// All persisted interactions, newest first.
     pub fn all_persisted(&self) -> Vec<camio_store::OastRow> {
-        match self.store.lock() {
-            Ok(store) => store.oast_interactions(1000).unwrap_or_default(),
-            Err(_) => Vec::new(),
-        }
+        let store = camio_core::sync::recovered_lock(&self.store);
+        store.oast_interactions(1000).unwrap_or_else(|e| {
+            eprintln!("camio: reading persisted OAST interactions: {e}");
+            Vec::new()
+        })
     }
 
     /// The retention policy in force.
