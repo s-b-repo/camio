@@ -108,7 +108,7 @@ fn short_needle(needle: &str) -> String {
         while end > 0 && !needle.is_char_boundary(end) {
             end -= 1;
         }
-        format!("{}…", &needle[..end])
+        format!("{}…", needle.get(..end).unwrap_or(needle))
     }
 }
 

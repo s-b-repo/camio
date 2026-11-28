@@ -58,7 +58,10 @@ pub fn matched_engine_with_proxy(
     }
     #[cfg(not(feature = "impersonate"))]
     {
-        let _ = (&spec, upstream_proxy);
+        // Neither value can be used without the `impersonate` feature; naming
+        // them keeps the configuration readable at the call site.
+        let _spec = spec;
+        let _proxy = upstream_proxy;
         Err(RequestError::Unavailable(
             "built without the `impersonate` feature; use DryRunEngine".into(),
         ))

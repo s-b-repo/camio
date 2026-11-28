@@ -16,6 +16,24 @@ pub mod nuclei;
 pub mod registry;
 pub mod subfinder;
 
+/// Join a tool's reader thread, keeping its output.
+///
+/// A reader that panicked (an I/O error it did not expect) otherwise yields an
+/// empty string, which every caller reads as "the tool found nothing" — a false
+/// negative a security tool must not be able to produce silently. The output is
+/// still returned so a run can continue, but the failure is visible.
+pub(crate) fn join_output(reader: std::thread::JoinHandle<String>, label: &str) -> String {
+    match reader.join() {
+        Ok(text) => text,
+        Err(_) => {
+            eprintln!(
+                "camio-integrations: {label} output reader failed; results may be incomplete"
+            );
+            String::new()
+        }
+    }
+}
+
 pub use registry::{probe_tool, registry, ToolInfo, ToolStatus, KNOWN_TOOLS};
 
 pub use httpx::{

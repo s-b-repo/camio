@@ -172,6 +172,9 @@ impl Store {
             } else {
                 "1"
             };
+        // Interpolates only &'static str fragments (columns, operators); every
+        // caller-supplied value is bound through ?1..?N, never inside the SQL.
+        // audit-allow: M1
         let sql = format!("SELECT {EXCHANGE_COLUMNS} FROM exchanges WHERE {cursor} AND {metadata} ORDER BY id DESC LIMIT ?2");
         let mut stmt = self.conn.prepare(&sql)?;
         let mut rows = stmt.query(params_from_iter(bind))?;
@@ -213,7 +216,7 @@ impl Store {
         id: ExchangeId,
         limit: Option<i64>,
     ) -> Result<Option<ExchangePreview>> {
-        let sql = format!("SELECT {EXCHANGE_COLUMNS} FROM exchanges WHERE id = ?1");
+        let sql = format!("SELECT {EXCHANGE_COLUMNS} FROM exchanges WHERE id = ?1"); // audit-allow: M1 — constant columns only
         let mut stmt = self.conn.prepare(&sql)?;
         let mut rows = stmt.query([id.0])?;
         let Some(row) = rows.next()? else {

@@ -66,6 +66,27 @@ inject_branding() {
 pref("general.config.filename", "camio.cfg");
 pref("general.config.obscure_value", 0);
 JS
+
+  # --- Rebrand the COMPILED product name: overwrite the brand strings in the
+  # LibreWolf branding dir so the binary reports "Camio Browser" natively (About
+  # dialog, window title, menus), not just via a post-package application.ini
+  # rename. A Firefox build resolves every -brand-*/brandShortName term from
+  # these files, so this is the real rebrand. We overwrite in place (keeping the
+  # `librewolf` branding dir name, which build config references) rather than
+  # add a new branding dir, so no configure/mozconfig change is needed.
+  for brand_dir in \
+    "$tree/browser/branding/librewolf" \
+    "$tree/browser/branding/nightly" ; do
+    [ -d "$brand_dir" ] || continue
+    for loc in "$brand_dir"/locales/*/ ; do
+      [ -d "$loc" ] || continue
+      [ -f branding/brand.ftl ] && install -m 0644 branding/brand.ftl "$loc/brand.ftl"
+      [ -f branding/brand.properties ] && \
+        install -m 0644 branding/brand.properties "$loc/brand.properties"
+    done
+    echo "    rebranded product strings in $(basename "$brand_dir")"
+  done
+
   echo "    branding staged (reconcile paths to your Firefox version if needed)."
 }
 
@@ -160,6 +181,13 @@ if [ -n "$lwsrc" ] && [ -f "$BRANDING_CSS" ]; then
     && echo "    staged Camio userChrome.css into the branding dir"
 fi
 
+# Rebrand the compiled product name: overwrite the LibreWolf brand strings in
+# the REAL source tree ($lwsrc) that `make build` compiles, so the binary says
+# "Camio Browser" natively. inject_branding also stages camio.cfg/userChrome.
+if [ -n "$lwsrc" ]; then
+  inject_branding "$lwsrc" || echo "    WARNING: brand-string injection failed; continuing"
+fi
+
 # Trim peak RAM so the heaviest TUs (dom/bindings, dom/canvas) don't OOM a
 # memory-constrained runner: drop separate debug symbols (the big RAM/disk/time
 # hog) and cap parallel jobs. $JOBS defaults to nproc; the CI caps it lower.
@@ -191,6 +219,16 @@ if [ -n "$pkg" ] && [ -f "$BRANDING_CSS" ]; then
   app="camio-pkg/librewolf"
   if [ -d "$app" ]; then
     install -m 0644 "$BRANDING_CSS" "$app/camio-userChrome.css"
+    # Branded user.js baseline + new-tab page.
+    [ -f "$ROOT/branding/camio-user.js" ] && \
+      install -m 0644 "$ROOT/branding/camio-user.js" "$app/camio-user.js"
+    [ -f "$ROOT/branding/newtab.html" ] && \
+      install -m 0644 "$ROOT/branding/newtab.html" "$app/newtab.html"
+    # Self-hosted Cyber Sec webfonts next to newtab.html (its @font-face uses fonts/).
+    if [ -d "$ROOT/branding/fonts" ]; then
+      mkdir -p "$app/fonts"
+      install -m 0644 "$ROOT/branding/fonts/"*.woff2 "$app/fonts/" 2>/dev/null || true
+    fi
     mkdir -p "$app/defaults/pref"
     cat > "$app/defaults/pref/camio-autoconfig.js" <<'CAMIOPREF'
 // Camio: allow the autoconfig (.cfg) full power so it can install the theme.
@@ -200,26 +238,47 @@ CAMIOPREF
 
 // ===== Camio fork: black/blue theme + extra hardening =====
 lockPref("toolkit.legacyUserProfileCustomizations.stylesheets", true);
+lockPref("dom.webdriver.enabled", false);
+defaultPref("privacy.resistFingerprinting", true);
+defaultPref("privacy.resistFingerprinting.autoDeclineNoUserInputCanvasPrompts", false);
+defaultPref("privacy.reduceTimerPrecision", true);
+defaultPref("privacy.resistFingerprinting.reduceTimerPrecision.jitter", true);
+defaultPref("privacy.resistFingerprinting.reduceTimerPrecision.microseconds", 2000);
 defaultPref("dom.battery.enabled", false);
 defaultPref("dom.netinfo.enabled", false);
 defaultPref("dom.gamepad.enabled", false);
+defaultPref("media.webspeech.synth.enabled", false);
 defaultPref("beacon.enabled", false);
 defaultPref("network.dns.disablePrefetch", true);
 defaultPref("network.predictor.enabled", false);
+defaultPref("webgl.enable-debug-renderer-info", false);
+defaultPref("geo.enabled", false);
+defaultPref("media.peerconnection.ice.default_address_only", true);
+defaultPref("media.peerconnection.ice.no_host", true);
 try {
-  var _camioChrome = Services.dirsvc.get("ProfD", Components.interfaces.nsIFile);
-  _camioChrome.append("chrome");
-  if (!_camioChrome.exists())
-    _camioChrome.create(Components.interfaces.nsIFile.DIRECTORY_TYPE, 0o755);
-  var _camioDst = _camioChrome.clone(); _camioDst.append("userChrome.css");
-  var _camioSrc = Services.dirsvc.get("GreD", Components.interfaces.nsIFile);
-  _camioSrc.append("camio-userChrome.css");
-  if (_camioSrc.exists()) {
-    if (_camioDst.exists()) _camioDst.remove(false);
-    _camioSrc.copyTo(_camioChrome, "userChrome.css");
+  // Copy userChrome.css + camio-user.js from the app dir into every profile
+  // at startup, so a freshly-created profile gets Camio defaults even without
+  // Camio's own launcher touching it first.
+  var _profD = Services.dirsvc.get("ProfD", Components.interfaces.nsIFile);
+  var _appD  = Services.dirsvc.get("GreD",  Components.interfaces.nsIFile);
+  var _chromeDir = _profD.clone(); _chromeDir.append("chrome");
+  if (!_chromeDir.exists())
+    _chromeDir.create(Components.interfaces.nsIFile.DIRECTORY_TYPE, 0o755);
+  function _copy(name, intoDir, asName) {
+    var _src = _appD.clone(); _src.append(name);
+    var _dst = intoDir.clone(); _dst.append(asName || name);
+    if (_src.exists()) {
+      if (_dst.exists()) _dst.remove(false);
+      _src.copyTo(intoDir, asName || name);
+    }
   }
+  _copy("camio-userChrome.css", _chromeDir, "userChrome.css");
+  _copy("camio-user.js", _profD, "user.js");
 } catch (e) { try { Components.utils.reportError(e); } catch (_e) {} }
 CAMIOCFG
+    # Rebrand pass: rename application.ini product strings so about:support
+    # reads "Camio Browser" instead of "LibreWolf". Idempotent; safe on reruns.
+    "$ROOT/rebrand.sh" "$app" 2>/dev/null || true
     mv "$app" "camio-pkg/camio-browser"
     camio_tar="${pkg/librewolf-/camio-browser-}"
     ( cd camio-pkg && tar -cJf "../$camio_tar" camio-browser )

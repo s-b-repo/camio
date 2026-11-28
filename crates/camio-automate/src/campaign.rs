@@ -388,6 +388,9 @@ fn build_items(c: &Campaign, p: usize) -> Vec<Item> {
             let mut items = Vec::with_capacity(min);
             // `i` indexes payloads across DIFFERENT sets (`c.sets[j].payloads[i]`),
             // so a plain iterator cannot replace this range index.
+            // `i` indexes into DIFFERENT payload sets (`c.sets[j].payloads[i]`), so no
+            // single iterator can replace the range index.
+            // audit-allow: C1
             #[allow(clippy::needless_range_loop)]
             for i in 0..min {
                 let mut assign = vec![None; p];

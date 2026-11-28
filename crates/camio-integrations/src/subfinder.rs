@@ -6,7 +6,7 @@
 //! than fabricating findings. The parser is tolerant and the runner is bounded
 //! (timeout + process kill), matching the rest of the integration layer.
 
-use crate::{IntegrationError, MAX_OUTPUT_BYTES};
+use crate::{join_output, IntegrationError, MAX_OUTPUT_BYTES};
 use serde::Deserialize;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
@@ -119,7 +119,10 @@ pub fn run_subfinder(
 
     if let Some(mut stdin) = child.stdin.take() {
         for d in domains {
-            let _ = writeln!(stdin, "{d}");
+            // The child is already gone (or the pipe broke) mid-feed: the
+            // stdout records show which domains it actually accepted, and the
+            // drop of stdin closes the pipe so the wait below still ends.
+            camio_core::expected(writeln!(stdin, "{d}"));
         }
     }
 
@@ -151,7 +154,9 @@ pub fn run_subfinder(
             Ok(Some(_)) => break,
             Ok(None) => {
                 if start.elapsed() > opts.timeout {
-                    let _ = child.kill();
+                    // Overran its bound: kill it before the reap below, which
+                    // does the wait either way.
+                    camio_core::expected(child.kill());
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(100));
@@ -159,8 +164,10 @@ pub fn run_subfinder(
             Err(e) => return Err(IntegrationError::Run(e.to_string())),
         }
     }
-    let _ = child.wait();
-    let output = reader.join().unwrap_or_default();
+    // Reap the finished run: kill is a no-op once exited, wait clears the
+    // zombie so a long-lived Camio process does not accumulate them.
+    camio_core::sync::reap(&mut child);
+    let output = join_output(reader, "subfinder");
     Ok(parse_subfinder_jsonl(&output))
 }
 

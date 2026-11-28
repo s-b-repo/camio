@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Camio — a Cyber Sec tool</title>
+<meta name="color-scheme" content="dark">
+<style>
+  /* Self-hosted Cyber Sec webfonts (fonts/ staged next to this page). */
+  @font-face{font-family:'Chakra Petch';font-weight:600;font-display:swap;src:url('fonts/chakrapetch-600.woff2') format('woff2')}
+  @font-face{font-family:'Chakra Petch';font-weight:700;font-display:swap;src:url('fonts/chakrapetch-700.woff2') format('woff2')}
+  @font-face{font-family:'IBM Plex Sans';font-weight:100 700;font-display:swap;src:url('fonts/ibmplexsans-var.woff2') format('woff2-variations')}
+  @font-face{font-family:'JetBrains Mono';font-weight:400 800;font-display:swap;src:url('fonts/jetbrainsmono-var.woff2') format('woff2-variations')}
+
+  /* Palette lifted 1:1 from cybersec.org.za/assets/styles.css ("Sentinel Blue"). */
+  :root{
+    --ink:#08111f; --ink-2:#0b1423; --surface:#101c2f; --surface-2:#17263c;
+    --line:#3b5877; --line-soft:#263a54;
+    --text:#e7eefb; --muted:#afc2dc; --faint:#9cb2ce;
+    --acc:#83bcff; --acc-deep:#215bab; --acc-2:#65d2ed;
+    --acc-glow:rgba(62,143,255,.17); --warn:#ff8297;
+    --radius:14px; --maxw:1180px;
+    --shadow:0 24px 60px -28px rgba(0,0,0,.9);
+    --display:'Chakra Petch',system-ui,sans-serif;
+    --mono:'JetBrains Mono',ui-monospace,monospace;
+    --body:'IBM Plex Sans',system-ui,sans-serif;
+  }
+  *,*::before,*::after{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{background:var(--ink);color:var(--text);font-family:var(--body);min-height:100vh;isolation:isolate;overflow-x:clip}
+
+  /* ---- atmosphere layers (match the site's .bg-grid + #bg-canvas) ---- */
+  .bg-grid{position:fixed;inset:0;z-index:-12;pointer-events:none;
+    background:
+      radial-gradient(1100px 600px at 78% -8%, var(--acc-glow), transparent 60%),
+      radial-gradient(900px 700px at 5% 18%, rgba(101,210,237,.05), transparent 55%),
+      linear-gradient(var(--ink),var(--ink));}
+  .bg-grid::before{content:"";position:absolute;inset:0;opacity:.35;
+    background-image:
+      linear-gradient(rgba(20,100,220,.06) 1px,transparent 1px),
+      linear-gradient(90deg,rgba(20,100,220,.06) 1px,transparent 1px);
+    background-size:54px 54px;
+    -webkit-mask-image:radial-gradient(120% 90% at 50% 0%,#000 35%,transparent 78%);
+            mask-image:radial-gradient(120% 90% at 50% 0%,#000 35%,transparent 78%);}
+  #bg-canvas{position:fixed;inset:0;z-index:-6;width:100%;height:100%;pointer-events:none}
+
+  .wrap{position:relative;z-index:1;max-width:var(--maxw);margin:0 auto;padding:0 clamp(20px,5vw,40px)}
+
+  /* ---- header: stacked CAMIO / CYBER_SEC_ lockup + animated globe ---- */
+  header{display:flex;align-items:center;justify-content:space-between;padding:22px 0}
+  .brand{display:flex;align-items:center;gap:.6rem;text-decoration:none;color:var(--text)}
+  .brand-mark{width:44px;height:44px;display:grid;place-items:center;color:var(--acc)}
+  .brand-text{font-family:var(--display);font-weight:700;font-size:1.05rem;letter-spacing:.02em;display:flex;flex-direction:column;line-height:1}
+  .brand-text i{font-family:var(--mono);font-style:normal;font-weight:400;font-size:.6rem;letter-spacing:.14em;color:var(--faint);margin-top:4px;text-transform:uppercase}
+  nav{display:flex;gap:22px;font-family:var(--mono);font-size:.82rem}
+  nav a{color:var(--muted);text-decoration:none}
+  nav a:hover{color:var(--acc)}
+
+  /* ---- hero ---- */
+  main{display:grid;grid-template-columns:1.05fr .95fr;gap:40px;align-items:center;padding:36px 0 56px}
+  @media (max-width:900px){main{grid-template-columns:1fr}}
+  .kicker{font-family:var(--mono);font-weight:500;font-size:.82rem;letter-spacing:.18em;text-transform:uppercase;color:var(--acc);text-shadow:0 0 10px var(--acc-glow);margin:0 0 .9rem}
+  h1{font-family:var(--display);font-weight:700;margin:0;letter-spacing:-.01em;font-size:clamp(2.6rem,6vw,4.6rem);line-height:1.02;color:var(--text)}
+  h1 .hl{color:var(--acc);text-shadow:0 0 34px var(--acc-glow);display:block}
+  .lead{color:var(--muted);max-width:48ch;margin:22px 0 26px;font-size:1.02rem;line-height:1.65}
+  .lead b{color:var(--text)}
+  .cta{display:flex;gap:12px;flex-wrap:wrap}
+  .btn{font-family:var(--mono);font-weight:500;font-size:.92rem;text-decoration:none;padding:.82rem 1.4rem;border-radius:10px;border:1px solid transparent;display:inline-flex;align-items:center;gap:.5em;transition:transform .18s,box-shadow .25s,border-color .2s,color .2s}
+  .btn-primary{background:var(--acc-deep);color:#fff}
+  .btn-primary:hover{transform:translateY(-2px);box-shadow:0 14px 34px -12px var(--acc-glow)}
+  .btn-ghost{background:transparent;color:var(--text);border-color:var(--line)}
+  .btn-ghost:hover{border-color:var(--acc);color:var(--acc);transform:translateY(-2px)}
+
+  /* ---- hero terminal (matches the site's .hero-term / .term-bar / .term-body) ---- */
+  .hero-term{background:var(--ink-2);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);overflow:hidden}
+  .term-bar{display:flex;align-items:center;gap:.5rem;padding:.7rem 1rem;border-bottom:1px solid var(--line-soft);background:var(--surface)}
+  .term-bar span{width:11px;height:11px;border-radius:50%;background:#1a3a5c}
+  .term-bar span:first-child{background:#ff3b55}.term-bar span:nth-child(2){background:#ffaa00}.term-bar span:nth-child(3){background:var(--acc);box-shadow:0 0 8px var(--acc-glow)}
+  .term-bar i{margin-left:auto;font-family:var(--mono);font-style:normal;font-size:.72rem;color:var(--acc)}
+  .term-body{margin:0;padding:1.2rem 1.3rem 1.5rem;font-family:var(--mono);font-size:.84rem;line-height:1.85;color:#b0d4f8}
+  .term-body .p{color:var(--acc)} .term-body .f{color:var(--acc-2)} .term-body .plus{color:var(--acc)}
+  .cursor{display:inline-block;width:9px;height:1.05em;vertical-align:-2px;background:var(--acc);animation:blink 1.1s steps(1) infinite}
+  @keyframes blink{50%{opacity:0}}
+
+  footer{font-family:var(--mono);font-size:.74rem;color:var(--muted);padding:18px 0 30px;border-top:1px solid var(--line-soft)}
+</style>
+</head>
+<body>
+<div class="bg-grid"></div>
+<canvas id="bg-canvas" aria-hidden="true"></canvas>
+<div class="wrap">
+  <header>
+    <a class="brand" href="https://cybersec.org.za" aria-label="Camio, a Cyber Sec tool">
+      <span class="brand-mark"><canvas id="globe-canvas" width="44" height="44"></canvas></span>
+      <span class="brand-text">CAMIO<i>CYBER_SEC_</i></span>
+    </a>
+    <nav>
+      <a href="https://cybersec.org.za">Home</a>
+      <a href="https://cybersec.org.za/tools">Tools</a>
+      <a href="https://cybersec.org.za/research">Research</a>
+    </nav>
+  </header>
+
+  <main>
+    <section>
+      <p class="kicker">// fingerprint-transparent testing</p>
+      <h1>Test like the adversary.<span class="hl">Leave no trace.</span></h1>
+      <p class="lead">
+        <b>Camio</b> is Cyber Sec's local-first security workbench — a managed
+        stealth browser, an intercepting proxy, passive &amp; active scans, a
+        proof-of-work solver and blend-in personas, all under one policy roof.
+      </p>
+      <div class="cta">
+        <a class="btn btn-primary" href="https://html.duckduckgo.com/html/">Open a private search</a>
+        <a class="btn btn-ghost" href="https://cybersec.org.za">cybersec.org.za</a>
+      </div>
+    </section>
+
+    <aside class="hero-term" aria-hidden="true">
+      <div class="term-bar"><span></span><span></span><span></span><i>operator@camio:~</i></div>
+      <pre class="term-body"><span class="p">$</span> cat <span class="f">./capabilities.txt</span>
+<span class="plus">[+]</span> Managed stealth browser · per-persona fingerprint
+<span class="plus">[+]</span> Intercepting proxy · scope-gated capture
+<span class="plus">[+]</span> Passive + opt-in active scans · evidence-backed
+<span class="plus">[+]</span> CAPTCHA detect / OCR · proof-of-work solver
+<span class="plus">[+]</span> Random blend-in personas · matched engine
+<span class="p">$</span> <span class="cursor"></span></pre>
+    </aside>
+  </main>
+
+  <footer>camio · a Cyber Sec tool · Sentinel Blue · [ok] ready when you are.</footer>
+</div>
+
+<script>
+/* Background animations ported 1:1 from cybersec.org.za/assets/main.js:
+   an animated sine-wave field (#bg-canvas) and the rotating brand globe. */
+(function () {
+  var reduce = window.matchMedia("(prefers-reduced-motion: reduce)");
+  var globe = document.getElementById("globe-canvas");
+  var gctx = globe && globe.getContext("2d");
+  var bg = document.getElementById("bg-canvas");
+  var bctx = bg && bg.getContext("2d");
+  var W = 0, H = 0, elapsed = 0, last = 0, frame = 0;
+
+  function sizeBg() {
+    if (!bctx) return;
+    var ratio = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth; H = window.innerHeight;
+    bg.width = Math.round(W * ratio); bg.height = Math.round(H * ratio);
+    bctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+  }
+  function drawGlobe() {
+    if (!gctx) return;
+    var r = 15, c = 22;
+    gctx.clearRect(0, 0, 44, 44);
+    gctx.lineWidth = 1; gctx.strokeStyle = "#83bcff";
+    gctx.beginPath(); gctx.arc(c, c, r, 0, Math.PI * 2); gctx.stroke();
+    gctx.strokeStyle = "rgba(131,188,255,.57)"; gctx.beginPath();
+    for (var ring = 0; ring < 3; ring++) {
+      var a = elapsed / 3900 + ring * Math.PI / 3;
+      var rad = Math.max(.2, Math.abs(Math.cos(a)) * r);
+      gctx.moveTo(c + rad, c); gctx.ellipse(c, c, rad, r, 0, 0, Math.PI * 2);
+    }
+    for (var ln = -1; ln <= 1; ln++) {
+      var y = ln * 7, span = Math.sqrt(r * r - y * y);
+      gctx.moveTo(c - span, c + y); gctx.quadraticCurveTo(c, c + y + 4, c + span, c + y);
+    }
+    gctx.stroke();
+  }
+  function drawWaves() {
+    if (!bctx) return;
+    bctx.clearRect(0, 0, W, H);
+    for (var line = 0; line < 4; line++) {
+      bctx.beginPath();
+      for (var x = 0; x <= W + 6; x += 6) {
+        var y = H * (.22 + line * .16) + Math.sin(x * .005 + elapsed * .0004 + line * .8) * (18 + line * 9);
+        x === 0 ? bctx.moveTo(x, y) : bctx.lineTo(x, y);
+      }
+      bctx.strokeStyle = "rgba(103,174,255," + (.12 - line * .018) + ")";
+      bctx.lineWidth = 1; bctx.stroke();
+    }
+  }
+  function loop(now) {
+    var d = last ? now - last : 34;
+    if (d >= 30) { elapsed += Math.min(d, 50); last = now; drawGlobe(); drawWaves(); }
+    frame = requestAnimationFrame(loop);
+  }
+  function start() {
+    cancelAnimationFrame(frame); frame = 0; last = 0;
+    sizeBg(); drawGlobe();
+    if (!reduce.matches && !document.hidden) frame = requestAnimationFrame(loop);
+    else drawWaves();
+  }
+  window.addEventListener("resize", start);
+  document.addEventListener("visibilitychange", start);
+  if (reduce.addEventListener) reduce.addEventListener("change", start);
+  start();
+})();
+</script>
+</body>
+</html>

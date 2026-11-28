@@ -15,3 +15,6 @@ tokio.workspace = true
 futures-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# zlib/DEFLATE decode for the pure-Rust PNG CAPTCHA backend (captcha_ocr). Same
+# crate camio-store already pulls into the workspace, so no new transitive tree.
+flate2.workspace = true

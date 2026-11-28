@@ -43,6 +43,20 @@ pub enum RequiredMetadata<'a> {
 }
 
 impl Query {
+    /// The always-matching query: everything the store holds.
+    ///
+    /// The compiled equivalent of `compile("")` — but built directly, so a
+    /// caller that wants "no filter" has no `Result` to handle at all. The
+    /// parsing path is reserved for strings a human typed, where every failure
+    /// mode is real.
+    pub fn all() -> Query {
+        Query {
+            root: Node::True,
+            source: String::new(),
+            needs_body: false,
+        }
+    }
+
     /// Parse and compile a CamioQL string.
     pub fn compile(input: &str) -> Result<Query, ParseError> {
         let expr = parse(input)?;

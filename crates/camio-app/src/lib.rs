@@ -97,16 +97,47 @@ impl TaskStoreSink {
             updated_at_ms: rec.updated_at_ms,
         };
         if let Some(lock) = self.store.as_ref() {
-            if let Ok(store) = lock.lock() {
-                let _ = store.save_task(&row);
+            // Recover from poisoning: a poisoned handle still holds the rows,
+            // and refusing to use it here would drop every later task record.
+            let Ok(store) = lock.lock() else {
+                eprintln!("camio: task store lock poisoned; reopening the store");
+                // The mutex is poisoned (a panic happened while it was held):
+                // recover by reopening rather than dropping the task record.
+                match Store::open(&self.db) {
+                    Ok(store) => {
+                        if let Err(e) = store.save_task(&row) {
+                            eprintln!("camio: task record {} was not saved: {e}", row.id);
+                        }
+                    }
+                    Err(e) => eprintln!(
+                        "camio: could not reopen {} to save task record {}: {e}",
+                        self.db.display(),
+                        row.id
+                    ),
+                }
                 return;
+            };
+            if let Err(e) = store.save_task(&row) {
+                eprintln!("camio: task record {} was not saved: {e}", row.id);
             }
+            return;
         }
         // No usable handle (open failed at startup, or the mutex is poisoned):
-        // retry once by opening, then give up quietly — the task itself and
-        // its in-memory record are unaffected.
-        if let Ok(store) = Store::open(&self.db) {
-            let _ = store.save_task(&row);
+        // retry once by opening, then say so — the task itself and its
+        // in-memory record are unaffected either way.
+        match Store::open(&self.db) {
+            Ok(store) => {
+                if let Err(e) = store.save_task(&row) {
+                    eprintln!("camio: task record {} was not saved: {e}", row.id);
+                }
+            }
+            // A store that will not open means every later task record is lost,
+            // which is worth one line on the console.
+            Err(e) => eprintln!(
+                "camio: could not reopen {} to save task record {}: {e}",
+                self.db.display(),
+                row.id
+            ),
         }
     }
 }
@@ -132,7 +163,9 @@ enum Surface {
     Discover,
     Fuzz,
     Scan,
+    Recon,
     Findings,
+    Report,
     Convert,
     Comparer,
     Jwt,
@@ -143,6 +176,7 @@ enum Surface {
     Import,
     Fingerprint,
     ActiveScan,
+    Autopilot,
     AnalyzeJs,
     Ai,
     Proxy,
@@ -207,6 +241,14 @@ enum Output {
     Error(String),
 }
 
+/// Pretty-print a value for display, showing the failure instead of an empty
+/// string. `unwrap_or_default()` here would render as "the tool produced
+/// nothing" in a pane the user is expected to read — and, for editable drafts,
+/// an empty string is a value they can then save.
+pub(crate) fn pretty_json<T: serde::Serialize>(value: &T) -> String {
+    serde_json::to_string_pretty(value).unwrap_or_else(|e| format!("could not render: {e}"))
+}
+
 struct CamioApp {
     cfg: AppConfig,
     engine: Box<dyn RequestEngine>,
@@ -263,6 +305,10 @@ struct CamioApp {
     // analyze-js / active-scan
     js_blob: String,
     active_save: bool,
+    // autopilot
+    ap_fuzz: bool,
+    // report export (0=md, 1=json, 2=html, 3=sarif)
+    report_fmt: usize,
     // nuclei (external) runner, as a tracked background task
     nuclei_url: String,
     // background-task runtime (F03): long ops run here with progress + cancel
@@ -312,6 +358,8 @@ impl CamioApp {
         };
         let plugins_dir = "plugins".to_string();
         let plugins = plugins::discover(std::path::Path::new(&plugins_dir));
+        // CAMIO_THEME unset means "use the built-in theme".
+        // audit-allow: B4
         // Optional deep-link / theme override via env (also handy for scripting).
         let theme = {
             let mut t = theme::load();
@@ -377,6 +425,8 @@ impl CamioApp {
             ai_pending: None,
             js_blob: String::new(),
             active_save: true,
+            ap_fuzz: false,
+            report_fmt: 0,
             nuclei_url: String::new(),
             // Background tasks are durable (plan §4.2): their records mirror
             // into the workspace store and interrupted runs are reconciled at
@@ -689,7 +739,9 @@ impl CamioApp {
                     }
                     Ok((text, stored > 0))
                 })();
-                let _ = tx.send(result);
+                // The view is gone (window closed, another run started), so
+                // there is no receiver to answer to.
+                camio_core::expected(tx.send(result));
                 ctx.request_repaint();
             });
         match thread {
@@ -834,6 +886,7 @@ impl CamioApp {
                 });
             let mut store = self.open()?;
             let mut results = Vec::new();
+            let mut unstored = 0usize;
             for g in &generated {
                 if !self
                     .cfg
@@ -843,10 +896,34 @@ impl CamioApp {
                 {
                     continue;
                 }
-                if let Ok(ex) = self.engine.send(g.request.clone(), Source::Automate) {
-                    let _ = store.insert(&ex);
-                    results.push((g.payloads.clone(), ex));
+                match self.engine.send(g.request.clone(), Source::Automate) {
+                    Ok(ex) => {
+                        if store.insert(&ex).is_err() {
+                            // Count, don't drop silently: a campaign that sent a
+                            // request but never recorded it is invisible to
+                            // every later query — and one line per request would
+                            // flood the terminal for a large campaign.
+                            unstored += 1;
+                        }
+                        results.push((g.payloads.clone(), ex));
+                    }
+                    Err(e) => {
+                        // A skipped request makes one fewer row in the
+                        // comparison table; say why instead of showing a
+                        // silently shorter campaign.
+                        eprintln!(
+                            "camio: campaign request to {} was not sent: {e}",
+                            g.request.url
+                        );
+                    }
                 }
+            }
+            if unstored > 0 {
+                eprintln!(
+                    "camio: {unstored} of {} campaign exchanges could not be stored; \
+                     they will not appear in history",
+                    results.len()
+                );
             }
             Ok::<_, String>(camio_automate::classify(&results, baseline.as_ref(), None))
         })();
@@ -1051,12 +1128,18 @@ impl CamioApp {
                         Surface::History | Surface::Query => self.history_ui(ui),
                         Surface::Inventory => self.inventory_ui(ui),
                         Surface::Scan => self.scan_ui(ui),
+                        Surface::Recon => self.attack_surface_ui(ui),
                         Surface::Findings => self.findings_ui(ui),
+                        Surface::Report => self.report_ui(ui),
                         Surface::Integrations => self.integrations_ui(ui),
                         Surface::Tasks => self.tasks_ui(ui),
                         Surface::Library => self.library_ui(ui),
                         Surface::Settings => self.settings_surface(ui),
-                        _ => unreachable!(),
+                        // The remaining surfaces are rendered by the second
+                        // match below; the two matches split the enum, so this
+                        // arm cannot be exhaustive. Rendering nothing beats
+                        // panicking the UI if the split ever drifts.
+                        _ => {}
                     }
                     self.workbench_notice(ui);
                 });
@@ -1203,12 +1286,15 @@ impl CamioApp {
                 }
             }
             Surface::ActiveScan => self.active_scan_surface(ui),
+            Surface::Autopilot => self.autopilot_surface(ui),
             Surface::AnalyzeJs => self.analyze_js_surface(ui),
             Surface::Ai => self.ai_surface(ui),
             Surface::Proxy => self.proxy_surface(ui),
             Surface::Browser => self.browser_surface(ui),
             Surface::Plugins => self.plugins_surface(ui),
-            _ => unreachable!(),
+            // `Status` is handled by the scroll-area path above; a new variant
+            // should render nothing rather than panic the UI thread.
+            _ => {}
         }
 
         ui.add_space(10.0);
@@ -1515,21 +1601,32 @@ impl CamioApp {
                 // with visible state, and stopping it is its cancellation.
                 let db = self.cfg.db.clone();
                 let now = camio_core::approval::now_ms();
-                if let Ok(store) = Store::open(&db) {
-                    let row = camio_store::TaskRow {
-                        id: 9_000_001,
-                        kind: "proxy".into(),
-                        state: camio_core::TaskState::Running,
-                        progress_done: 0,
-                        progress_total: None,
-                        message: format!("listening on {local_addr}"),
-                        result: None,
-                        error: None,
-                        outcome: None,
-                        created_at_ms: now,
-                        updated_at_ms: now,
-                    };
-                    let _ = store.save_task(&row);
+                match Store::open(&db) {
+                    Ok(store) => {
+                        let row = camio_store::TaskRow {
+                            id: 9_000_001,
+                            kind: "proxy".into(),
+                            state: camio_core::TaskState::Running,
+                            progress_done: 0,
+                            progress_total: None,
+                            message: format!("listening on {local_addr}"),
+                            result: None,
+                            error: None,
+                            outcome: None,
+                            created_at_ms: now,
+                            updated_at_ms: now,
+                        };
+                        if let Err(e) = store.save_task(&row) {
+                            // The proxy runs either way; the durable record lags.
+                            self.proxy_status =
+                                format!("Proxy is running, but its task record was not saved: {e}");
+                        }
+                    }
+                    Err(e) => {
+                        self.proxy_status = format!(
+                            "Proxy is running, but its task record could not be written: {e}"
+                        );
+                    }
                 }
                 self.proxy_task = Some(9_000_001);
             }
@@ -1549,7 +1646,7 @@ impl CamioApp {
         if let Some(id) = self.proxy_task.take() {
             let db = self.cfg.db.clone();
             if let Ok(store) = Store::open(&db) {
-                let _ = store.save_task(&camio_store::TaskRow {
+                let row = camio_store::TaskRow {
                     id,
                     kind: "proxy".into(),
                     state: camio_core::TaskState::Completed,
@@ -1561,7 +1658,14 @@ impl CamioApp {
                     outcome: Some("success".into()),
                     created_at_ms: 0,
                     updated_at_ms: 0,
-                });
+                };
+                if let Err(e) = store.save_task(&row) {
+                    // The proxy is stopped regardless; only the durable record
+                    // lags, so say so rather than leaving the old `running`
+                    // row in the tasks view.
+                    self.proxy_status =
+                        format!("Proxy stopped, but its task record was not saved: {e}");
+                }
             }
         }
     }
@@ -1591,7 +1695,7 @@ impl CamioApp {
         ui.add_space(8.0);
         let spec = FingerprintSpec::from_profile(&self.cfg.profile);
         if ui.button("Copy as JSON to output").clicked() {
-            self.out = Output::Text(serde_json::to_string_pretty(&spec).unwrap_or_default());
+            self.out = Output::Text(pretty_json(&spec));
         }
         ui.add_space(6.0);
         egui::Grid::new("fp")
@@ -1732,7 +1836,9 @@ impl CamioApp {
             }
             if ui.add_enabled(!busy, egui::Button::new("Explain latest exchange")).clicked() {
                 match self.open().and_then(|s| s.recent(1).map_err(|e| e.to_string())) {
-                    Ok(v) if !v.is_empty() => self.start_ai(camio_ai::explain_exchange(&v[0])),
+                    Ok(v) if !v.is_empty() => {
+                        self.start_ai(camio_ai::explain_exchange(&v[0]))
+                    }
                     Ok(_) => self.out = Output::Error("no exchanges in history yet".into()),
                     Err(e) => self.out = Output::Error(e),
                 }
@@ -1785,7 +1891,9 @@ impl CamioApp {
             let result = AiClient::new(cfg)
                 .map_err(|e| e.to_string())
                 .and_then(|c| c.chat(&messages).map_err(|e| e.to_string()));
-            let _ = tx.send(result);
+            // The AI pane moved on before the reply arrived (new question, or
+            // the surface changed), so there is no receiver to answer to.
+            camio_core::expected(tx.send(result));
         });
         self.ai_pending = Some(rx);
         self.out = Output::Text("Thinking…".to_string());
@@ -1831,6 +1939,10 @@ impl CamioApp {
             let engine = self.engine.as_ref();
             let scope = &self.cfg.scope;
             let findings = {
+                // A `Cell` counter: `send` is handed to the scanner as a shared
+                // reference, so the closure must be `Fn` and cannot mutate
+                // captured locals directly.
+                let unstored = std::cell::Cell::new(0usize);
                 let send = |req: HttpRequest| -> Option<HttpExchange> {
                     if !scope
                         .decide(&HttpExchange::new(req.clone(), Source::Scanner))
@@ -1838,19 +1950,51 @@ impl CamioApp {
                     {
                         return None; // never send out of scope (plan §16)
                     }
+                    // The URL for the failure log: `engine::send` takes the
+                    // request by value, so it is captured before the move.
+                    let target = req.url.clone();
                     match engine.send(req, Source::Scanner) {
-                        Ok(ex) => {
-                            let _ = store.borrow_mut().insert(&ex);
+                        Ok(mut ex) => {
+                            // Adopt the stored row id so findings link to evidence.
+                            match store.borrow_mut().insert(&ex) {
+                                Ok(id) => ex.id = id,
+                                Err(_) => unstored.set(unstored.get() + 1),
+                            }
                             Some(ex)
                         }
-                        Err(_) => None,
+                        Err(e) => {
+                            // Every skipped request is one fewer probe against
+                            // the target; the finding list is silently weaker
+                            // without this line.
+                            eprintln!("camio: active-scan probe to {target} was not sent: {e}");
+                            None
+                        }
                     }
                 };
-                camio_active::run_active(&base, &send)
+                let findings = camio_active::run_active(&base, &send);
+                let dropped = unstored.get();
+                if dropped > 0 {
+                    eprintln!(
+                        "camio: {dropped} scanned exchanges could not be stored; \
+                         they will not appear in history"
+                    );
+                }
+                findings
             };
             if self.active_save {
+                let mut unsaved = 0usize;
                 for f in &findings {
-                    let _ = store.borrow_mut().insert_finding(f);
+                    if store.borrow_mut().insert_finding(f).is_err() {
+                        unsaved += 1;
+                    }
+                }
+                if unsaved > 0 {
+                    // The worst case of silent loss: a confirmed finding that
+                    // the operator believes is saved but is not in the store.
+                    eprintln!(
+                        "camio: {unsaved} of {} findings could not be saved",
+                        findings.len()
+                    );
                 }
             }
             Ok::<_, String>(findings)
@@ -1872,6 +2016,180 @@ impl CamioApp {
                     })
                     .collect(),
             },
+            Err(e) => Output::Error(e),
+        };
+    }
+
+    fn autopilot_surface(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Autopilot");
+        ui.colored_label(
+            egui::Color32::from_rgb(210, 153, 34),
+            "One-shot recon + active sweep: fingerprints the stack, runs every active check (incl. the HTTP method audit), optionally fuzzes the suggested payload categories, and buckets responses by status. SENDS probes — in-scope + confirm required; launch with --allow-active.",
+        );
+        self.request_builder(ui);
+        ui.checkbox(&mut self.ap_fuzz, "fuzz the stack-suggested payload categories");
+        ui.checkbox(&mut self.confirm, "confirm (run the sweep)");
+        ui.checkbox(&mut self.active_save, "save findings");
+        if ui.button("Run autopilot").clicked() {
+            self.run_autopilot();
+        }
+    }
+
+    fn run_autopilot(&mut self) {
+        let res = (|| {
+            let base = self.built_request()?;
+            let decision = self
+                .cfg
+                .scope
+                .decide(&HttpExchange::new(base.clone(), Source::Scanner));
+            match self.cfg.policy.gate_action_with(
+                ActionClass::Active,
+                &self.cfg.scope,
+                decision,
+                self.confirm,
+            ) {
+                PolicyOutcome::Deny(r) => return Err(format!("refused: {r}")),
+                PolicyOutcome::NeedsConfirmation(r) => {
+                    return Err(format!(
+                        "{r}. Tick 'confirm' to run (scope {}).",
+                        decision.as_str()
+                    ))
+                }
+                PolicyOutcome::Allow => {}
+            }
+            let store = std::cell::RefCell::new(self.open()?);
+            let engine = self.engine.as_ref();
+            let scope = &self.cfg.scope;
+            let statuses = std::cell::RefCell::new(Vec::<Option<u16>>::new());
+            let send = |req: HttpRequest| -> Option<HttpExchange> {
+                if !scope
+                    .decide(&HttpExchange::new(req.clone(), Source::Scanner))
+                    .is_sendable()
+                {
+                    return None;
+                }
+                match engine.send(req, Source::Scanner) {
+                    Ok(mut ex) => {
+                        statuses
+                            .borrow_mut()
+                            .push(ex.response.as_ref().map(|r| r.status));
+                        // Adopt the stored row id so findings link to evidence.
+                        if let Ok(id) = store.borrow_mut().insert(&ex) {
+                            ex.id = id;
+                        }
+                        Some(ex)
+                    }
+                    Err(e) => {
+                        eprintln!("camio: autopilot probe failed: {e}");
+                        None
+                    }
+                }
+            };
+
+            let baseline_ex = send(base.clone());
+            let surface = baseline_ex.as_ref().map(camio_scan::analyze_attack_surface);
+            let findings = camio_active::run_active(&base, &send);
+
+            let fuzz = if self.ap_fuzz {
+                let baseline = baseline_ex
+                    .as_ref()
+                    .and_then(|ex| ex.response.as_ref())
+                    .map(|r| camio_automate::Baseline {
+                        status: r.status,
+                        body_len: r.body.len(),
+                    });
+                let db = camio_automate::load_payload_db();
+                let cats: Vec<camio_active::FuzzCategory> = surface
+                    .as_ref()
+                    .map(|s| {
+                        s.suggested_payload_categories
+                            .iter()
+                            .filter_map(|c| {
+                                db.categories.get(c).map(|set| camio_active::FuzzCategory {
+                                    name: c.clone(),
+                                    set,
+                                })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if cats.is_empty() {
+                    None
+                } else {
+                    Some(camio_active::run_auto_fuzz(
+                        &base, &cats, 200, baseline.as_ref(), None, &send,
+                    ))
+                }
+            } else {
+                None
+            };
+
+            if self.active_save {
+                for f in &findings {
+                    let _ = store.borrow_mut().insert_finding(f);
+                }
+            }
+
+            let summary =
+                camio_automate::StatusSummary::from_statuses(statuses.borrow().iter().copied());
+            let stack = surface
+                .as_ref()
+                .map(|s| {
+                    if s.technologies.is_empty() {
+                        "(none fingerprinted)".to_string()
+                    } else {
+                        s.technologies
+                            .iter()
+                            .map(|t| match &t.version {
+                                Some(v) => format!("{} {v}", t.name),
+                                None => t.name.clone(),
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    }
+                })
+                .unwrap_or_else(|| "(baseline refused)".to_string());
+
+            let mut rows: Vec<Vec<String>> = findings
+                .iter()
+                .map(|f| {
+                    vec![
+                        "finding".into(),
+                        format!("{:?}", f.severity).to_lowercase(),
+                        f.rule.clone().unwrap_or_default(),
+                        f.title.clone(),
+                    ]
+                })
+                .collect();
+            if let Some(fz) = &fuzz {
+                for r in &fz.results {
+                    rows.push(vec![
+                        format!("fuzz:{}", r.category),
+                        r.result.status.map(|s| s.to_string()).unwrap_or_default(),
+                        r.input_name.clone(),
+                        format!("{} [{}]", r.payload, r.result.flags.join(",")),
+                    ]);
+                }
+            }
+            Ok::<_, String>((stack, summary, rows))
+        })();
+        self.out = match res {
+            Ok((stack, summary, rows)) => {
+                let header = format!("stack: {stack}  ·  responses: {}", summary.oneline());
+                if rows.is_empty() {
+                    Output::Text(format!("{header}\n\nno findings or flagged fuzz hits"))
+                } else {
+                    Output::Table {
+                        cols: vec![
+                            format!("Source ({header})"),
+                            "Status/Sev".into(),
+                            "Rule/Input".into(),
+                            "Title/Payload".into(),
+                        ],
+                        rows,
+                    }
+                }
+            }
             Err(e) => Output::Error(e),
         };
     }
@@ -1957,12 +2275,11 @@ impl CamioApp {
             )
             .map_err(|e| e.to_string())?;
             let findings = camio_integrations::nuclei_to_findings(&raw);
-            let n = findings.len();
             let mut store = Store::open(&db).map_err(|e| e.to_string())?;
-            store
+            let n = store
                 .insert_findings(&findings)
                 .map_err(|e| e.to_string())?;
-            Ok(format!("{n} finding(s) saved to {}", db.display()))
+            Ok(format!("{n} new finding(s) saved to {}", db.display()))
         });
         self.out = Output::Text(format!(
             "Started Nuclei as task #{} — see the Tasks surface for progress.",
@@ -2032,6 +2349,9 @@ impl CamioApp {
                 ui.add_space(4.0);
                 ui.monospace(format!("$ {}", p.command_display()));
                 ui.weak(&p.manifest.description);
+                // Show declared permissions so the operator reviews them before
+                // running untrusted code (plan §F20).
+                ui.weak(format!("permissions — {}", p.permission_summary()));
             }
         }
         ui.add_space(6.0);
@@ -2277,7 +2597,11 @@ fn truncate(s: &str, max: usize) -> String {
     } else {
         let t: String = s.chars().take(max.saturating_sub(1)).collect();
         format!("{t}…")
+        // XDG_CONFIG_HOME unset is the common case, not an error.
+        // audit-allow: B4
     }
+    // HOME unset is the common case, not an error.
+    // audit-allow: B4
 }
 
 /// Default directory for the proxy CA (matches the CLI's `camio proxy`).
@@ -2292,6 +2616,9 @@ fn default_proxy_ca_dir() -> PathBuf {
 }
 
 impl eframe::App for CamioApp {
+    // `frame` is part of eframe's `App::update` signature; this app does not
+    // use it, and `_frame` is how Rust says so.
+    // audit-allow: B13
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.theme.apply(ctx);
         self.sync_bg(ctx);
@@ -2413,6 +2740,9 @@ fn surface_from_name(s: &str) -> Option<Surface> {
         "payloads" => Surface::Payloads,
         "import" => Surface::Import,
         "activescan" | "active" => Surface::ActiveScan,
+        "attacksurface" | "surface" => Surface::Recon,
+        "report" => Surface::Report,
+        "autopilot" => Surface::Autopilot,
         "analyzejs" | "js" => Surface::AnalyzeJs,
         "ai" => Surface::Ai,
         "proxy" => Surface::Proxy,
@@ -2424,6 +2754,8 @@ fn surface_from_name(s: &str) -> Option<Surface> {
 }
 
 /// A copy of `req` with every §…§ marker removed (the baseline request).
+// a non-UTF-8 body is skipped on purpose: it is not editable as text.
+// audit-allow: B4
 fn strip_clean(req: &HttpRequest) -> HttpRequest {
     let m = camio_automate::DEFAULT_MARKER;
     let mut out = req.clone();

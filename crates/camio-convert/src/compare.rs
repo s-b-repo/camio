@@ -15,7 +15,6 @@
 //! its input — bytes and lines are compared exactly as given.
 
 use serde::{Deserialize, Serialize};
-use std::fmt::Write as _;
 
 // ---------------------------------------------------------------------------
 // Byte diff
@@ -240,15 +239,18 @@ pub fn unified_diff(a: &str, b: &str, context: usize) -> String {
             false,
         );
 
-        // Header. `write!` to a String cannot fail; ignore the Result.
-        let _ = writeln!(out, "@@ -{a_start},{a_count} +{b_start},{b_count} @@");
+        // Header. Appending to a String cannot fail, so use `push_str` rather
+        // than a `writeln!` whose Result has to be discarded.
+        out.push_str(&format!(
+            "@@ -{a_start},{a_count} +{b_start},{b_count} @@\n"
+        ));
         for e in slice {
             let prefix = match e.op {
                 LineOp::Equal => ' ',
                 LineOp::Delete => '-',
                 LineOp::Insert => '+',
             };
-            let _ = writeln!(out, "{prefix}{}", e.line);
+            out.push_str(&format!("{prefix}{}\n", e.line));
         }
     }
     out

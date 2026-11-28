@@ -205,6 +205,7 @@ pub(super) fn dispatch(cfg: &WebConfig, path: &str, args: &Value) -> Option<Resu
                     "workspace": store.workspace()?,
                     "exchanges": recent.exchanges,
                     "tasks": store.review_tasks()?.into_iter().take(3).collect::<Vec<_>>(),
+                    "severity_counts": store.findings_severity_counts()?,
                 })
             }
             "/api/workspace/rename" => {
@@ -373,7 +374,7 @@ pub(super) fn dispatch(cfg: &WebConfig, path: &str, args: &Value) -> Option<Resu
             }
             "/api/artifacts" => {
                 let records = store()?.artifacts(Cursor::deserialize(args)?.before)?;
-                json!({ "artifacts": records, "next_before": (records.len() == 50).then(|| records[49].id) })
+                json!({ "artifacts": records, "next_before": (records.len() == 50).then(|| records.get(49).map(|r| r.id)) })
             }
             "/api/artifacts/observations" => {
                 let args = Artifact::deserialize(args)?;

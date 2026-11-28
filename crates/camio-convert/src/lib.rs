@@ -22,5 +22,7 @@ pub mod convert;
 
 pub use compare::{diff_bytes, diff_lines, unified_diff, ByteDiff, LineChange, LineOp};
 pub use convert::{
-    apply_pipeline, apply_pipeline_limited, decode_jwt, ConvertError, JwtParts, Transform,
+    analyze_jwt, apply_pipeline, apply_pipeline_limited, decode_jwt, favicon_hash,
+    favicon_hash_base64, ConvertError, JwtAnalysis, JwtIssue, JwtParts, JwtSeverity, Transform,
+    COMMON_JWT_SECRETS,
 };

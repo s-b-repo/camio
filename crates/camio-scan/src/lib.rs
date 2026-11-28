@@ -35,8 +35,11 @@
 use camio_core::{Finding, HttpExchange, Severity};
 use serde::{Deserialize, Serialize};
 
+pub mod attack_surface;
 mod checks;
 mod review;
+
+pub use attack_surface::{analyze as analyze_attack_surface, AttackSurface};
 
 pub use camio_store::MAX_REVIEW_EXCHANGES;
 pub use review::{
@@ -45,10 +48,13 @@ pub use review::{
 };
 
 pub use checks::{
-    BasicAuthOverHttp, CorsMisconfig, DirectoryListing, ExposedApiDocs, GraphqlIntrospection,
-    InputEcho, InsecureCookies, JsEndpoints, JsSecretsLeak, MissingSecurityHeaders, MixedContent,
-    ReflectedInput, SensitiveDataInUrl, SensitiveJsonFields, SensitivePathExposure,
-    ServerBannerDisclosure, SourceMapExposed, VerboseError,
+    detect_captcha_in_html, detect_pow_in_response, detect_takeover, detect_tech, detect_waf,
+    BasicAuthOverHttp, CaptchaKind, CaptchaPresence, CorsMisconfig, DirectoryListing, DomXssSinks,
+    ExposedApiDocs, GraphqlIntrospection, InputEcho, InsecureCookies, JsEndpoints, JsSecretsLeak,
+    MissingSecurityHeaders, MixedContent, PowChallengePresence, PowSystem, ReflectedInput,
+    DetectedTech, SensitiveDataInUrl, SensitiveJsonFields, SensitivePathExposure,
+    ServerBannerDisclosure, SourceMapExposed, SubdomainTakeover, TechDb, TechFingerprint,
+    VerboseError, WafDetection, WeakCsp,
 };
 
 /// A single passive security check.
@@ -85,6 +91,10 @@ pub fn default_checks() -> Vec<Box<dyn PassiveCheck>> {
         Box::new(InsecureCookies),
         Box::new(ServerBannerDisclosure),
         Box::new(DirectoryListing),
+        Box::new(DomXssSinks),
+        // Reports a CSP that is present but weak (unsafe-inline/eval, wildcards),
+        // complementing MissingSecurityHeaders' "no CSP at all" (plan §8).
+        Box::new(WeakCsp),
         Box::new(VerboseError),
         Box::new(ReflectedInput),
         Box::new(CorsMisconfig),
@@ -99,6 +109,20 @@ pub fn default_checks() -> Vec<Box<dyn PassiveCheck>> {
         Box::new(SourceMapExposed),
         Box::new(SensitiveJsonFields),
         Box::new(SensitivePathExposure),
+        // Attack-surface context: which CAPTCHA wall (if any) guards this page.
+        // Needed by automation so the operator can route around or opt into a
+        // solver before replay (plan §8 Scan & crawl, discovery row).
+        Box::new(CaptchaPresence),
+        // Proof-of-work anti-bot walls (Anubis / mCaptcha / hashcash). Like the
+        // CAPTCHA check, this is discovery context — but a PoW wall is solvable
+        // locally (camio-automate::pow), so the operator can automate past it.
+        Box::new(PowChallengePresence),
+        // Recon context from other frameworks: WAF/CDN edge (wafw00f), the tech
+        // stack (Wappalyzer/httpx), and dangling-resource takeover candidates
+        // (subjack / can-i-take-over-xyz). All passive, read from the response.
+        Box::new(WafDetection),
+        Box::new(TechFingerprint),
+        Box::new(SubdomainTakeover),
         // Combined-payload-catalog passive signal: match any captured response
         // body against short distinctive substrings from the Camio payload DB
         // (`payloads/DB/base/*.txt`). Passive — generates no traffic — so it
@@ -242,9 +266,15 @@ pub fn scan_all_with_profile(exchanges: &[HttpExchange], profile: &ScanProfile) 
     for ex in exchanges {
         let host = ex.request.host().unwrap_or_default();
         for check in &checks {
-            for finding in check.check(ex) {
+            for mut finding in check.check(ex) {
                 if finding.severity < profile.min_severity {
                     continue;
+                }
+                // Tag each finding with its producing check's id (its report/
+                // SARIF ruleId + cross-run dedup key), unless the check already
+                // set a more specific one.
+                if finding.rule.is_none() {
+                    finding.rule = Some(check.id().to_string());
                 }
                 upsert(&mut agg, &host, finding);
             }
@@ -321,11 +351,11 @@ mod tests {
     #[test]
     fn default_checks_have_unique_ids() {
         let checks = default_checks();
-        assert_eq!(checks.len(), 18);
+        assert_eq!(checks.len(), 25);
         let mut ids: Vec<&str> = checks.iter().map(|c| c.id()).collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 18, "check ids must be unique");
+        assert_eq!(ids.len(), 25, "check ids must be unique");
     }
 
     #[test]
@@ -364,6 +394,23 @@ mod tests {
     }
 
     #[test]
+    fn scan_all_tags_findings_with_their_check_id() {
+        // Every finding must carry the id of the check that produced it (its
+        // report/SARIF ruleId + cross-run dedup key).
+        let a = html_exchange(1, "https://shop.test/a", &[]);
+        let report = scan_all(&[a]);
+        assert!(!report.findings.is_empty());
+        for f in &report.findings {
+            let rule = f.rule.as_deref().expect("every finding carries a rule");
+            assert!(
+                rule.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'),
+                "rule `{rule}` must be a kebab-case check id"
+            );
+        }
+    }
+
+    #[test]
     fn scan_all_dedups_same_title_and_host_and_unions_evidence() {
         // Two pages on the SAME host, both missing CSP.
         let a = html_exchange(1, "https://shop.test/a", &[]);
@@ -382,7 +429,7 @@ mod tests {
         );
         assert_eq!(csp[0].evidence, vec![ExchangeId(1), ExchangeId(2)]);
         assert_eq!(report.exchanges_scanned, 2);
-        assert_eq!(report.checks_run, 18);
+        assert_eq!(report.checks_run, 25);
     }
 
     #[test]
@@ -431,7 +478,7 @@ mod tests {
         let report = scan_all(&[]);
         assert!(report.findings.is_empty());
         assert_eq!(report.exchanges_scanned, 0);
-        assert_eq!(report.checks_run, 18);
+        assert_eq!(report.checks_run, 25);
     }
 
     #[test]

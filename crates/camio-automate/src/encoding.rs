@@ -507,6 +507,58 @@ pub fn to_payload_set(name: &str, expanded: &[EncodedPayload]) -> PayloadSet {
 }
 
 // ---------------------------------------------------------------------------
+// Mutation chains (sequential / composed encodings for WAF evasion)
+// ---------------------------------------------------------------------------
+
+/// Apply a *chain* of encodings to `payload`, folding left-to-right: start with
+/// `payload`, apply `chain[0]`, then `chain[1]` to that result, and so on.
+///
+/// Unlike [`expand_with_encodings`] — which treats each encoding as an
+/// independent *alternative* representation — a chain **composes** encodings,
+/// so each transform feeds the next. For example `[UrlEncoded, UrlEncoded]`
+/// double-url-encodes (a space `" "` → `"%20"` → `"%2520"`), the shape that
+/// defeats a WAF that URL-decodes exactly once before matching.
+///
+/// An empty chain returns `payload` unchanged (the identity fold).
+pub fn apply_encoding_chain(payload: &str, chain: &[Encoding]) -> String {
+    chain
+        .iter()
+        .fold(payload.to_string(), |acc, enc| enc.apply(&acc))
+}
+
+/// Parse a `>`-separated chain spec (e.g. `"url>url>b64"`) into an ordered list
+/// of [`Encoding`]s, left-to-right in application order.
+///
+/// Each token is trimmed and resolved through [`Encoding::from_name`]
+/// (case-insensitive). The first unresolved token yields
+/// `Err("unknown encoding `<tok>`")`. An empty or whitespace-only spec is an
+/// error too (a chain must name at least one encoding).
+pub fn parse_encoding_chain(spec: &str) -> Result<Vec<Encoding>, String> {
+    if spec.trim().is_empty() {
+        return Err("empty encoding chain".to_string());
+    }
+    let mut chain = Vec::new();
+    for tok in spec.split('>') {
+        let name = tok.trim();
+        match Encoding::from_name(name) {
+            Some(enc) => chain.push(enc),
+            None => return Err(format!("unknown encoding `{name}`")),
+        }
+    }
+    Ok(chain)
+}
+
+/// Apply a composed encoding `chain` to every payload in `set`, preserving the
+/// set's order. The chain is folded onto each payload independently (see
+/// [`apply_encoding_chain`]).
+pub fn chain_payload_set(set: &PayloadSet, chain: &[Encoding]) -> Vec<String> {
+    set.payloads
+        .iter()
+        .map(|p| apply_encoding_chain(p, chain))
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
 // Encoding helpers
 // ---------------------------------------------------------------------------
 
@@ -1095,6 +1147,73 @@ mod tests {
         let encs = compatible_encodings(InputContext::HttpHeaderValue);
         assert!(encs.contains(&Encoding::Rot13));
         assert!(encs.contains(&Encoding::Base32));
+    }
+
+    #[test]
+    fn encoding_chain_double_url_encodes() {
+        // url>url composes: " " -> "%20" -> "%2520" (defeats a WAF that decodes
+        // exactly once). This is distinct from url applied as an alternative.
+        let chain = [Encoding::UrlEncoded, Encoding::UrlEncoded];
+        assert_eq!(apply_encoding_chain(" ", &chain), "%2520");
+        // A single-element chain is just that one encoding.
+        assert_eq!(
+            apply_encoding_chain("hello", &[Encoding::Base64]),
+            "aGVsbG8="
+        );
+    }
+
+    #[test]
+    fn encoding_chain_empty_is_identity() {
+        assert_eq!(apply_encoding_chain("<script>", &[]), "<script>");
+    }
+
+    #[test]
+    fn encoding_chain_folds_left_to_right() {
+        // url then base64: the base64 is of the url-encoded bytes, not the raw.
+        let chain = [Encoding::UrlEncoded, Encoding::Base64];
+        let expected = Encoding::Base64.apply(&Encoding::UrlEncoded.apply("a b"));
+        assert_eq!(apply_encoding_chain("a b", &chain), expected);
+        // Order matters: the reverse chain generally differs.
+        let rev = [Encoding::Base64, Encoding::UrlEncoded];
+        assert_ne!(
+            apply_encoding_chain("a b", &chain),
+            apply_encoding_chain("a b", &rev)
+        );
+    }
+
+    #[test]
+    fn parse_encoding_chain_parses_and_errors() {
+        assert_eq!(
+            parse_encoding_chain("url>html").unwrap(),
+            vec![Encoding::UrlEncoded, Encoding::HtmlEntity]
+        );
+        // Tokens are trimmed and case-insensitive.
+        assert_eq!(
+            parse_encoding_chain(" URL > URL > b64 ").unwrap(),
+            vec![Encoding::UrlEncoded, Encoding::UrlEncoded, Encoding::Base64]
+        );
+        // Unknown token -> error naming the token.
+        let err = parse_encoding_chain("url>nope").unwrap_err();
+        assert!(err.contains("nope"), "got {err}");
+        // Empty / whitespace spec is an error.
+        assert!(parse_encoding_chain("").is_err());
+        assert!(parse_encoding_chain("   ").is_err());
+    }
+
+    #[test]
+    fn parse_then_apply_round_trips_a_chain() {
+        let chain = parse_encoding_chain("url>url").unwrap();
+        assert_eq!(apply_encoding_chain(" ", &chain), "%2520");
+    }
+
+    #[test]
+    fn chain_payload_set_maps_each_payload() {
+        let s = set("x", &["a b", "c d"]);
+        let out = chain_payload_set(&s, &[Encoding::UrlEncoded, Encoding::UrlEncoded]);
+        assert_eq!(out, vec!["a%2520b".to_string(), "c%2520d".to_string()]);
+        // Empty chain leaves every payload untouched, order preserved.
+        let identity = chain_payload_set(&s, &[]);
+        assert_eq!(identity, vec!["a b".to_string(), "c d".to_string()]);
     }
 }
 

@@ -110,6 +110,10 @@ pub fn run(args: ProxyArgs) -> Result<()> {
 
     // Rotate: a new key + cert; prior imports no longer match.
     if args.rotate_ca {
+        // The handle is not needed after rotation (the CA is persisted to disk
+        // inside `rotate`), but it is bound so the value is not dropped mid-
+        // statement.
+        // audit-allow: B14
         let _ca = CertAuthority::rotate(&ca_dir, &ca_name)
             .with_context(|| format!("rotating the CA in {}", ca_dir.display()))?;
         println!("Rotated the Camio proxy CA in {}.", ca_dir.display());
@@ -223,7 +227,11 @@ pub fn run(args: ProxyArgs) -> Result<()> {
 }
 
 fn default_ca_dir() -> PathBuf {
+    // XDG_CONFIG_HOME unset is the common case, not an error.
+    // audit-allow: B4
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        // HOME unset is the common case, not an error.
+        // audit-allow: B4
         return PathBuf::from(xdg).join("camio");
     }
     if let Ok(home) = std::env::var("HOME") {

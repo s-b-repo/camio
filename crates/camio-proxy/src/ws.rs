@@ -66,13 +66,15 @@ pub const MAX_EDITABLE_PAYLOAD: usize = 1024 * 1024;
 /// caller must then forward those bytes verbatim rather than buffering them, so
 /// non-frame traffic after the upgrade (a probe, garbage) is never stalled.
 pub fn incomplete_frame_len(bytes: &[u8]) -> Option<usize> {
-    if bytes.len() < 2 {
+    // `get` rather than indexing: every byte read reports "not there" instead of
+    // trusting a length check two statements away.
+    let (Some(&b0), Some(&b1)) = (bytes.first(), bytes.get(1)) else {
         return Some(2 - bytes.len());
-    }
-    let opcode = bytes[0] & 0x0f;
-    let rsv = bytes[0] & 0x70;
-    let masked = bytes[1] & 0x80 != 0;
-    let len7 = (bytes[1] & 0x7f) as usize;
+    };
+    let opcode = b0 & 0x0f;
+    let rsv = b0 & 0x70;
+    let masked = b1 & 0x80 != 0;
+    let len7 = (b1 & 0x7f) as usize;
     // A valid frame: reserved bits clear and a known opcode.
     let known_opcode = matches!(opcode, 0x0 | 0x1 | 0x2 | 0x8 | 0x9 | 0xA);
     if rsv != 0 || !known_opcode || (len7 >= 126 && !masked && false) {
@@ -80,19 +82,9 @@ pub fn incomplete_frame_len(bytes: &[u8]) -> Option<usize> {
     }
     let mut need = 2usize;
     let payload_len = match len7 {
-        126 => {
-            if bytes.len() < 4 {
-                return Some(4 - bytes.len());
-            }
-            u16::from_be_bytes([bytes[2], bytes[3]]) as usize
-        }
+        126 => u16::from_be_bytes(<[u8; 2]>::try_from(bytes.get(2..4)?).ok()?) as usize,
         127 => {
-            if bytes.len() < 10 {
-                return Some(10 - bytes.len());
-            }
-            let n = u64::from_be_bytes([
-                bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7], bytes[8], bytes[9],
-            ]);
+            let n = u64::from_be_bytes(<[u8; 8]>::try_from(bytes.get(2..10)?).ok()?);
             if n > MAX_EDITABLE_PAYLOAD as u64 {
                 return None; // not decodable: not ours to hold
             }
@@ -119,8 +111,11 @@ pub fn decode_frames(bytes: &[u8], from_server: bool) -> (Vec<Frame>, usize) {
     let mut out = Vec::new();
     let mut offset = 0usize;
     while offset + 2 <= bytes.len() {
-        let first = bytes[offset];
-        let second = bytes[offset + 1];
+        // `get` keeps the frame reader bounded by the buffer it was handed, so a
+        // partial or hostile frame cannot read past the end.
+        let (Some(&first), Some(&second)) = (bytes.get(offset), bytes.get(offset + 1)) else {
+            break;
+        };
         let fin = first & 0x80 != 0;
         let opcode = first & 0x0f;
         let masked = second & 0x80 != 0;
@@ -128,28 +123,16 @@ pub fn decode_frames(bytes: &[u8], from_server: bool) -> (Vec<Frame>, usize) {
         let mut cursor = offset + 2;
         let payload_len = match len7 {
             126 => {
-                if cursor + 2 > bytes.len() {
-                    break; // partial extended length
-                }
-                let n = u16::from_be_bytes([bytes[cursor], bytes[cursor + 1]]) as usize;
+                let wide = <[u8; 2]>::try_from(bytes.get(cursor..cursor + 2).unwrap_or(&[])).ok();
+                let Some(wide) = wide else { break }; // partial extended length
                 cursor += 2;
-                n
+                u16::from_be_bytes(wide) as usize
             }
             127 => {
-                if cursor + 8 > bytes.len() {
-                    break;
-                }
-                let n = u64::from_be_bytes([
-                    bytes[cursor],
-                    bytes[cursor + 1],
-                    bytes[cursor + 2],
-                    bytes[cursor + 3],
-                    bytes[cursor + 4],
-                    bytes[cursor + 5],
-                    bytes[cursor + 6],
-                    bytes[cursor + 7],
-                ]);
+                let wide = <[u8; 8]>::try_from(bytes.get(cursor..cursor + 8).unwrap_or(&[])).ok();
+                let Some(wide) = wide else { break };
                 cursor += 8;
+                let n = u64::from_be_bytes(wide);
                 if n > MAX_EDITABLE_PAYLOAD as u64 {
                     // Not decryptable/editable: stop decoding rather than
                     // allocating for a hostile frame.
@@ -160,17 +143,10 @@ pub fn decode_frames(bytes: &[u8], from_server: bool) -> (Vec<Frame>, usize) {
             other => other,
         };
         let mask = if masked {
-            if cursor + 4 > bytes.len() {
-                break; // partial mask
-            }
-            let m = [
-                bytes[cursor],
-                bytes[cursor + 1],
-                bytes[cursor + 2],
-                bytes[cursor + 3],
-            ];
+            let quad = <[u8; 4]>::try_from(bytes.get(cursor..cursor + 4).unwrap_or(&[])).ok();
+            let Some(quad) = quad else { break }; // partial mask
             cursor += 4;
-            Some(m)
+            Some(quad)
         } else {
             None
         };
@@ -234,6 +210,9 @@ pub trait FrameEditor: Send + Sync + 'static {
 pub struct PassthroughEditor;
 
 impl FrameEditor for PassthroughEditor {
+    // A pass-through editor: no frame is rewritten, and the parameter is the
+    // trait's.
+    // audit-allow: B13
     fn edit(&self, _frame: &Frame) -> Option<Vec<u8>> {
         None
     }

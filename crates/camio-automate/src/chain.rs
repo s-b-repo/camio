@@ -499,14 +499,16 @@ fn subst(
     let mut out = String::with_capacity(input.len());
     let mut rest = input;
     while let Some(start) = rest.find("${") {
-        out.push_str(&rest[..start]);
-        let after = &rest[start + 2..];
+        // `start` is from `find`, and `start + 2` is the length of the marker,
+        // so both slices are within `rest`; `get` keeps that local.
+        out.push_str(rest.get(..start).unwrap_or(""));
+        let after = rest.get(start + 2..).unwrap_or("");
         let end = after.find('}').ok_or_else(|| {
             ChainError::UnresolvedVariable(format!(
                 "unterminated ${{…}} at position {start} in {input:?}"
             ))
         })?;
-        let name = &after[..end];
+        let name = after.get(..end).unwrap_or("");
         let value = if name == "payload" {
             payload_value
                 .map(|s| s.to_string())

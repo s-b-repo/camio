@@ -55,7 +55,9 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 mod archive;
+mod audit;
 mod bundle;
+mod collection;
 mod evidence;
 mod history;
 mod inventory;
@@ -66,7 +68,9 @@ mod workflow;
 mod workspace;
 
 pub use archive::ReviewArchive;
+pub use audit::{AuditRecord, NewAudit};
 pub use bundle::{ReviewEvidenceBundle, MAX_BUNDLE_BYTES};
+pub use collection::{Collection, CollectionItem, ItemKind};
 pub use evidence::{
     ArtifactFormat, ArtifactImport, ArtifactSummary, Observation, ObservationPage, ARTIFACT_BYTES,
 };
@@ -85,7 +89,27 @@ pub use workspace::{FindingReview, ReviewState, SavedExchange, SavedQuery, Works
 /// in Rust, while the SQL prefilter keeps real result sets far below it.
 const MAX_SCAN_WINDOW: usize = 100_000;
 
-const SCHEMA_VERSION: i64 = 9;
+/// Hard ceiling on how many rows one paged query may return.
+///
+/// `query_exchanges` has no `LIMIT` of its own — it walks the table and keeps
+/// what matches — so an unbounded caller turns one request into a full-table
+/// materialisation, bodies included. Callers pass a user-supplied limit, so
+/// the store refuses "give me everything" outright instead of trusting the
+/// caller to clamp.
+pub const MAX_PAGE_LIMIT: usize = 20_000;
+
+/// Clamp a caller-supplied row limit into `[1, MAX_PAGE_LIMIT]`.
+///
+/// The raw value comes from JSON and may be absent, zero, absurdly large, or
+/// wider than a `usize` on a 32-bit target (where an `as usize` cast silently
+/// truncates). All of those are answerable with a sane bound; none should
+/// panic or truncate.
+pub fn bounded_limit(raw: Option<u64>, default: usize) -> usize {
+    let default = (default.clamp(1, MAX_PAGE_LIMIT)) as u64;
+    raw.unwrap_or(default).clamp(1, MAX_PAGE_LIMIT as u64) as usize
+}
+
+const SCHEMA_VERSION: i64 = 12;
 
 /// Triage lifecycle for a finding (plan §F14). Additive: the `findings` rows are
 /// untouched; a finding with no row here is treated as `open`.
@@ -103,6 +127,18 @@ const SAVED_SEARCH_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS saved_search (
     name          TEXT PRIMARY KEY,
     query         TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL
+);
+";
+
+/// Named baselines (plan §F09 compare-to-baseline): a stable name pointing at a
+/// stored exchange that later sends are diffed against. Just a pointer — the
+/// referenced exchange is the source of truth, so re-pointing a baseline is one
+/// upsert and deleting one never removes history.
+const BASELINE_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS baseline (
+    name          TEXT PRIMARY KEY,
+    exchange_id   INTEGER NOT NULL,
     created_at_ms INTEGER NOT NULL
 );
 ";
@@ -246,6 +282,18 @@ impl Store {
                 tx.execute_batch(OAST_INTERACTION_SCHEMA)
                     .context("creating durable OAST interaction schema")?;
             }
+            if version < 10 {
+                tx.execute_batch(audit::SCHEMA)
+                    .context("creating durable audit-log schema")?;
+            }
+            if version < 11 {
+                tx.execute_batch(collection::SCHEMA)
+                    .context("creating collections schema")?;
+            }
+            if version < 12 {
+                tx.execute_batch(BASELINE_SCHEMA)
+                    .context("creating baseline schema")?;
+            }
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             tx.commit()?;
         }
@@ -326,6 +374,111 @@ impl Store {
         )?;
         let rows = stmt.query_map(params![limit], oast_row)?;
         Ok(rows.filter_map(Result::ok).collect())
+    }
+
+    /// Append one entry to the durable audit log (plan §F02), stamped now.
+    /// Returns the new row id.
+    pub fn record_audit(&self, entry: &NewAudit) -> Result<i64> {
+        Ok(audit::append(&self.conn, now_ms(), entry)?)
+    }
+
+    /// Read the audit log, newest first.
+    pub fn audit_log(&self, limit: i64) -> Result<Vec<AuditRecord>> {
+        Ok(audit::list(&self.conn, limit)?)
+    }
+
+    /// Read audit entries of one policy class (`PASSIVE`/`ACTIVE`/`DESTRUCTIVE`).
+    pub fn audit_log_by_class(&self, class: &str, limit: i64) -> Result<Vec<AuditRecord>> {
+        Ok(audit::list_by_class(&self.conn, class, limit)?)
+    }
+
+    /// Total number of retained audit entries.
+    pub fn audit_log_count(&self) -> Result<i64> {
+        Ok(audit::count(&self.conn)?)
+    }
+
+    /// Prune the audit log under an explicit retention policy (never automatic).
+    pub fn prune_audit_log(&self, max_count: usize, max_age_ms: i64) -> Result<usize> {
+        Ok(audit::prune(&self.conn, now_ms(), max_count, max_age_ms)?)
+    }
+
+    /// Create a collection (idempotent by name), returning its id (plan §F18).
+    pub fn collection_create(&self, name: &str) -> Result<i64> {
+        Ok(collection::create(&self.conn, name, now_ms())?)
+    }
+
+    /// Add an item to a collection (idempotent). Returns whether it was new.
+    pub fn collection_add(&self, id: i64, kind: ItemKind, ref_id: i64) -> Result<bool> {
+        Ok(collection::add_item(&self.conn, id, kind, ref_id, now_ms())?)
+    }
+
+    /// Remove an item from a collection. Returns whether a row was removed.
+    pub fn collection_remove(&self, id: i64, kind: ItemKind, ref_id: i64) -> Result<bool> {
+        Ok(collection::remove_item(&self.conn, id, kind, ref_id)?)
+    }
+
+    /// List collections (newest first) with member counts.
+    pub fn collections(&self) -> Result<Vec<Collection>> {
+        Ok(collection::list(&self.conn)?)
+    }
+
+    /// Members of a collection, in insertion order.
+    pub fn collection_items(&self, id: i64) -> Result<Vec<CollectionItem>> {
+        Ok(collection::items(&self.conn, id)?)
+    }
+
+    /// Delete a collection and its membership (referenced rows untouched).
+    pub fn collection_delete(&self, id: i64) -> Result<bool> {
+        Ok(collection::delete(&self.conn, id)?)
+    }
+
+    /// Resolve a collection id by name.
+    pub fn collection_id(&self, name: &str) -> Result<Option<i64>> {
+        Ok(collection::id_by_name(&self.conn, name)?)
+    }
+
+    /// Set (or re-point) a named baseline to a stored exchange (plan §F09).
+    pub fn set_baseline(&self, name: &str, exchange_id: ExchangeId) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO baseline (name, exchange_id, created_at_ms) VALUES (?1, ?2, ?3)
+             ON CONFLICT(name) DO UPDATE SET exchange_id = excluded.exchange_id,
+                                             created_at_ms = excluded.created_at_ms",
+            params![name.trim(), exchange_id.0, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    /// The exchange a named baseline points at, if set.
+    pub fn baseline(&self, name: &str) -> Result<Option<ExchangeId>> {
+        use rusqlite::OptionalExtension;
+        let id: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT exchange_id FROM baseline WHERE name = ?1",
+                params![name.trim()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(id.map(ExchangeId))
+    }
+
+    /// List baselines as `(name, exchange_id)`, newest first.
+    pub fn baselines(&self) -> Result<Vec<(String, ExchangeId)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT name, exchange_id FROM baseline ORDER BY created_at_ms DESC, name ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, ExchangeId(r.get::<_, i64>(1)?)))
+        })?;
+        Ok(rows.filter_map(Result::ok).collect())
+    }
+
+    /// Delete a named baseline. Returns whether it existed.
+    pub fn delete_baseline(&self, name: &str) -> Result<bool> {
+        let n = self
+            .conn
+            .execute("DELETE FROM baseline WHERE name = ?1", params![name.trim()])?;
+        Ok(n > 0)
     }
 
     /// Persist a background-task record (plan §4.2 durable jobs).
@@ -457,6 +610,9 @@ impl Store {
         limit: usize,
         full_results: bool,
     ) -> Result<Vec<HttpExchange>> {
+        // Ceiling rather than an advisory: this path walks the table with no
+        // SQL LIMIT, so an oversized limit is a memory-exhaustion request.
+        let limit = limit.min(MAX_PAGE_LIMIT);
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -539,6 +695,9 @@ impl Store {
         // all indexed), so a multi-predicate query is narrowed by all of them
         // instead of only the first. They are AND-ed: each is *required* by the
         // query, so the SQL set stays a superset of the real result set.
+        // Interpolates a &'static str column list only; pushed filters take the
+        // form `column op ?n` with values bound as parameters.
+        // audit-allow: M1
         let mut sql = format!("SELECT {} FROM exchanges", history::EXCHANGE_COLUMNS);
         let mut bind: Vec<rusqlite::types::Value> = Vec::new();
         let mut clauses: Vec<String> = Vec::new();
@@ -610,25 +769,60 @@ impl Store {
 
     /// Convenience: the `limit` most recent exchanges (no filter).
     pub fn recent(&self, limit: usize) -> Result<Vec<HttpExchange>> {
-        self.query(&Query::compile("").expect("empty query compiles"), limit)
+        self.query(&Query::all(), limit)
     }
 
     // --- Findings (plan §8) -------------------------------------------------
 
     /// Record a finding, returning its id.
+    /// Insert one finding, deduplicating against what is already stored (plan
+    /// §F14): an identical finding — same producing check (`rule`), title,
+    /// evidence set, and detail — returns the existing id instead of a new row.
     pub fn insert_finding(&mut self, finding: &Finding) -> Result<FindingId> {
+        if let Some(id) = Self::find_duplicate(&self.conn, finding)? {
+            return Ok(FindingId(id));
+        }
         Self::write_finding(&self.conn, finding)
     }
 
+    /// Insert a batch, deduplicating against the store (and within the batch),
+    /// and return the number actually inserted (duplicates are skipped).
     pub fn insert_findings(&mut self, findings: &[Finding]) -> Result<usize> {
         let tx = self.conn.transaction()?;
+        let mut inserted = 0usize;
         for finding in findings {
-            Self::write_finding(&tx, finding)?;
+            // Within the transaction, a finding inserted earlier in this batch is
+            // visible to `find_duplicate`, so in-batch duplicates are collapsed too.
+            if Self::find_duplicate(&tx, finding)?.is_none() {
+                Self::write_finding(&tx, finding)?;
+                inserted += 1;
+            }
         }
         tx.commit()?;
-        Ok(findings.len())
+        Ok(inserted)
     }
 
+    /// The id of a stored finding identical to `finding` (same dedup signature),
+    /// or `None`. Deliberately *not* applied by [`write_finding`]: the review
+    /// workflow has its own `passive_keys` dedup and must keep getting a fresh
+    /// row id, so cross-run dedup lives only in the public insert path.
+    fn find_duplicate(conn: &Connection, finding: &Finding) -> Result<Option<i64>> {
+        let signature = finding_signature(finding);
+        let mut stmt = conn.prepare("SELECT id, data_json FROM findings WHERE title = ?1")?;
+        let mut rows = stmt.query(params![finding.title])?;
+        while let Some(row) = rows.next()? {
+            let id: i64 = row.get(0)?;
+            let json: String = row.get(1)?;
+            if let Ok(other) = serde_json::from_str::<Finding>(&json) {
+                if finding_signature(&other) == signature {
+                    return Ok(Some(id));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Insert a finding row unconditionally (no dedup) and return its new id.
     fn write_finding(conn: &Connection, finding: &Finding) -> Result<FindingId> {
         let created_at = if finding.created_at_ms == 0 {
             now_ms()
@@ -669,6 +863,31 @@ impl Store {
             out.push(f);
         }
         out.sort_by_key(|f| std::cmp::Reverse(f.severity));
+        Ok(out)
+    }
+
+    /// Count stored findings grouped by severity label (`critical`/`high`/
+    /// `medium`/`low`/`info`). Cheap `GROUP BY`; drives the dashboard breakdown.
+    pub fn findings_severity_counts(&self) -> Result<Vec<(String, i64)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT severity, count(*) FROM findings GROUP BY severity")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        // Order by severity rank, most severe first.
+        let rank = |s: &str| match s {
+            "critical" => 0,
+            "high" => 1,
+            "medium" => 2,
+            "low" => 3,
+            _ => 4,
+        };
+        out.sort_by_key(|(s, _)| rank(s));
         Ok(out)
     }
 
@@ -832,16 +1051,36 @@ fn store_blob(conn: &Connection, body: &Body) -> Result<Option<String>> {
     Ok(Some(sha))
 }
 
+/// A cross-run deduplication signature for a finding: its producing check
+/// (`rule`), title, sorted evidence-exchange set, and `detail`. Two findings
+/// with the same signature are the same occurrence (plan §F14).
+///
+/// `detail` is part of the key because some sources (notably Nuclei) carry the
+/// distinguishing location — the matched URL — only in the detail text and leave
+/// `evidence` empty; without it, the same template matching two different URLs
+/// would collapse to one stored row. Check `detail` strings are deterministic
+/// (templated from input names/status, never response bodies or timestamps), so
+/// re-scanning the same data still dedups.
+fn finding_signature(finding: &Finding) -> String {
+    let mut evidence: Vec<i64> = finding.evidence.iter().map(|e| e.0).collect();
+    evidence.sort_unstable();
+    let evidence: Vec<String> = evidence.iter().map(|n| n.to_string()).collect();
+    format!(
+        "{}\u{1}{}\u{1}{}\u{1}{}",
+        finding.rule.as_deref().unwrap_or(""),
+        finding.title,
+        evidence.join(","),
+        finding.detail,
+    )
+}
+
 fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     let digest = hasher.finalize();
-    let mut s = String::with_capacity(64);
-    use std::fmt::Write;
-    for b in digest {
-        let _ = write!(s, "{b:02x}");
-    }
-    s
+    // Hex by `format!` per byte: appending to a String cannot fail, so there is
+    // no `Result` to discard in the first place.
+    digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn now_ms() -> i64 {
@@ -894,6 +1133,9 @@ CREATE TABLE IF NOT EXISTS findings (
     created_at_ms INTEGER NOT NULL,
     data_json     TEXT NOT NULL
 );
+-- Dedup (find_duplicate) looks findings up by title; index it so a batch save
+-- is indexed lookups rather than a full scan per finding (plan §F14).
+CREATE INDEX IF NOT EXISTS idx_findings_title ON findings(title);
 "#;
 
 #[cfg(test)]
@@ -930,6 +1172,86 @@ mod tests {
         assert_eq!(got.response.as_ref().unwrap().status, 200);
         assert_eq!(got.response.as_ref().unwrap().body.as_text(), "hello world");
         assert_eq!(store.count().unwrap(), 1);
+    }
+
+    #[test]
+    fn a_limit_smaller_than_the_table_returns_exactly_that_many_rows() {
+        // `query_exchanges` walks the table and keeps what matches, so the
+        // limit is the only thing bounding the result set.
+        let mut store = Store::open_in_memory().unwrap();
+        for i in 0..50 {
+            store
+                .insert(&exchange(&format!("https://x.test/{i}"), 200, "b"))
+                .unwrap();
+        }
+        let all = store
+            .query(&Query::compile("").unwrap(), usize::MAX)
+            .unwrap();
+        assert_eq!(
+            all.len(),
+            50,
+            "a limit above the row count returns them all"
+        );
+        assert_eq!(
+            store.query(&Query::compile("").unwrap(), 7).unwrap().len(),
+            7,
+            "a limit below the row count returns exactly that many"
+        );
+    }
+
+    // Slow by necessity (~14 s in a debug build): proving the ceiling means a
+    // table LARGER than MAX_PAGE_LIMIT. Run it deliberately with
+    // `cargo test -p camio-store -- --ignored`.
+    #[test]
+    #[ignore = "slow: proves MAX_PAGE_LIMIT end-to-end against a bigger table"]
+    fn an_absurd_limit_is_clamped_to_the_page_ceiling() {
+        // `query_exchanges` walks the table with no SQL LIMIT, so a limit of
+        // usize::MAX used to turn one call into a full-table materialisation.
+        // This needs a table LARGER than the ceiling to distinguish the
+        // clamped call from the unclamped one, so it is the slow test in the
+        // file by design.
+        let mut store = Store::open_in_memory().unwrap();
+        let rows = MAX_PAGE_LIMIT + 3;
+        for i in 0..rows {
+            store
+                .insert(&exchange(&format!("https://x.test/{i}"), 200, "b"))
+                .unwrap();
+        }
+        let capped = store
+            .query(&Query::compile("").unwrap(), usize::MAX)
+            .unwrap();
+        assert_eq!(
+            capped.len(),
+            MAX_PAGE_LIMIT,
+            "the store answers at most MAX_PAGE_LIMIT rows, however large the \
+             requested limit"
+        );
+        assert_eq!(
+            store
+                .query(&Query::compile("").unwrap(), MAX_PAGE_LIMIT + 100)
+                .unwrap()
+                .len(),
+            MAX_PAGE_LIMIT,
+            "asking for more than the ceiling is capped, not rejected"
+        );
+    }
+
+    #[test]
+    fn bounded_limit_clamps_a_caller_supplied_row_count() {
+        assert_eq!(bounded_limit(None, 1000), 1000, "absent → default");
+        assert_eq!(bounded_limit(Some(0), 1000), 1, "zero → one row, not none");
+        assert_eq!(
+            bounded_limit(Some(u64::MAX), 1000),
+            MAX_PAGE_LIMIT,
+            "an enormous limit is capped, not cast (the cast silently \
+             truncates on a 32-bit target)"
+        );
+        assert_eq!(
+            bounded_limit(Some(MAX_PAGE_LIMIT as u64 + 1), 1000),
+            MAX_PAGE_LIMIT
+        );
+        assert_eq!(bounded_limit(None, 0), 1, "a zero default yields one row");
+        assert_eq!(bounded_limit(None, usize::MAX), MAX_PAGE_LIMIT);
     }
 
     #[test]
@@ -1021,6 +1343,7 @@ mod tests {
                 detail: "param `q` reflected".into(),
                 evidence: vec![ExchangeId(1)],
                 created_at_ms: 0,
+                rule: None,
             })
             .unwrap();
         store
@@ -1032,12 +1355,85 @@ mod tests {
                 detail: "no X-Frame-Options".into(),
                 evidence: vec![],
                 created_at_ms: 0,
+                rule: None,
             })
             .unwrap();
 
         let findings = store.list_findings().unwrap();
         assert_eq!(findings.len(), 2);
         assert_eq!(findings[0].severity, Severity::High); // most severe first
+    }
+
+    #[test]
+    fn identical_findings_are_deduplicated_across_inserts() {
+        let mut store = Store::open_in_memory().unwrap();
+        let f = Finding {
+            id: FindingId(0),
+            title: "Reflected XSS".into(),
+            severity: Severity::High,
+            confidence: Confidence::Firm,
+            detail: "param `q`".into(),
+            evidence: vec![ExchangeId(1)],
+            created_at_ms: 0,
+            rule: Some("reflected-xss".into()),
+        };
+        // Same finding (same rule/title/evidence) inserted twice → one row.
+        let first = store.insert_finding(&f).unwrap();
+        let second = store.insert_finding(&f).unwrap();
+        assert_eq!(first, second, "duplicate returns the existing id");
+        assert_eq!(store.list_findings().unwrap().len(), 1);
+
+        // A batch re-insert reports zero new rows.
+        assert_eq!(store.insert_findings(&[f.clone(), f.clone()]).unwrap(), 0);
+        assert_eq!(store.list_findings().unwrap().len(), 1);
+
+        // Different evidence is a distinct occurrence and IS stored.
+        let mut g = f.clone();
+        g.evidence = vec![ExchangeId(2)];
+        assert_eq!(store.insert_findings(&[g]).unwrap(), 1);
+        assert_eq!(store.list_findings().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn severity_counts_group_and_rank() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mk = |title: &str, sev: Severity| Finding {
+            id: FindingId(0),
+            title: title.into(),
+            severity: sev,
+            confidence: Confidence::Firm,
+            detail: String::new(),
+            evidence: vec![],
+            created_at_ms: 0,
+            rule: None,
+        };
+        store.insert_finding(&mk("a", Severity::Low)).unwrap();
+        store.insert_finding(&mk("b", Severity::High)).unwrap();
+        store.insert_finding(&mk("c", Severity::High)).unwrap();
+        let counts = store.findings_severity_counts().unwrap();
+        // Ranked most-severe first.
+        assert_eq!(counts, vec![("high".to_string(), 2), ("low".to_string(), 1)]);
+    }
+
+    #[test]
+    fn evidenceless_findings_are_distinguished_by_detail() {
+        // Nuclei-style findings carry no evidence and the same template title/
+        // rule; the matched URL lives in `detail`. They must NOT collapse.
+        let mut store = Store::open_in_memory().unwrap();
+        let mk = |detail: &str| Finding {
+            id: FindingId(0),
+            title: "Exposed .git directory".into(),
+            severity: Severity::Medium,
+            confidence: Confidence::Firm,
+            detail: detail.into(),
+            evidence: vec![],
+            created_at_ms: 0,
+            rule: Some("git-config".into()),
+        };
+        let a = mk("- Matched at: `https://x.test/admin/.git/`\n");
+        let b = mk("- Matched at: `https://x.test/app/.git/`\n");
+        assert_eq!(store.insert_findings(&[a.clone(), b, a]).unwrap(), 2);
+        assert_eq!(store.list_findings().unwrap().len(), 2);
     }
 
     #[test]
@@ -1052,6 +1448,7 @@ mod tests {
                 detail: "d".into(),
                 evidence: vec![],
                 created_at_ms: 0,
+                rule: None,
             })
             .unwrap();
 
@@ -1255,6 +1652,7 @@ mod tests {
                 detail: "Raw detail marker".into(),
                 evidence: Vec::new(),
                 created_at_ms: 0,
+                rule: None,
             },
         };
         assert!(store
@@ -1345,6 +1743,70 @@ mod tests {
             store.task(1).unwrap().unwrap().state,
             camio_core::TaskState::Interrupted
         );
+    }
+
+    #[test]
+    fn baselines_point_at_an_exchange_and_repoint_cleanly() {
+        let mut store = Store::open_in_memory().unwrap();
+        let a = store
+            .insert(&HttpExchange::new(
+                HttpRequest::get("https://x.test/a"),
+                Source::Replay,
+            ))
+            .unwrap();
+        let b = store
+            .insert(&HttpExchange::new(
+                HttpRequest::get("https://x.test/b"),
+                Source::Replay,
+            ))
+            .unwrap();
+        store.set_baseline("prod", a).unwrap();
+        assert_eq!(store.baseline("prod").unwrap(), Some(a));
+        // Re-pointing is an upsert, not a duplicate.
+        store.set_baseline("prod", b).unwrap();
+        assert_eq!(store.baseline("prod").unwrap(), Some(b));
+        assert_eq!(store.baselines().unwrap().len(), 1);
+        // Deleting a baseline leaves the referenced exchange intact.
+        assert!(store.delete_baseline("prod").unwrap());
+        assert_eq!(store.baseline("prod").unwrap(), None);
+        assert!(store.get(b).unwrap().is_some());
+    }
+
+    #[test]
+    fn migrates_v9_store_and_adds_the_audit_log() {
+        // A v9 store (OAST interactions table present) opens on v10 with prior
+        // data intact and the new append-only audit table ready to use.
+        let conn = Connection::open_in_memory().unwrap();
+        for schema in [
+            SCHEMA,
+            workspace::SCHEMA,
+            review::SCHEMA,
+            evidence::SCHEMA,
+            FINDING_STATUS_SCHEMA,
+            SAVED_SEARCH_SCHEMA,
+            EXCHANGE_LABEL_SCHEMA,
+            tasks::SCHEMA,
+            OAST_INTERACTION_SCHEMA,
+        ] {
+            conn.execute_batch(schema).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 9).unwrap();
+        conn.execute(
+            "INSERT INTO oast_interactions(method, target, source, received_at_ms)
+             VALUES ('GET', 'x.test', 'http', 5)",
+            [],
+        )
+        .unwrap();
+        let store = Store::init(conn).unwrap();
+        // Old data survived the migration.
+        assert_eq!(store.oast_interactions(10).unwrap().len(), 1);
+        // The new audit table exists and is usable.
+        store
+            .record_audit(&NewAudit::new("cli", "ACTIVE", "send", "allowed").target("x.test"))
+            .unwrap();
+        let rows = store.audit_log(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].target.as_deref(), Some("x.test"));
     }
 
     #[test]

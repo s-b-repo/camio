@@ -25,6 +25,12 @@ pub enum InputKind {
     Header,
     /// A top-level scalar field of an `application/json` body.
     JsonField,
+    /// The text content of an element in an `application/xml` / `text/xml` body,
+    /// addressed by its element path (`root.item`).
+    XmlText,
+    /// An attribute value of an element in an XML body, addressed as
+    /// `path@attr`.
+    XmlAttr,
 }
 
 /// A single discovered input: where it lives, its name, and its current value.
@@ -55,6 +61,9 @@ impl DiscoveredInput {
     /// * `Header` → `HttpHeaderValue`
     /// * `JsonField` → `JsonString`, unless the value parses as a number →
     ///   `JsonNumber`
+    // The request is not needed to classify the input position, and the
+    // signature is fixed by the campaign API.
+    // audit-allow: B13
     pub fn detect_context(&self, _req: &HttpRequest) -> InputContext {
         match self.kind {
             InputKind::QueryParam => InputContext::UrlQuery,
@@ -72,6 +81,8 @@ impl DiscoveredInput {
                     InputContext::JsonString
                 }
             }
+            InputKind::XmlText => InputContext::XmlText,
+            InputKind::XmlAttr => InputContext::XmlAttribute,
         }
     }
 }
@@ -181,12 +192,274 @@ pub fn discover_inputs(req: &HttpRequest) -> Vec<DiscoveredInput> {
     // with `items.0.id`-style paths so their location is preserved.
     if content_type_is(content_type, "application/json") {
         let body = req.body.as_text();
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) {
-            collect_json_fields(&value, "", &mut out);
+        match serde_json::from_str::<serde_json::Value>(&body) {
+            Ok(value) => collect_json_fields(&value, "", &mut out),
+            // A JSON body that does not parse is unusual and means this whole
+            // input-context class was missed.
+            Err(e) => eprintln!(
+                "camio: {} declares JSON but its body did not parse: {e}",
+                req.url
+            ),
         }
     }
 
+    // 6. XML element text and attribute values (SOAP, XML-RPC, REST+XML). Each
+    // injection point is addressed by its nested element path (`order.item`) with
+    // attributes as `order.item@sku`, so a campaign can target a precise node.
+    if content_type_is(content_type, "application/xml")
+        || content_type_is(content_type, "text/xml")
+        || content_type.contains("+xml")
+    {
+        collect_xml_inputs(&req.body.as_text(), &mut out);
+    }
+
     out
+}
+
+/// Enumerate XML element text and attribute values as injection points. Uses the
+/// hardened `quick-xml` reader (entity/CDATA aware); a parse error simply stops
+/// enumeration rather than panicking (a malformed XML body is the caller's to
+/// report, not this function's). Repeated sibling elements of the same name get a
+/// positional suffix (`item`, `item.1`) so each node is addressable.
+fn collect_xml_inputs(body: &str, out: &mut Vec<DiscoveredInput>) {
+    use quick_xml::events::Event;
+    use quick_xml::Reader;
+
+    let mut reader = Reader::from_str(body);
+    reader.config_mut().trim_text(true);
+    // `path` is the stack of open element segments; `seen` counts same-name
+    // siblings per depth so repeated nodes get distinct addresses.
+    let mut path: Vec<String> = Vec::new();
+    let mut seen: Vec<std::collections::HashMap<String, usize>> = vec![Default::default()];
+    let mut buf = Vec::new();
+
+    // Compute the addressable segment for an element at the current depth and
+    // advance the sibling counter.
+    fn next_segment(
+        seen: &mut [std::collections::HashMap<String, usize>],
+        name: String,
+    ) -> String {
+        let depth_seen = seen.last_mut().expect("a depth frame is always present");
+        let n = depth_seen.entry(name.clone()).or_insert(0);
+        let seg = if *n == 0 {
+            name
+        } else {
+            format!("{name}.{n}")
+        };
+        *n += 1;
+        seg
+    }
+
+    // Emit every attribute of an element as an `XmlAttr` input at `elem_path`.
+    fn emit_attrs(
+        e: &quick_xml::events::BytesStart<'_>,
+        elem_path: &str,
+        out: &mut Vec<DiscoveredInput>,
+    ) {
+        for attr in e.attributes().flatten() {
+            let attr_name =
+                String::from_utf8_lossy(attr.key.local_name().as_ref()).to_string();
+            // Raw attribute value (charset-lossy). Attribute values rarely carry
+            // entities and are used here as a current-value label, so a lossy
+            // decode is sufficient and avoids borrowing the reader's decoder.
+            let value = String::from_utf8_lossy(attr.value.as_ref()).to_string();
+            out.push(DiscoveredInput::new(
+                InputKind::XmlAttr,
+                format!("{elem_path}@{attr_name}"),
+                value,
+            ));
+        }
+    }
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => {
+                let name = String::from_utf8_lossy(e.local_name().as_ref()).to_string();
+                let seg = next_segment(&mut seen, name);
+                let elem_path = join_path(&path.join("."), &seg);
+                emit_attrs(&e, &elem_path, out);
+                // A Start element opens a frame; its text and children follow.
+                path.push(seg);
+                seen.push(Default::default());
+            }
+            Ok(Event::Empty(e)) => {
+                // Self-closing `<x a="1"/>`: attributes only, no text, and it
+                // does NOT open a frame (there is no matching End).
+                let name = String::from_utf8_lossy(e.local_name().as_ref()).to_string();
+                let seg = next_segment(&mut seen, name);
+                let elem_path = join_path(&path.join("."), &seg);
+                emit_attrs(&e, &elem_path, out);
+            }
+            Ok(Event::Text(t)) => {
+                // `xml10_content` decodes the charset and resolves XML entities
+                // (quick-xml 0.41 replaced `BytesText::unescape` with this).
+                let text = t.xml10_content().map(|v| v.to_string()).unwrap_or_default();
+                if !text.trim().is_empty() && !path.is_empty() {
+                    out.push(DiscoveredInput::new(InputKind::XmlText, path.join("."), text));
+                }
+            }
+            Ok(Event::CData(c)) => {
+                let text = String::from_utf8_lossy(c.as_ref()).to_string();
+                if !text.trim().is_empty() && !path.is_empty() {
+                    out.push(DiscoveredInput::new(InputKind::XmlText, path.join("."), text));
+                }
+            }
+            Ok(Event::End(_)) => {
+                path.pop();
+                seen.pop();
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => break, // tolerant: stop enumerating on malformed XML
+            _ => {}
+        }
+        buf.clear();
+    }
+}
+
+/// Rewrite one XML injection point in `body` and return the new document, or
+/// `None` if the body is not parseable XML or the addressed node does not exist
+/// (so a failed rewrite sends the base request unchanged rather than a corrupted
+/// one — the same contract as [`crate::params`]-style JSON rewriting).
+///
+/// `name` is the address [`discover_inputs`] produced: an element path
+/// (`order.item`) targets that element's text, and a `path@attr` form
+/// (`order.item@sku`) targets that attribute's value. The payload is XML-escaped
+/// by the writer; every other byte of structure is echoed faithfully.
+pub fn set_xml_input(body: &str, name: &str, value: &str) -> Option<String> {
+    use quick_xml::events::{BytesCData, BytesStart, BytesText, Event};
+    use quick_xml::{Reader, Writer};
+
+    let (target_path, target_attr) = match name.split_once('@') {
+        Some((p, a)) => (p.to_string(), Some(a.to_string())),
+        None => (name.to_string(), None),
+    };
+
+    let mut reader = Reader::from_str(body);
+    let mut writer = Writer::new(Vec::new());
+    let mut path: Vec<String> = Vec::new();
+    let mut seen: Vec<std::collections::HashMap<String, usize>> = vec![Default::default()];
+    let mut buf = Vec::new();
+    let mut replaced = false;
+
+    // The addressable segment for an element at the current depth (advances the
+    // sibling counter) — must match `collect_xml_inputs` exactly.
+    fn next_segment(
+        seen: &mut [std::collections::HashMap<String, usize>],
+        name: String,
+    ) -> String {
+        let depth_seen = seen.last_mut().expect("a depth frame is always present");
+        let n = depth_seen.entry(name.clone()).or_insert(0);
+        let seg = if *n == 0 { name } else { format!("{name}.{n}") };
+        *n += 1;
+        seg
+    }
+
+    // Rebuild a start/empty element, replacing one attribute's value if this is
+    // the targeted element and attribute.
+    let rebuild_with_attr =
+        |e: &BytesStart<'_>, attr: &str, value: &str| -> Option<BytesStart<'static>> {
+            let attrs: Vec<_> = e.attributes().collect::<Result<_, _>>().ok()?;
+            let mut owned = e.to_owned();
+            owned.clear_attributes();
+            let mut hit = false;
+            for a in &attrs {
+                let local = String::from_utf8_lossy(a.key.local_name().as_ref()).to_string();
+                let key = String::from_utf8_lossy(a.key.as_ref()).to_string();
+                if local == attr {
+                    owned.push_attribute((key.as_str(), value));
+                    hit = true;
+                } else {
+                    let v = String::from_utf8_lossy(a.value.as_ref()).to_string();
+                    owned.push_attribute((key.as_str(), v.as_str()));
+                }
+            }
+            hit.then_some(owned)
+        };
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => {
+                let tag = String::from_utf8_lossy(e.local_name().as_ref()).to_string();
+                let seg = next_segment(&mut seen, tag);
+                let elem_path = join_path(&path.join("."), &seg);
+                if !replaced {
+                    if let Some(attr) = &target_attr {
+                        if elem_path == target_path {
+                            if let Some(rebuilt) = rebuild_with_attr(&e, attr, value) {
+                                writer.write_event(Event::Start(rebuilt)).ok()?;
+                                replaced = true;
+                                path.push(seg);
+                                seen.push(Default::default());
+                                buf.clear();
+                                continue;
+                            }
+                        }
+                    }
+                }
+                writer.write_event(Event::Start(e.into_owned())).ok()?;
+                path.push(seg);
+                seen.push(Default::default());
+            }
+            Ok(Event::Empty(e)) => {
+                let tag = String::from_utf8_lossy(e.local_name().as_ref()).to_string();
+                let seg = next_segment(&mut seen, tag);
+                let elem_path = join_path(&path.join("."), &seg);
+                if !replaced && target_attr.is_some() && elem_path == target_path {
+                    if let Some(rebuilt) =
+                        rebuild_with_attr(&e, target_attr.as_deref().unwrap(), value)
+                    {
+                        writer.write_event(Event::Empty(rebuilt)).ok()?;
+                        replaced = true;
+                        buf.clear();
+                        continue;
+                    }
+                }
+                writer.write_event(Event::Empty(e.into_owned())).ok()?;
+            }
+            Ok(Event::Text(t)) => {
+                let raw = t.xml10_content().map(|v| v.to_string()).unwrap_or_default();
+                if !replaced
+                    && target_attr.is_none()
+                    && !raw.trim().is_empty()
+                    && path.join(".") == target_path
+                {
+                    writer.write_event(Event::Text(BytesText::new(value))).ok()?;
+                    replaced = true;
+                } else {
+                    writer.write_event(Event::Text(t.into_owned())).ok()?;
+                }
+            }
+            Ok(Event::CData(c)) => {
+                let raw = String::from_utf8_lossy(c.as_ref());
+                if !replaced
+                    && target_attr.is_none()
+                    && !raw.trim().is_empty()
+                    && path.join(".") == target_path
+                {
+                    writer.write_event(Event::CData(BytesCData::new(value))).ok()?;
+                    replaced = true;
+                } else {
+                    writer.write_event(Event::CData(c.into_owned())).ok()?;
+                }
+            }
+            Ok(Event::End(e)) => {
+                path.pop();
+                seen.pop();
+                writer.write_event(Event::End(e.into_owned())).ok()?;
+            }
+            Ok(Event::Eof) => break,
+            Ok(other) => {
+                writer.write_event(other.into_owned()).ok()?;
+            }
+            Err(_) => return None, // malformed XML: don't ship a half-rewritten body
+        }
+        buf.clear();
+    }
+
+    if !replaced {
+        return None;
+    }
+    String::from_utf8(writer.into_inner()).ok()
 }
 
 /// Collect scalar JSON fields (and arrays/nested objects of them) as inputs,
@@ -485,6 +758,101 @@ mod tests {
             find(&inputs, InputKind::JsonField, "q").value,
             "search term"
         );
+    }
+
+    #[test]
+    fn discovers_xml_text_and_attribute_inputs() {
+        let mut req = HttpRequest::get("https://x.test/soap");
+        req.method = "POST".into();
+        req.headers.push("Content-Type", "application/xml");
+        req.body = Body::from_text(
+            r#"<order id="7"><item sku="A1">Widget</item><item sku="B2">Gadget</item><note>see notes</note></order>"#,
+        );
+        let inputs = discover_inputs(&req);
+        // Attributes addressed as path@attr, with repeated siblings disambiguated.
+        assert_eq!(find(&inputs, InputKind::XmlAttr, "order@id").value, "7");
+        assert_eq!(find(&inputs, InputKind::XmlAttr, "order.item@sku").value, "A1");
+        assert_eq!(
+            find(&inputs, InputKind::XmlAttr, "order.item.1@sku").value,
+            "B2"
+        );
+        // Element text addressed by its element path.
+        assert_eq!(find(&inputs, InputKind::XmlText, "order.item").value, "Widget");
+        assert_eq!(
+            find(&inputs, InputKind::XmlText, "order.item.1").value,
+            "Gadget"
+        );
+        assert_eq!(find(&inputs, InputKind::XmlText, "order.note").value, "see notes");
+        // XML text picks the XmlText encoding context; attrs pick XmlAttribute.
+        assert_eq!(
+            find(&inputs, InputKind::XmlText, "order.item").detect_context(&req),
+            InputContext::XmlText
+        );
+        assert_eq!(
+            find(&inputs, InputKind::XmlAttr, "order@id").detect_context(&req),
+            InputContext::XmlAttribute
+        );
+    }
+
+    #[test]
+    fn xml_cdata_and_empty_elements_are_handled() {
+        let mut req = HttpRequest::get("https://x.test/rpc");
+        req.method = "POST".into();
+        req.headers.push("Content-Type", "text/xml");
+        req.body = Body::from_text(
+            r#"<root><script><![CDATA[alert(1)]]></script><flag on="yes"/></root>"#,
+        );
+        let inputs = discover_inputs(&req);
+        assert_eq!(
+            find(&inputs, InputKind::XmlText, "root.script").value,
+            "alert(1)"
+        );
+        // A self-closing element contributes only its attribute, no stray frame.
+        assert_eq!(find(&inputs, InputKind::XmlAttr, "root.flag@on").value, "yes");
+        assert!(!inputs.iter().any(|i| i.name == "root.flag.anything"));
+    }
+
+    #[test]
+    fn set_xml_input_rewrites_text_and_attributes_by_path() {
+        let body =
+            r#"<order id="7"><item sku="A1">Widget</item><item sku="B2">Gadget</item></order>"#;
+        // Replace the second item's text.
+        let out = set_xml_input(body, "order.item.1", "PAYLOAD").unwrap();
+        assert!(out.contains(">PAYLOAD<"));
+        assert!(out.contains(">Widget<")); // the first item is untouched
+        // Replace an attribute value by path.
+        let out2 = set_xml_input(body, "order@id", "99").unwrap();
+        assert!(out2.contains("id=\"99\""));
+        // The rewritten body re-parses and now carries the injected value at the
+        // same address — discovery and injection agree.
+        let mut req = HttpRequest::get("https://x.test/");
+        req.method = "POST".into();
+        req.headers.push("Content-Type", "application/xml");
+        req.body = Body::from_text(out.clone());
+        let inputs = discover_inputs(&req);
+        assert_eq!(
+            find(&inputs, InputKind::XmlText, "order.item.1").value,
+            "PAYLOAD"
+        );
+    }
+
+    #[test]
+    fn set_xml_input_returns_none_for_unknown_path_or_bad_xml() {
+        let body = r#"<order><item>x</item></order>"#;
+        assert!(set_xml_input(body, "order.missing", "p").is_none());
+        assert!(set_xml_input(body, "order.item@nope", "p").is_none());
+        assert!(set_xml_input("<broken", "order", "p").is_none());
+    }
+
+    #[test]
+    fn malformed_xml_is_tolerated_without_panicking() {
+        let mut req = HttpRequest::get("https://x.test/x");
+        req.method = "POST".into();
+        req.headers.push("Content-Type", "application/xml");
+        req.body = Body::from_text(r#"<a><b>text</b><c unterminated"#);
+        // Must not panic; it enumerates what it could before the break.
+        let inputs = discover_inputs(&req);
+        assert_eq!(find(&inputs, InputKind::XmlText, "a.b").value, "text");
     }
 
     #[test]

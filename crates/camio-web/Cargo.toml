@@ -13,6 +13,7 @@ camio-store.workspace = true
 camio-request = { workspace = true, features = ["impersonate"] }
 camio-convert.workspace = true
 camio-scan.workspace = true
+camio-active.workspace = true
 camio-automate.workspace = true
 camio-import.workspace = true
 camio-sequencer.workspace = true

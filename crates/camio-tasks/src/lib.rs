@@ -21,6 +21,7 @@
 use camio_core::{TaskId, TaskState};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -141,6 +142,10 @@ struct Shared {
     tasks: HashMap<i64, Entry>,
     next_id: i64,
     sink: Option<Arc<dyn TaskSink>>,
+    /// Live progress subscribers (plan §4.2 "stream ordered progress through a
+    /// bounded event channel"). Each is a bounded channel; a slow consumer drops
+    /// events rather than blocking the task, and a closed one is pruned on send.
+    subscribers: Vec<SyncSender<TaskRecord>>,
 }
 
 /// A persistence sink for task records (plan §4.2 durable jobs + restart
@@ -169,14 +174,30 @@ impl TaskManager {
                 tasks: HashMap::new(),
                 next_id: 0,
                 sink: Some(Arc::new(sink)),
+                subscribers: Vec::new(),
             })),
         }
     }
 
-    /// Persist one record through the configured sink, if any.
+    /// Subscribe to a live, ordered stream of task-record updates (spawn,
+    /// progress, every state change, terminal outcome). The channel is bounded;
+    /// if the consumer falls behind, updates for that subscriber are dropped
+    /// rather than stalling the tasks (poll [`status`](Self::status)/[`list`](Self::list)
+    /// to re-sync). Dropping the returned [`Receiver`] unsubscribes.
+    pub fn subscribe(&self) -> Receiver<TaskRecord> {
+        let (tx, rx) = sync_channel(256);
+        camio_core::sync::recovered_lock(&self.shared).subscribers.push(tx);
+        rx
+    }
+
+    /// Persist one record through the configured sink, if any, and broadcast it
+    /// to live subscribers. Closed subscriber channels are pruned.
     fn persist(&self, rec: &TaskRecord) {
         let sink = {
-            let g = self.shared.lock().expect("task manager poisoned");
+            let mut g = camio_core::sync::recovered_lock(&self.shared);
+            // Broadcast to subscribers, dropping ones whose receiver is gone.
+            g.subscribers
+                .retain(|tx| !matches!(tx.try_send(rec.clone()), Err(std::sync::mpsc::TrySendError::Disconnected(_))));
             g.sink.clone()
         };
         if let Some(sink) = sink {
@@ -197,7 +218,7 @@ impl TaskManager {
         let now = now_ms();
 
         let id = {
-            let mut g = self.shared.lock().expect("task manager poisoned");
+            let mut g = camio_core::sync::recovered_lock(&self.shared);
             g.next_id += 1;
             let id = g.next_id;
             g.tasks.insert(
@@ -253,7 +274,7 @@ impl TaskManager {
     /// Apply `state` (validated) and mirror the change to the sink.
     fn set_state(&self, id: i64, state: TaskState) {
         let snapshot = {
-            let mut g = self.shared.lock().expect("task manager poisoned");
+            let mut g = camio_core::sync::recovered_lock(&self.shared);
             let Some(e) = g.tasks.get_mut(&id) else {
                 return;
             };
@@ -268,7 +289,7 @@ impl TaskManager {
     /// Record the terminal state and outcome, then mirror to the sink.
     fn finish(&self, id: i64, outcome: Result<String, String>, cancelled: bool) {
         let snapshot = {
-            let mut g = self.shared.lock().expect("task manager poisoned");
+            let mut g = camio_core::sync::recovered_lock(&self.shared);
             let Some(e) = g.tasks.get_mut(&id) else {
                 return;
             };
@@ -316,7 +337,7 @@ impl TaskManager {
     /// [`TaskState::Cancelled`] (unless it already finished).
     pub fn cancel(&self, id: TaskId) -> bool {
         let snapshot = {
-            let mut g = self.shared.lock().expect("task manager poisoned");
+            let mut g = camio_core::sync::recovered_lock(&self.shared);
             match g.tasks.get_mut(&id.0) {
                 Some(e) if !e.record.is_terminal() => {
                     e.cancel.store(true, Ordering::Release);
@@ -337,9 +358,7 @@ impl TaskManager {
 
     /// A snapshot of one task's record.
     pub fn status(&self, id: TaskId) -> Option<TaskRecord> {
-        self.shared
-            .lock()
-            .expect("task manager poisoned")
+        camio_core::sync::recovered_lock(&self.shared)
             .tasks
             .get(&id.0)
             .map(|e| e.record.clone())
@@ -347,7 +366,7 @@ impl TaskManager {
 
     /// Snapshots of all tasks, newest first.
     pub fn list(&self) -> Vec<TaskRecord> {
-        let g = self.shared.lock().expect("task manager poisoned");
+        let g = camio_core::sync::recovered_lock(&self.shared);
         let mut out: Vec<TaskRecord> = g.tasks.values().map(|e| e.record.clone()).collect();
         out.sort_by_key(|r| std::cmp::Reverse(r.id.0));
         out
@@ -355,7 +374,7 @@ impl TaskManager {
 
     /// Remove finished task records, returning how many were cleared.
     pub fn clear_finished(&self) -> usize {
-        let mut g = self.shared.lock().expect("task manager poisoned");
+        let mut g = camio_core::sync::recovered_lock(&self.shared);
         let before = g.tasks.len();
         g.tasks.retain(|_, e| !e.record.is_terminal());
         before - g.tasks.len()
@@ -383,7 +402,7 @@ impl TaskContext {
     /// Report progress (`done` of optional `total`).
     pub fn set_progress(&self, done: u64, total: Option<u64>) {
         let snapshot = {
-            let mut g = self.mgr.shared.lock().expect("task manager poisoned");
+            let mut g = camio_core::sync::recovered_lock(&self.mgr.shared);
             if let Some(e) = g.tasks.get_mut(&self.id.0) {
                 e.record.progress_done = done;
                 e.record.progress_total = total;
@@ -401,7 +420,7 @@ impl TaskContext {
     /// Set the latest status message.
     pub fn set_message(&self, msg: impl Into<String>) {
         let snapshot = {
-            let mut g = self.mgr.shared.lock().expect("task manager poisoned");
+            let mut g = camio_core::sync::recovered_lock(&self.mgr.shared);
             if let Some(e) = g.tasks.get_mut(&self.id.0) {
                 e.record.message = msg.into();
                 e.record.updated_at_ms = now_ms();
@@ -420,7 +439,7 @@ impl TaskContext {
     /// failure, parser failure, scope denial, or storage failure into a
     /// generic "failed".
     pub fn set_outcome(&self, outcome: TaskOutcome) {
-        let mut g = self.mgr.shared.lock().expect("task manager poisoned");
+        let mut g = camio_core::sync::recovered_lock(&self.mgr.shared);
         if let Some(e) = g.tasks.get_mut(&self.id.0) {
             if !e.record.is_terminal() {
                 e.record.outcome = Some(outcome);
@@ -659,5 +678,41 @@ mod tests {
         assert_eq!(last.outcome, Some(TaskOutcome::Success));
         assert_eq!(last.result.as_deref(), Some("checks passed"));
         assert_eq!(last.progress_done, 1);
+    }
+
+    #[test]
+    fn subscribers_stream_ordered_progress_and_outcome() {
+        let mgr = TaskManager::new();
+        let rx = mgr.subscribe();
+        let id = mgr.spawn("scan", |ctx| {
+            ctx.set_progress(1, Some(2));
+            ctx.set_progress(2, Some(2));
+            Ok("done".into())
+        });
+        wait_terminal(&mgr, id);
+
+        let mut records = Vec::new();
+        while let Ok(rec) = rx.recv_timeout(std::time::Duration::from_millis(500)) {
+            let terminal = rec.is_terminal();
+            records.push(rec);
+            if terminal {
+                break;
+            }
+        }
+        assert!(!records.is_empty(), "stream delivered nothing");
+        assert_eq!(records.first().unwrap().state, TaskState::Queued);
+        assert_eq!(records.last().unwrap().state, TaskState::Completed);
+        assert_eq!(records.last().unwrap().outcome, Some(TaskOutcome::Success));
+        // Progress rode along the same ordered stream.
+        assert!(records.iter().any(|r| r.progress_done == 2));
+    }
+
+    #[test]
+    fn a_dropped_subscriber_is_pruned_and_never_blocks_a_task() {
+        let mgr = TaskManager::new();
+        drop(mgr.subscribe()); // unsubscribe immediately
+        let id = mgr.spawn("x", |_| Ok("ok".into()));
+        wait_terminal(&mgr, id);
+        assert_eq!(mgr.status(id).unwrap().state, TaskState::Completed);
     }
 }

@@ -50,7 +50,7 @@ impl QueryTarget for HttpExchange {
         let req = &self.request;
         match field.len() {
             1 => {
-                let f = &field[0];
+                let f = field.first()?;
                 if seg_is(f, "source") {
                     Some(Cow::Borrowed(self.source.as_str()))
                 } else if seg_is(f, "scope") {
@@ -61,8 +61,8 @@ impl QueryTarget for HttpExchange {
                     None
                 }
             }
-            2 if seg_is(&field[0], "req") => {
-                let f = &field[1];
+            2 if seg_is(field.first()?, "req") => {
+                let f = field.get(1)?;
                 if seg_is(f, "method") {
                     Some(Cow::Borrowed(req.method.as_str()))
                 } else if seg_is(f, "url") {
@@ -87,9 +87,9 @@ impl QueryTarget for HttpExchange {
                     None
                 }
             }
-            2 if seg_is(&field[0], "resp") => {
+            2 if seg_is(field.first()?, "resp") => {
                 let resp = self.response.as_ref()?;
-                let f = &field[1];
+                let f = field.get(1)?;
                 if seg_is(f, "raw") {
                     Some(Cow::Owned(resp.raw()))
                 } else if seg_is(f, "body") {
@@ -102,11 +102,20 @@ impl QueryTarget for HttpExchange {
                     None
                 }
             }
-            _ if field.len() >= 3 && seg_is(&field[0], "req") && seg_is(&field[1], "header") => {
+            _ if field.len() >= 3
+                && seg_is(field.first()?, "req")
+                && seg_is(field.get(1)?, "header") =>
+            {
+                // The remainder is a header name, which may itself contain dots
+                // (`req.header.x-forwarded-for`), so it is joined rather than
+                // indexed.
                 let name = field[2..].join(".");
                 req.headers.get(&name).map(Cow::Borrowed)
             }
-            _ if field.len() >= 3 && seg_is(&field[0], "resp") && seg_is(&field[1], "header") => {
+            _ if field.len() >= 3
+                && seg_is(field.first()?, "resp")
+                && seg_is(field.get(1)?, "header") =>
+            {
                 let resp = self.response.as_ref()?;
                 let name = field[2..].join(".");
                 resp.headers.get(&name).map(Cow::Borrowed)
@@ -117,10 +126,10 @@ impl QueryTarget for HttpExchange {
 
     fn get_int(&self, field: &[String]) -> Option<i64> {
         match field.len() {
-            1 if seg_is(&field[0], "id") => Some(self.id.0),
-            1 if seg_is(&field[0], "created_at") => Some(self.created_at_ms),
-            2 if seg_is(&field[0], "req") => {
-                let f = &field[1];
+            1 if seg_is(field.first()?, "id") => Some(self.id.0),
+            1 if seg_is(field.first()?, "created_at") => Some(self.created_at_ms),
+            2 if seg_is(field.first()?, "req") => {
+                let f = field.get(1)?;
                 if seg_is(f, "port") {
                     self.request.port().map(|p| p as i64)
                 } else if seg_is(f, "len") {
@@ -131,8 +140,8 @@ impl QueryTarget for HttpExchange {
                     None
                 }
             }
-            2 if seg_is(&field[0], "resp") => {
-                let f = &field[1];
+            2 if seg_is(field.first()?, "resp") => {
+                let f = field.get(1)?;
                 if seg_is(f, "code") || seg_is(f, "status") {
                     self.response.as_ref().map(|r| r.status as i64)
                 } else if seg_is(f, "len") {

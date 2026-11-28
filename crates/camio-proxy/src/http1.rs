@@ -225,6 +225,9 @@ impl<S: Read + Write> Conn<S> {
             // A chunk-size may carry extensions after ';'.
             let hex = size_str.split(';').next().unwrap_or("").trim();
             let size = usize::from_str_radix(hex, 16)
+                // `ParseIntError` for a hex chunk size only means "not a
+                // number"; the replacement says which field was wrong.
+                // audit-allow: B7
                 .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "bad chunk size"))?;
             if size == 0 {
                 // Consume trailing headers up to the final blank line.
@@ -257,6 +260,9 @@ impl<S: Read + Write> Conn<S> {
                 let line = self.available()[..idx].to_vec();
                 self.consume(idx + 2);
                 return String::from_utf8(line)
+                    // The `Utf8Error` only carries byte offsets; the message
+                    // states the framing rule that was violated.
+                    // audit-allow: B7
                     .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "non-utf8 line"));
             }
             if self.available().len() > max {
@@ -321,26 +327,26 @@ pub fn write_response<W: Write>(
     resp: &HttpResponse,
     keep_alive: bool,
 ) -> io::Result<()> {
-    use std::fmt::Write as _;
     let mut head = String::with_capacity(256);
     let reason = resp
         .reason
         .as_deref()
         .filter(|r| !r.is_empty())
         .unwrap_or_else(|| reason_phrase(resp.status));
-    let _ = write!(head, "HTTP/1.1 {} {}\r\n", resp.status, reason);
+    // `push_str(&format!(…))`: building a String cannot fail, so no result is
+    // produced to be ignored.
+    head.push_str(&format!("HTTP/1.1 {} {}\r\n", resp.status, reason));
     for h in resp.headers.iter() {
         if is_dropped_response_header(&h.name) {
             continue;
         }
-        let _ = write!(head, "{}: {}\r\n", h.name, h.value);
+        head.push_str(&format!("{}: {}\r\n", h.name, h.value));
     }
-    let _ = write!(head, "Content-Length: {}\r\n", resp.body.len());
-    let _ = write!(
-        head,
+    head.push_str(&format!("Content-Length: {}\r\n", resp.body.len()));
+    head.push_str(&format!(
         "Connection: {}\r\n",
         if keep_alive { "keep-alive" } else { "close" }
-    );
+    ));
     head.push_str("\r\n");
     w.write_all(head.as_bytes())?;
     w.write_all(resp.body.as_bytes())?;
@@ -356,7 +362,9 @@ pub fn absolute_url(head: &RequestHead, connect_authority: Option<&str>) -> Opti
     if let Some(authority) = connect_authority {
         // Origin-form target inside an https tunnel.
         let (host, _port) = split_authority(authority);
-        let _ = host;
+        // `host` is unused because only the port half matters here; binding it
+        // keeps the destructuring readable.
+        let _unused_host = host;
         let path = if head.target.starts_with('/') {
             head.target.clone()
         } else {

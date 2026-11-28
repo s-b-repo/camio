@@ -27,6 +27,7 @@
 //! [`payloads`]); they are not exploits.
 
 pub mod ai_chain;
+pub mod attack_chain;
 pub mod campaign;
 pub mod chain;
 pub mod classify;
@@ -36,8 +37,11 @@ pub mod encoding;
 pub mod payload_db;
 pub mod payloads;
 pub mod positions;
+pub mod pow;
+pub mod workflow;
 
 pub use ai_chain::{authorize_chain_steps, authorize_next_url, AiChainError};
+pub use attack_chain::{suggest_attack_chains, AttackChain};
 
 pub use campaign::{
     count_requests, generate, generate_from, plan, projected_count, AttackType, Campaign,
@@ -47,16 +51,24 @@ pub use chain::{
     materialize as materialize_chain, validate as validate_chain, Chain, ChainError, ChainState,
     ChainStep, Condition, Extractor, MaterializedStep,
 };
-pub use classify::{classify, Baseline, ClassifiedResult};
+pub use classify::{classify, Baseline, ClassifiedResult, StatusSummary};
 pub use combo::{combo, ComboMode};
-pub use discover::{detect_body_context, discover_inputs, DiscoveredInput, InputKind};
+pub use discover::{
+    detect_body_context, discover_inputs, set_xml_input, DiscoveredInput, InputKind,
+};
 pub use encoding::{
-    compatible_encodings, expand_for_context, expand_with_encodings, sql_encodings, to_payload_set,
-    EncodedPayload, Encoding, InputContext,
+    apply_encoding_chain, chain_payload_set, compatible_encodings, expand_for_context,
+    expand_with_encodings, parse_encoding_chain, sql_encodings, to_payload_set, EncodedPayload,
+    Encoding, InputContext,
 };
 pub use payload_db::{load_default as load_payload_db, scan_for_signatures, PayloadDb, Signature};
 pub use payloads::{builtin_pack, builtin_packs, PayloadSet};
 pub use positions::{find_positions, strip_markers, Position, DEFAULT_MARKER};
+pub use workflow::{parse_reference, Action as WorkflowAction, Step as WorkflowStep, WorkflowDoc, KNOWN_TRANSFORM_OPS};
+pub use pow::{
+    parse_anubis, solve as solve_pow, verify as verify_pow, NonceFormat, PowAlgorithm,
+    PowChallenge, PowError, PowSolution,
+};
 
 use std::fmt;
 

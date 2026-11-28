@@ -41,15 +41,19 @@
 
 use camio_core::{Confidence, ExchangeId, Finding, FindingId, HttpExchange, HttpRequest, Severity};
 
+mod advanced;
+mod autofuzz;
 mod checks;
 mod crawl;
 mod oast_ssrf;
 mod params;
 
+pub use autofuzz::{run_auto_fuzz, AutoFuzzResult, AutoFuzzSummary, FuzzCategory};
 pub use crawl::{crawl, extract_links, CrawlOptions, CrawlResult};
 pub use oast_ssrf::run_oast_ssrf;
 
-pub use checks::{ErrorBasedSqli, OpenRedirect, ReflectedXss};
+pub use advanced::{CorsMisconfig, CrlfInjection, HostHeaderInjection, PathTraversal, Ssti};
+pub use checks::{ErrorBasedSqli, HttpMethodAudit, OpenRedirect, ReflectedXss};
 pub use params::{discovered_params, set_query_param};
 
 /// Sends one probe request and returns the completed exchange.
@@ -99,6 +103,16 @@ pub fn default_active_checks() -> Vec<Box<dyn ActiveCheck>> {
         Box::new(ReflectedXss),
         Box::new(ErrorBasedSqli),
         Box::new(OpenRedirect),
+        // The resource-level method audit uses only read-only probes by default
+        // (OPTIONS/TRACE/HEAD); its write-method probes stay opt-in (plan §16).
+        Box::new(HttpMethodAudit::safe()),
+        // Expanded active-check matrix (plan §8): template injection, traversal,
+        // response splitting, CORS, and host-header injection.
+        Box::new(Ssti),
+        Box::new(PathTraversal),
+        Box::new(CrlfInjection),
+        Box::new(CorsMisconfig),
+        Box::new(HostHeaderInjection),
     ]
 }
 
@@ -106,11 +120,55 @@ pub fn default_active_checks() -> Vec<Box<dyn ActiveCheck>> {
 /// all findings, in check order. No deduplication is applied here; the findings
 /// store collapses duplicates across runs just as it does for passive findings.
 pub fn run_active(base: &HttpRequest, send: &Sender) -> Vec<Finding> {
+    run_active_filtered(base, send, &[], &[])
+}
+
+/// Like [`run_active`] but restricted to a subset of the active checks by id
+/// (plan §F13 scanner profiles/exclusions). When `only` is non-empty, only
+/// checks whose id is listed run; any id in `exclude` is skipped. Both match on
+/// the stable check id (`reflected-xss`, `error-based-sqli`, `open-redirect`,
+/// `http-method-audit`). Findings are still tagged with their producing check.
+pub fn run_active_filtered(
+    base: &HttpRequest,
+    send: &Sender,
+    only: &[String],
+    exclude: &[String],
+) -> Vec<Finding> {
     let mut out = Vec::new();
     for check in default_active_checks() {
-        out.extend(check.run(base, send));
+        let id = check.id();
+        if !only.is_empty() && !only.iter().any(|o| o == id) {
+            continue;
+        }
+        if exclude.iter().any(|e| e == id) {
+            continue;
+        }
+        for mut finding in check.run(base, send) {
+            if finding.rule.is_none() {
+                finding.rule = Some(id.to_string());
+            }
+            out.push(finding);
+        }
     }
     out
+}
+
+/// Titles of the HTTP-method-audit findings that describe the **host**, not a
+/// specific resource (the advertised method set and TRACE support are the same
+/// for every page). During a crawl sweep these should be reported once from the
+/// seed, not repeated per page — see [`is_host_level_finding`].
+const HOST_LEVEL_METHOD_TITLES: &[&str] = &[
+    "Dangerous HTTP methods advertised",
+    "Cross-Site Tracing (TRACE enabled)",
+];
+
+/// Whether a finding is a host-level (resource-independent) method-audit result,
+/// so a site sweep can report it once instead of once per crawled page. The
+/// resource-level method findings (access-control bypass, write-method capability)
+/// are *not* host-level and stay per page.
+pub fn is_host_level_finding(finding: &Finding) -> bool {
+    finding.rule.as_deref() == Some("http-method-audit")
+        && HOST_LEVEL_METHOD_TITLES.contains(&finding.title.as_str())
 }
 
 /// Build an active [`Finding`] for one probe exchange.
@@ -133,6 +191,8 @@ pub(crate) fn finding(
         detail: detail.into(),
         evidence: vec![evidence],
         created_at_ms: 0,
+        // The runner (`run_active`) tags each finding with its check id.
+        rule: None,
     }
 }
 
@@ -174,13 +234,13 @@ mod tests {
     }
 
     #[test]
-    fn default_active_checks_are_three_with_unique_ids() {
+    fn default_active_checks_have_unique_ids() {
         let checks = default_active_checks();
-        assert_eq!(checks.len(), 3);
+        assert_eq!(checks.len(), 9);
         let mut ids: Vec<&str> = checks.iter().map(|c| c.id()).collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 3, "check ids must be unique");
+        assert_eq!(ids.len(), 9, "check ids must be unique");
     }
 
     #[test]
@@ -220,8 +280,11 @@ mod tests {
     }
 
     #[test]
-    fn checks_send_nothing_when_there_are_no_inputs() {
-        // No query or body parameters at all: no probe should be sent.
+    fn injection_checks_send_nothing_when_there_are_no_inputs() {
+        // The parameter-injection checks target inputs: with no query or body
+        // parameters at all, they must send no probes. (The resource-level
+        // HttpMethodAudit is intentionally excluded here — it audits the
+        // resource, not its parameters, so it probes even a param-less request.)
         let base = HttpRequest::get("https://app.test/");
         let calls = Cell::new(0usize);
         let sender = |req: HttpRequest| -> Option<HttpExchange> {
@@ -229,8 +292,13 @@ mod tests {
             Some(HttpExchange::new(req, Source::Scanner))
         };
         let send: &Sender = &sender;
-        let findings = run_active(&base, send);
-        assert!(findings.is_empty());
+        for check in [
+            Box::new(ReflectedXss) as Box<dyn ActiveCheck>,
+            Box::new(ErrorBasedSqli),
+            Box::new(OpenRedirect),
+        ] {
+            assert!(check.run(&base, send).is_empty());
+        }
         assert_eq!(calls.get(), 0, "no inputs must mean no probes");
     }
 
@@ -241,6 +309,45 @@ mod tests {
         let sender = |_req: HttpRequest| -> Option<HttpExchange> { None };
         let send: &Sender = &sender;
         assert!(run_active(&base, send).is_empty());
+    }
+
+    #[test]
+    fn run_active_filtered_selects_and_excludes_by_id() {
+        // Reflects XSS and redirects to the sentinel: both checks would fire.
+        let base = HttpRequest::get("https://app.test/go?q=hello&next=/home");
+        let sender = |req: HttpRequest| -> Option<HttpExchange> {
+            let resp = echo_response(&req);
+            Some(HttpExchange::new(req, Source::Scanner).with_response(resp))
+        };
+        let send: &Sender = &sender;
+
+        // only = reflected-xss → just the XSS finding, no open-redirect.
+        let only = run_active_filtered(&base, send, &["reflected-xss".into()], &[]);
+        assert!(only.iter().all(|f| f.rule.as_deref() == Some("reflected-xss")));
+        assert!(only.iter().any(|f| f.title.contains("cross-site scripting")));
+
+        // exclude = reflected-xss → the XSS finding is gone, open-redirect stays.
+        let excl = run_active_filtered(&base, send, &[], &["reflected-xss".into()]);
+        assert!(excl.iter().all(|f| f.rule.as_deref() != Some("reflected-xss")));
+        assert!(excl.iter().any(|f| f.rule.as_deref() == Some("open-redirect")));
+    }
+
+    #[test]
+    fn run_active_tags_each_finding_with_its_check_id() {
+        // A reflecting endpoint yields an XSS finding; run_active must tag it
+        // with the producing check's id (its report/SARIF ruleId).
+        let base = HttpRequest::get("https://app.test/go?q=hello");
+        let sender = |req: HttpRequest| -> Option<HttpExchange> {
+            let resp = echo_response(&req);
+            Some(HttpExchange::new(req, Source::Scanner).with_response(resp))
+        };
+        let send: &Sender = &sender;
+        let findings = run_active(&base, send);
+        let xss = findings
+            .iter()
+            .find(|f| f.title.contains("cross-site scripting"))
+            .expect("expected an XSS finding");
+        assert_eq!(xss.rule.as_deref(), Some("reflected-xss"));
     }
 
     #[test]

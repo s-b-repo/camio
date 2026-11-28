@@ -135,9 +135,13 @@ impl Parser {
                 Ok(inner)
             }
             Some(Token::Word(_)) => {
-                let word = match self.next() {
-                    Some(Token::Word(w)) => w,
-                    _ => unreachable!(),
+                // The peek and the consume have to agree, but "have to" is not
+                // "do": a mismatch used to end in `unreachable!()`, which turns
+                // a parser bug into a panic on operator-supplied input.
+                let Some(Token::Word(word)) = self.next() else {
+                    return Err(ParseError {
+                        message: "token changed while reading a word".into(),
+                    });
                 };
                 if matches!(self.peek(), Some(Token::Colon)) {
                     self.next(); // consume ':'
@@ -149,9 +153,10 @@ impl Parser {
                 }
             }
             Some(Token::Str(_)) => {
-                let s = match self.next() {
-                    Some(Token::Str(s)) => s,
-                    _ => unreachable!(),
+                let Some(Token::Str(s)) = self.next() else {
+                    return Err(ParseError {
+                        message: "token changed while reading a string".into(),
+                    });
                 };
                 Ok(Expr::FreeText(s))
             }
@@ -186,12 +191,19 @@ fn build_clause(key: &str, value: String) -> Expr {
     let mut segments: Vec<String> = key.split('.').map(|s| s.to_string()).collect();
 
     // `preset:"name"` reference.
-    if segments.len() == 1 && segments[0].eq_ignore_ascii_case("preset") {
+    if segments.len() == 1
+        && segments
+            .first()
+            .is_some_and(|s| s.eq_ignore_ascii_case("preset"))
+    {
         return Expr::Preset(value);
     }
 
+    // `split` always yields at least one segment, so `last()` is `Some`; take it
+    // as an `Option` and let an unrecognised segment mean "no operator" rather
+    // than unwrapping on a path that runs on operator-supplied input.
     let op = if segments.len() > 1 {
-        Operator::from_token(segments.last().unwrap())
+        Operator::from_token(segments.last().map_or("", |segment| segment.as_str()))
     } else {
         None
     };

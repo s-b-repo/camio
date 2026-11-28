@@ -23,12 +23,23 @@ pub mod matchreplace;
 pub mod model;
 pub mod policy;
 pub mod rate;
+pub mod rng;
+pub mod sbom;
 pub mod scope;
+pub mod secretbox;
 pub mod sitemap;
+pub mod sync;
+pub mod user_agent;
 
 pub use fingerprint::{
-    BrowserOs, FingerprintPolicy, FingerprintProfile, MediaDeviceMode, Persona, PrefValue,
-    RefererPolicy, ScreenSize, WebRtcMode, WebglMode, ALIGNED_FIREFOX_MAJOR,
+    AudioMode, BrowserOs, CanvasMode, ClientHintsMode, FingerprintPolicy, FingerprintProfile,
+    FontMode, MediaDeviceMode, Persona, PrefValue, RefererPolicy, ScreenSize, WebRtcMode,
+    WebglMode, ALIGNED_FIREFOX_MAJOR,
+};
+pub use rng::SplitMix64;
+pub use user_agent::{
+    random_user_agent, random_user_agent_for, random_user_agent_from_entropy, BrowserFamily,
+    UaOs, UserAgent, UserAgentRotator,
 };
 
 pub use ai_guard::{
@@ -46,11 +57,15 @@ pub use camioql::{Query, QueryTarget};
 pub use cvss::{Cvss, CvssError};
 pub use matchreplace::{Find, MatchReplaceRule, RuleSet, Target as MatchTarget};
 pub use model::{
-    Body, Confidence, ExchangeId, Finding, FindingId, Header, HeaderList, HttpExchange,
-    HttpRequest, HttpResponse, HttpVersion, Project, ProjectId, ScopeDecision, Severity, Source,
-    Target, Task, TaskId, TaskState, Timings,
+    resolve_redirect, Body, Confidence, ExchangeId, Finding, FindingId, Header, HeaderList,
+    HttpExchange, HttpRequest, HttpResponse, HttpVersion, Project, ProjectId, ScopeDecision,
+    Severity, Source, Target, Task, TaskId, TaskState, Timings,
 };
 pub use policy::{ActionClass, Policy, PolicyOutcome};
 pub use rate::RateLimiter;
 pub use scope::{Scope, ScopeRule};
+pub use secretbox::{SecretboxError, DEFAULT_PBKDF2_ITERS};
 pub use sitemap::{SiteMap, SiteNode};
+pub use sync::{
+    describe_panic, expected, note_failure, reap, recovered_lock, try_lock, unpoisoned,
+};

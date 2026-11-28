@@ -35,7 +35,14 @@ pub fn run_oast_ssrf(
     // One settle window for the whole run, set on the first successful send.
     let mut deadline: Option<std::time::Instant> = None;
     for (kind, name) in dedup_params(discovered_params(base)) {
-        let token = collector.new_token();
+        // Without a token there is nothing to correlate, so stop the run rather
+        // than probing with a guessable one.
+        let Ok(token) = collector.new_token() else {
+            // One line, not a panic: every later probe needs the same token
+            // machinery, so continuing would only repeat the failure.
+            eprintln!("camio: OAST probes stopped — no random bytes for a correlation token");
+            break;
+        };
         let url = collector.callback_url(&token);
         let before = collector.for_token(&token).len();
 

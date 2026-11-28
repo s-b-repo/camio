@@ -3,16 +3,20 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Camio · Workbench</title>
+  <title>Camio · a Cyber Sec tool</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/ui.css">
   <script src="/ui.js" defer></script>
 </head>
 <body>
+  <div class="bg-grid" aria-hidden="true"></div>
+  <canvas id="bg-canvas" aria-hidden="true"></canvas>
   <a class="skip" href="#main">Skip to workspace</a>
   <header class="topbar">
     <button class="nav-toggle ghost" id="nav-toggle" aria-expanded="false" aria-controls="rail">Menu</button>
-    <button class="brand" type="button" data-go="status" aria-label="Camio overview">
-      <span class="brand-mark" aria-hidden="true"></span><span>CAMIO</span>
+    <button class="brand" type="button" data-go="status" aria-label="Camio, a Cyber Sec tool — overview">
+      <span class="brand-mark" aria-hidden="true"><canvas id="globe-canvas" width="34" height="34"></canvas></span>
+      <span class="brand-text">CAMIO<i>CYBER_SEC_</i></span>
     </button>
     <div class="crumb"><span>Workspace</span><span aria-hidden="true">/</span><strong id="current-page">Overview</strong></div>
     <div class="top-actions">

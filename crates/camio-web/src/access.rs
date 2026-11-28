@@ -1,6 +1,5 @@
 use super::{header, WebResponse};
 use anyhow::{anyhow, ensure, Result};
-use std::fmt::Write;
 use std::net::{Ipv4Addr, SocketAddr};
 use tiny_http::Header;
 
@@ -37,10 +36,10 @@ impl LocalAccess {
         let origin = format!("http://{authority}");
         let mut random = [0u8; 32];
         getrandom::fill(&mut random).map_err(|error| anyhow!("creating local session: {error}"))?;
-        let mut token = String::with_capacity(64);
-        for byte in random {
-            write!(token, "{byte:02x}").expect("writing to a String");
-        }
+        // Hex per byte via `format!` (the same idiom as the OAST token): writing to a
+        // `String` cannot fail, but proving that to a reader costs more than not
+        // asking it to handle a `Result`.
+        let token: String = random.iter().map(|b| format!("{b:02x}")).collect();
         Ok(Self {
             authority,
             origin,
@@ -118,17 +117,30 @@ pub(super) fn single_header<'a>(
     }
 }
 
-pub(super) fn secure_headers(response: WebResponse) -> WebResponse {
+/// The security headers every response carries. All are constants, so a value
+/// that fails validation is a programming error — and the answer is to drop
+/// that one header, never to panic on a request path.
+const SECURE_HEADERS: &[(&str, &str)] = &[
+    ("Cache-Control", "no-store"),
+    ("Referrer-Policy", "no-referrer"),
+    ("X-Content-Type-Options", "nosniff"),
+    ("X-Frame-Options", "DENY"),
+    ("Cross-Origin-Resource-Policy", "same-origin"),
+    (
+        "Content-Security-Policy",
+        "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; \
+         img-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; \
+         frame-ancestors 'none'",
+    ),
+];
+
+pub(super) fn secure_headers(mut response: WebResponse) -> WebResponse {
+    for (name, value) in SECURE_HEADERS {
+        if let Some(h) = header(name, value) {
+            response = response.with_header(h);
+        }
+    }
     response
-        .with_header(header("Cache-Control", "no-store"))
-        .with_header(header("Referrer-Policy", "no-referrer"))
-        .with_header(header("X-Content-Type-Options", "nosniff"))
-        .with_header(header("X-Frame-Options", "DENY"))
-        .with_header(header("Cross-Origin-Resource-Policy", "same-origin"))
-        .with_header(header(
-            "Content-Security-Policy",
-            "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
-        ))
 }
 
 #[cfg(test)]
@@ -140,28 +152,37 @@ mod tests {
         assert!(loopback("0.0.0.0:8787").is_err());
         assert!(loopback("localhost:8787").unwrap().ip().is_loopback());
         let access = LocalAccess::new("127.0.0.1:8787".parse().unwrap()).unwrap();
-        assert!(!access.same_origin(&[header("Host", "rebound.test:8787")]));
-        let host = header("Host", "127.0.0.1:8787");
+        let rebound = header("Host", "rebound.test:8787").expect("valid test header");
+        assert!(!access.same_origin(&[rebound]));
+        let host = header("Host", "127.0.0.1:8787").expect("valid test header");
         assert!(access.same_origin(std::slice::from_ref(&host)));
         assert!(!access.authorized(std::slice::from_ref(&host)));
-        assert!(!access.same_origin(&[host.clone(), header("Origin", "http://other.test")]));
+        assert!(!access.same_origin(&[
+            host.clone(),
+            header("Origin", "http://other.test").expect("valid test header")
+        ]));
         assert!(!access.same_origin(&[host.clone(), host.clone()]));
-        let auth = header("Authorization", &format!("Bearer {}", access.token));
+        let auth = header("Authorization", &format!("Bearer {}", access.token))
+            .expect("valid test header");
         assert!(access.authorized(std::slice::from_ref(&auth)));
         // The scheme is case-insensitive per RFC 7235.
-        let lower = header("Authorization", &format!("bearer {}", access.token));
+        let lower = header("Authorization", &format!("bearer {}", access.token)).expect("valid");
         assert!(access.authorized(std::slice::from_ref(&lower)));
         // A wrong key is still refused under either spelling.
-        let wrong = header("Authorization", "bearer deadbeef");
+        let wrong = header("Authorization", "bearer deadbeef").expect("valid");
         assert!(!access.authorized(std::slice::from_ref(&wrong)));
         // Host is case-insensitive, but a different host is still refused.
-        let upper_host = header("Host", "127.0.0.1:8787");
+        let upper_host = header("Host", "127.0.0.1:8787").expect("valid");
         assert!(access.same_origin(std::slice::from_ref(&upper_host)));
         assert!(access.same_origin(&[
             upper_host.clone(),
-            header("Origin", "http://127.0.0.1:8787"),
-            header("Sec-Fetch-Site", "same-origin"),
+            header("Origin", "http://127.0.0.1:8787").expect("valid"),
+            header("Sec-Fetch-Site", "same-origin").expect("valid"),
         ]));
-        assert!(access.same_origin(&[host, auth, header("Sec-Fetch-Site", "same-origin")]));
+        assert!(access.same_origin(&[
+            host,
+            auth,
+            header("Sec-Fetch-Site", "same-origin").expect("valid"),
+        ]));
     }
 }

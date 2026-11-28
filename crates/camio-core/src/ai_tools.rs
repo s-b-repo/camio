@@ -315,7 +315,12 @@ pub fn resolve_tool_call(
 
     // Separate the top scored from runners-up and check the action class
     // of the top candidate.
-    let (top_score, top_tool, top_reason, top_coverage) = scored[0].clone();
+    let Some((top_score, top_tool, top_reason, top_coverage)) = scored.first().cloned() else {
+        // The empty-catalog case is handled above; reaching here means the
+        // scoring stage or the sort lost an entry, which is a bug worth
+        // reporting rather than indexing into.
+        return Ok(ToolResolution::Refused("the catalog is empty".to_string()));
+    };
     if top_score < SUGGEST_MIN {
         return Ok(ToolResolution::Refused(format!(
             "no tool in the catalog matches `{}` (top candidate `{}` scored {:.2})",

@@ -1,4 +1,4 @@
-use super::{CamioApp, Output};
+use super::{pretty_json, CamioApp, Output};
 use camio_store::{ReviewPlan, ReviewWorkflow, WorkflowVersion, MAX_REVIEW_EXCHANGES};
 use egui::{RichText, Stroke};
 
@@ -17,7 +17,9 @@ pub(super) struct WorkflowView {
 impl Default for WorkflowView {
     fn default() -> Self {
         let draft = ReviewPlan::new("", 200, true);
-        let json = serde_json::to_string_pretty(&draft).unwrap_or_default();
+        // An empty default here is not neutral: the user edits this text and it
+        // is parsed back on save, so a silent failure would wipe the draft.
+        let json = pretty_json(&draft);
         Self {
             catalog: Vec::new(),
             versions: Vec::new(),
@@ -50,7 +52,7 @@ impl WorkflowView {
 
     fn sync_json(&mut self) {
         if !self.json_dirty {
-            self.json = serde_json::to_string_pretty(&self.draft).unwrap_or_default();
+            self.json = pretty_json(&self.draft);
         }
     }
 

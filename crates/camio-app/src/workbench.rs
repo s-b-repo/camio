@@ -54,8 +54,11 @@ pub(super) const NAV: &[(&str, &[(Surface, &str)])] = &[
         "Scanner",
         &[
             (Surface::Scan, "Scanner"),
+            (Surface::Recon, "Attack surface"),
             (Surface::ActiveScan, "Active scan"),
+            (Surface::Autopilot, "Autopilot"),
             (Surface::Findings, "Findings"),
+            (Surface::Report, "Report"),
             (Surface::Import, "Import"),
             (Surface::Integrations, "Integrations"),
         ],
@@ -224,7 +227,7 @@ impl CamioApp {
 
     fn refresh_overview(&mut self) {
         match self.open().and_then(|store| {
-            let all = Query::compile("").expect("empty filter");
+            let all = Query::all();
             Ok((
                 store.workspace().map_err(message)?,
                 store
@@ -262,6 +265,9 @@ impl CamioApp {
             .show(ui, |ui| {
                 ui.set_min_width((ui.available_width() - 2.0).max(100.0));
                 ui.columns(2, |columns| {
+                    // `columns` is a `ui.columns(2, …)` slice: exactly two
+                    // entries, so indexing is the API's own contract.
+                    // audit-allow: D1
                     columns[0].label(RichText::new("WORKSPACE OVERVIEW").size(10.0).monospace());
                     columns[0].label(RichText::new(&heading).size(35.0).strong());
                     columns[0].label("Review stored traffic and the findings it supports.");
@@ -729,12 +735,17 @@ impl CamioApp {
         if !open {
             self.workbench.inspector = None;
         } else if let Some(save) = bookmark {
+            // Snapshot the two fields before `open()` runs. `open()` rebuilds
+            // state, so re-reading the inspector afterwards was an `unwrap()`
+            // waiting for the day `open()` clears it.
+            let Some(inspector) = self.workbench.inspector.as_ref() else {
+                return;
+            };
+            let label = inspector.label.clone();
+            let note = inspector.note.clone();
             let result = self.open().and_then(|store| {
-                let inspector = self.workbench.inspector.as_ref().unwrap();
                 if save {
-                    store
-                        .save_exchange(id, &inspector.label, &inspector.note)
-                        .map_err(message)
+                    store.save_exchange(id, &label, &note).map_err(message)
                 } else {
                     store.delete_saved_exchange(id).map_err(message)
                 }
@@ -795,6 +806,103 @@ impl CamioApp {
                 Ok(id) => self.open_review(id),
                 Err(error) => self.out = Output::Error(format!("{error:#}")),
             }
+        }
+    }
+
+    pub(super) fn attack_surface_ui(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Attack surface");
+        ui.label(
+            "Fuse tech + WAF + takeover recon from a stored exchange into payload categories, \
+             evasion encodings, and a scope rule. Read-only — nothing is sent.",
+        );
+        ui.label("CamioQL filter (newest matching exchange)");
+        ui.add(
+            egui::TextEdit::singleline(&mut self.query)
+                .hint_text("req.host.cont:\"example.com\"")
+                .desired_width(f32::INFINITY),
+        );
+        if ui.button("Analyze").clicked() {
+            self.out = match self.analyze_surface() {
+                Ok(text) => Output::Text(text),
+                Err(error) => Output::Error(error),
+            };
+        }
+    }
+
+    fn analyze_surface(&self) -> Result<String, String> {
+        let store = self.open()?;
+        let query =
+            Query::compile(self.query.trim()).map_err(|e| format!("invalid CamioQL: {e}"))?;
+        let exchanges = store.query_with_bodies(&query, 1).map_err(message)?;
+        let ex = exchanges
+            .into_iter()
+            .next()
+            .ok_or("no stored exchange matched — capture traffic first, or widen the query")?;
+        let s = camio_scan::analyze_attack_surface(&ex);
+        let mut out = format!("host: {}\n", s.host.as_deref().unwrap_or("-"));
+        if s.technologies.is_empty() {
+            out.push_str("technologies: (none detected)\n");
+        } else {
+            out.push_str("technologies:\n");
+            for t in &s.technologies {
+                let ver = t.version.as_deref().map(|v| format!(" {v}")).unwrap_or_default();
+                let imp = if t.implied { " [implied]" } else { "" };
+                out.push_str(&format!("  - {}{ver}{imp}\n", t.name));
+            }
+        }
+        if !s.wafs.is_empty() {
+            out.push_str(&format!("waf/cdn: {}\n", s.wafs.join(", ")));
+        }
+        if let Some(service) = &s.takeover {
+            out.push_str(&format!("takeover candidate: {service}\n"));
+        }
+        out.push_str(&format!(
+            "payload categories: {}\n",
+            s.suggested_payload_categories.join(", ")
+        ));
+        if !s.suggested_encodings.is_empty() {
+            let encs: Vec<String> =
+                s.suggested_encodings.iter().map(|e| format!("{e:?}")).collect();
+            out.push_str(&format!("evasion encodings: {}\n", encs.join(", ")));
+        }
+        if let Some(rule) = &s.suggested_scope_rule {
+            out.push_str(&format!("scope rule: {rule}\n"));
+        }
+        Ok(out)
+    }
+
+    pub(super) fn report_ui(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Report export");
+        ui.label(
+            "Export stored findings as a redacted, shareable report (no titles/detail/raw \
+             evidence) — safe for CI or a ticket.",
+        );
+        const FORMATS: [(&str, camio_store::ReportFormat); 4] = [
+            ("Markdown", camio_store::ReportFormat::Markdown),
+            ("JSON", camio_store::ReportFormat::Json),
+            ("HTML", camio_store::ReportFormat::Html),
+            ("SARIF", camio_store::ReportFormat::Sarif),
+        ];
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Format");
+            for (i, (label, _)) in FORMATS.iter().enumerate() {
+                ui.selectable_value(&mut self.report_fmt, i, *label);
+            }
+        });
+        if ui.button("Build report").clicked() {
+            let fmt = FORMATS
+                .get(self.report_fmt)
+                .map(|(_, f)| *f)
+                .unwrap_or(camio_store::ReportFormat::Markdown);
+            self.out = match self.open().and_then(|store| {
+                store
+                    .finding_report(None)
+                    .and_then(|r| r.render(fmt))
+                    .map_err(message)
+            }) {
+                Ok(text) => Output::Text(text),
+                Err(error) => Output::Error(error),
+            };
         }
     }
 
@@ -1783,12 +1891,13 @@ fn message_view(ui: &mut egui::Ui, inspector: &Inspector) {
                 ));
             }
             MessageView::Hex => {
-                use std::fmt::Write;
                 let mut text = String::new();
                 for (index, chunk) in body.as_bytes().chunks(16).enumerate() {
-                    let _ = write!(text, "{:06x}  ", index * 16);
+                    // `push_str(&format!(…))`: appending to a String cannot
+                    // fail, so there is no `Result` to discard per byte.
+                    text.push_str(&format!("{index:06x}  "));
                     for byte in chunk {
-                        let _ = write!(text, "{byte:02x} ");
+                        text.push_str(&format!("{byte:02x} "));
                     }
                     text.push('\n');
                 }

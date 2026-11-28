@@ -55,6 +55,9 @@ enum Command {
     },
     /// Launch the managed browser with a fingerprint policy applied.
     Launch(LaunchArgs),
+    /// Capture the managed browser's traffic over WebDriver BiDi (F05). Launch
+    /// first with `--remote-debugging-port`, then point `capture` at that port.
+    Capture(CaptureArgs),
     /// Send a request through the fingerprint-matched request engine.
     Send(SendArgs),
     /// Run a CamioQL query over stored history.
@@ -65,16 +68,30 @@ enum Command {
     Scope(ScopeArgs),
     /// Encode/decode/hash a value through a Convert pipeline (Convert/Decoder).
     Convert(ConvertArgs),
-    /// Decode a JWT (header + payload) WITHOUT verifying its signature.
+    /// Decode a JWT, and with --analyze audit it for weaknesses (jwt_tool-style).
     Jwt(JwtArgs),
+    /// Compute a file's Shodan favicon hash (http.favicon.hash) for asset
+    /// correlation — pivot in Shodan/Censys/FOFA to find related hosts.
+    FaviconHash(FaviconHashArgs),
     /// Byte/line diff between two files (Comparer).
     Compare(CompareArgs),
     /// Unified diff between two stored exchanges' responses (or requests) (F09).
     Diff(DiffArgs),
     /// Run passive security checks over stored history (Scanner).
     Scan(ScanArgs),
+    /// Synthesize an attack surface for a stored exchange: detect stack + WAF,
+    /// then recommend payload-DB categories, evasion encodings, and a scope rule.
+    AttackSurface(AttackSurfaceArgs),
     /// Triage stored findings: list them, or set a finding's status (F14).
     Findings(FindingsArgs),
+    /// Retest a stored finding (F14): re-send its evidence request through the
+    /// matched engine, re-run the checks, and report whether it still fires.
+    Retest(RetestArgs),
+    /// Suggest multi-step attack chains composed from the stored findings —
+    /// which vulnerabilities combine into a higher-impact exploitation path.
+    Chains(ChainsArgs),
+    /// Export stored findings as a redacted report (Markdown/JSON/HTML/SARIF).
+    Report(ReportArgs),
     /// Organize exchanges with labels: add/remove/list/show (F18).
     Label(LabelArgs),
     /// Intruder-class fuzzing campaign over §-marked insertion points.
@@ -100,8 +117,33 @@ enum Command {
     },
     /// Opt-in ACTIVE scan (reflected XSS, error-based SQLi, open redirect) via the matched engine.
     Activescan(ActiveArgs),
+    /// One-shot automated recon + active sweep: fingerprint the stack, run every
+    /// active check (incl. the HTTP method audit), and bucket responses by status.
+    Autopilot(AutopilotArgs),
+    /// Headless DAST run for CI (F25): baseline + active + passive scan over the
+    /// matched engine, emitting a machine-readable result contract and a stable
+    /// exit code (0 clean, 3 findings at/above --fail-on). Non-interactive.
+    Dast(DastArgs),
+    /// Run a typed workflow document (F12): a validated, forward-only pipeline of
+    /// request/scan/transform steps. Validate-only without --confirm when it sends.
+    Workflow(WorkflowCmdArgs),
     /// Ask the optional AI assistant (NVIDIA NIM / OpenAI / Ollama; BYO key via env).
     Ai(AiArgs),
+    /// CAPTCHA tools: detect widgets in a captured response, or solve a
+    /// simple image CAPTCHA with the local OCR backend.
+    Captcha {
+        #[command(subcommand)]
+        action: CaptchaCmd,
+    },
+    /// Proof-of-work tools: detect an anti-bot PoW wall (Anubis/mCaptcha/
+    /// hashcash) in a response, or solve a SHA-256 PoW challenge locally.
+    Pow {
+        #[command(subcommand)]
+        action: PowCmd,
+    },
+    /// Print realistic, blend-in random User-Agent string(s), weighted by
+    /// real-world market share and deterministic from --seed.
+    Useragent(UseragentArgs),
     /// Launch the native desktop app — every capability in one window.
     App(AppArgs),
     /// Launch the local web workbench and print its session URL.
@@ -124,16 +166,41 @@ enum Command {
     /// List durable background-task records, optionally reconciling
     /// interrupted ones (F03 restart recovery).
     Tasks(TasksArgs),
+    /// Read the durable audit log of gated actions — who did what, to what, and
+    /// whether it was allowed, confirmed or refused (F02).
+    Audit(AuditArgs),
+    /// Group exchanges, findings, and tasks into named collections (F18).
+    Collection {
+        #[command(subcommand)]
+        action: CollectionCmd,
+    },
+    /// Named response baselines: pin a stored exchange, then diff later ones
+    /// against it to see what changed (F09 compare-to-baseline).
+    Baseline {
+        #[command(subcommand)]
+        action: BaselineCmd,
+    },
+    /// Emit a CycloneDX SBOM of the build's dependency graph (F26 supply chain).
+    Sbom(SbomArgs),
     /// Review stored traffic, import evidence, and manage the workspace.
     Workbench(workbench::Args),
     /// Verify checksums and evidence references in an exported review bundle.
     VerifyBundle { file: PathBuf },
-    /// Write a consistent backup of a workspace database to a new file (F01).
+    /// Write a consistent backup of a workspace database to a new file (F01),
+    /// optionally encrypted with a passphrase (F04).
     Backup {
         /// Destination path (must not already exist).
         dest: PathBuf,
         #[arg(long, default_value = "camio.db")]
         db: PathBuf,
+        /// Encrypt the backup with the passphrase in $CAMIO_BACKUP_PASSPHRASE
+        /// (XChaCha20-Poly1305 + PBKDF2; plan §F04).
+        #[arg(long)]
+        encrypt: bool,
+        /// Decrypt a previously `--encrypt`ed backup at this path into `dest`
+        /// (passphrase from $CAMIO_BACKUP_PASSPHRASE); `db` is ignored.
+        #[arg(long, value_name = "FILE")]
+        decrypt: Option<PathBuf>,
     },
     /// Local MCP server.
     Mcp {
@@ -175,6 +242,20 @@ enum FpCmd {
         #[arg(long, value_enum, default_value_t = Preset::Balanced)]
         preset: Preset,
     },
+    /// Generate a realistic, blend-in random persona (coherent OS/GPU/hardware/
+    /// screen from real-world distributions), deterministic from --seed.
+    Random {
+        /// Seed for reproducibility. Omit for a one-off (time+pid) identity.
+        #[arg(long)]
+        seed: Option<u64>,
+        #[arg(long, value_enum, default_value_t = Preset::Balanced)]
+        preset: Preset,
+        #[arg(long, value_enum, default_value_t = Format::Json)]
+        format: Format,
+        /// Emit N personas (a rotation pool) instead of one.
+        #[arg(long, default_value_t = 1)]
+        count: usize,
+    },
 }
 
 #[derive(Subcommand)]
@@ -189,11 +270,23 @@ struct LaunchArgs {
     install_root: PathBuf,
     #[arg(long, default_value = "profiles/default")]
     profile: PathBuf,
+    /// Use a named, isolated, persistent profile under --profiles-root instead
+    /// of --profile (F04). Cookies/storage/IndexedDB stay separate per name; the
+    /// name is sanitised to a single safe path segment.
+    #[arg(long)]
+    profile_name: Option<String>,
+    /// Root directory that holds named profiles (with --profile-name).
+    #[arg(long, default_value = "profiles")]
+    profiles_root: PathBuf,
     #[arg(long, value_enum, default_value_t = Preset::Balanced)]
     preset: Preset,
     /// OS persona to present: windows|macos|linux (default windows).
     #[arg(long)]
     os: Option<String>,
+    /// Launch with a realistic, blend-in random persona from this seed (same
+    /// seed ⇒ same identity). Overrides --os. See `fingerprint random`.
+    #[arg(long)]
+    persona_seed: Option<u64>,
     /// Authorized target URL to open.
     #[arg(long)]
     url: Option<String>,
@@ -202,6 +295,10 @@ struct LaunchArgs {
     /// Build the command and print it, but do not launch.
     #[arg(long)]
     dry_run: bool,
+    /// Enable the WebDriver BiDi remote agent on this loopback port so Camio can
+    /// capture/intercept the managed browser's traffic (plan §5, F05).
+    #[arg(long)]
+    remote_debugging_port: Option<u16>,
     /// Lab profile: allow private/loopback destinations for the opened URL.
     #[arg(long)]
     allow_private: bool,
@@ -231,6 +328,11 @@ struct SendArgs {
     body_file: Option<PathBuf>,
     #[arg(long, value_enum, default_value_t = Preset::Balanced)]
     preset: Preset,
+    /// Send with a realistic, blend-in random persona generated from this seed
+    /// (same seed ⇒ same identity). Overrides the fixed default persona so real
+    /// traffic carries a generated UA/platform/locale. See `fingerprint random`.
+    #[arg(long)]
+    persona_seed: Option<u64>,
     /// Scope include rule in CamioQL (repeatable). With none, all non-guarded hosts are in scope.
     #[arg(long = "scope-include")]
     scope_include: Vec<String>,
@@ -248,6 +350,13 @@ struct SendArgs {
     /// Format: `PART|FIND|REPLACE`, where PART is url|method|body|header=NAME.
     #[arg(long = "rewrite")]
     rewrites: Vec<String>,
+    /// Follow 3xx redirects (Repeater control, F09). Each hop is re-checked
+    /// against scope before it is sent; the chain is bounded by --max-redirects.
+    #[arg(long)]
+    follow_redirects: bool,
+    /// Maximum redirect hops to follow with --follow-redirects.
+    #[arg(long, default_value_t = 5)]
+    max_redirects: u32,
     /// Actually send. Without this, prints a preview with the scope decision.
     #[arg(long)]
     confirm: bool,
@@ -372,6 +481,32 @@ pub(crate) fn profile_for(preset: Preset) -> FingerprintProfile {
     profile_for_os(preset, None)
 }
 
+/// Build a profile for a preset, choosing the persona from a persona `seed`
+/// when one is given: a seed yields a **realistic, blend-in random persona**
+/// ([`camio_core::Persona::random`]) so real traffic carries a generated
+/// identity, not the fixed default. Without a seed, falls back to the `os`
+/// persona (or the Windows default). This is the one place the CLI turns the
+/// `--persona-seed` flag into an actual identity, so every send path (send,
+/// launch, crawl, activescan) stays consistent.
+pub(crate) fn profile_for_persona(
+    preset: Preset,
+    os: Option<camio_core::BrowserOs>,
+    persona_seed: Option<u64>,
+) -> FingerprintProfile {
+    match persona_seed {
+        Some(seed) => {
+            let mut p = FingerprintProfile::new(
+                format!("random-{seed}-{}", preset.label()),
+                engine::PINNED_VERSION,
+            );
+            p.policy = preset.policy();
+            p.persona = camio_core::Persona::random(seed);
+            p
+        }
+        None => profile_for_os(preset, os),
+    }
+}
+
 /// Build a profile for a preset, optionally presenting a specific OS persona
 /// (Camoufox/camofox-browser's `CAMOFOX_OS`). The persona's UA / platform / WebGL
 /// are kept internally consistent for that OS.
@@ -453,16 +588,22 @@ fn main() -> Result<()> {
         Command::Engine { action } => engine_cmd(action),
         Command::Fingerprint { action } => fingerprint_cmd(action),
         Command::Launch(args) => launch_cmd(args),
+        Command::Capture(args) => capture_cmd(args),
         Command::Send(args) => send_cmd(args),
         Command::Query(args) => query_cmd(args),
         Command::History(args) => history_cmd(args),
         Command::Scope(args) => scope_cmd(args),
         Command::Convert(args) => convert_cmd(args),
         Command::Jwt(args) => jwt_cmd(args),
+        Command::FaviconHash(args) => favicon_hash_cmd(args),
         Command::Compare(args) => compare_cmd(args),
         Command::Diff(args) => diff_cmd(args),
         Command::Scan(args) => scan_cmd(args),
+        Command::AttackSurface(args) => attack_surface_cmd(args),
         Command::Findings(args) => findings_cmd(args),
+        Command::Retest(args) => retest_cmd(args),
+        Command::Chains(args) => chains_cmd(args),
+        Command::Report(args) => report_cmd(args),
         Command::Label(args) => label_cmd(args),
         Command::Fuzz(args) => fuzz_cmd(args),
         Command::Discover(args) => discover_cmd(args),
@@ -474,7 +615,13 @@ fn main() -> Result<()> {
         Command::Encode(args) => encode_cmd(args),
         Command::AiGuard { action } => ai_guard_cmd(action),
         Command::Activescan(args) => activescan_cmd(args),
+        Command::Autopilot(args) => autopilot_cmd(args),
+        Command::Dast(args) => dast_cmd(args),
+        Command::Workflow(args) => workflow_cmd(args),
         Command::Ai(args) => ai_cmd(args),
+        Command::Captcha { action } => captcha_cmd(action),
+        Command::Pow { action } => pow_cmd(action),
+        Command::Useragent(args) => useragent_cmd(args),
         Command::App(args) => app_cmd(args),
         Command::Ui(args) => ui_cmd(args),
         Command::Proxy(args) => proxy::run(args),
@@ -485,14 +632,13 @@ fn main() -> Result<()> {
         Command::Integrations => integrations_cmd(),
         Command::Probe(args) => probe_cmd(args),
         Command::Tasks(args) => tasks_cmd(args),
+        Command::Audit(args) => audit_cmd(args),
+        Command::Collection { action } => collection_cmd(action),
+        Command::Baseline { action } => baseline_cmd(action),
+        Command::Sbom(args) => sbom_cmd(args),
         Command::Workbench(args) => workbench::run(args),
         Command::VerifyBundle { file } => workbench::verify_bundle(&file),
-        Command::Backup { dest, db } => {
-            let store = open_store(&db)?;
-            store.backup_to(&dest)?;
-            println!("backed up {} → {}", db.display(), dest.display());
-            Ok(())
-        }
+        Command::Backup { dest, db, encrypt, decrypt } => backup_cmd(dest, db, encrypt, decrypt),
         Command::Mcp { action } => match action {
             McpCmd::Serve(args) => mcp_serve_cmd(args),
         },
@@ -559,7 +705,147 @@ fn fingerprint_cmd(action: FpCmd) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&spec)?);
             Ok(())
         }
+        FpCmd::Random {
+            seed,
+            preset,
+            format,
+            count,
+        } => {
+            if count == 0 {
+                bail!("--count must be at least 1");
+            }
+            // A fixed seed is reproducible; no seed means a one-off identity.
+            let base_seed = seed.unwrap_or_else(|| {
+                use camio_core::SplitMix64;
+                SplitMix64::from_entropy().next_u64()
+            });
+            let personas = camio_core::Persona::random_pool(base_seed, count);
+            for (i, persona) in personas.into_iter().enumerate() {
+                let mut profile = FingerprintProfile::new(
+                    format!("random-{base_seed}-{i}"),
+                    engine::PINNED_VERSION,
+                );
+                profile.policy = preset.policy();
+                profile.persona = persona;
+                match format {
+                    Format::UserJs => print!("{}", profile.to_user_js()),
+                    Format::Camoufox => println!(
+                        "{}",
+                        serde_json::to_string_pretty(&profile.to_camoufox_config())?
+                    ),
+                    Format::Json => println!("{}", serde_json::to_string_pretty(&profile)?),
+                }
+            }
+            Ok(())
+        }
     }
+}
+
+#[derive(Parser)]
+struct CaptureArgs {
+    /// The browser's remote-agent port (the --remote-debugging-port passed to
+    /// `camio launch`).
+    #[arg(long, default_value_t = 9222)]
+    port: u16,
+    /// Capture for this many seconds, then stop and store what was seen.
+    #[arg(long, default_value_t = 30)]
+    duration: u64,
+    #[arg(long, default_value = "camio.db")]
+    db: PathBuf,
+    #[arg(long)]
+    json: bool,
+}
+
+/// Capture the managed browser's traffic over WebDriver BiDi (plan §5, F05).
+///
+/// This is pure observation of the operator's own authorized browser — nothing is
+/// sent by Camio — so it is not scope-gated the way sends are; it records what the
+/// browser fetched. It orchestrates the tested BiDi pieces: connect the WebSocket
+/// transport, open a session, subscribe to network events, and accumulate the
+/// completed responses until the duration elapses.
+fn capture_cmd(args: CaptureArgs) -> Result<()> {
+    use camio_engine::bidi::{
+        session_new_command, subscribe_network_command, BiDiCapture, BiDiTransport,
+    };
+    use camio_engine::ws::WebSocketBiDiTransport;
+
+    let addr = format!("127.0.0.1:{}", args.port);
+    eprintln!("connecting to the browser's BiDi agent at ws://{addr}/session …");
+    let mut transport = WebSocketBiDiTransport::connect(&addr, &addr, "/session")
+        .with_context(|| format!("connecting to the BiDi agent on {addr} (launch with --remote-debugging-port {}?)", args.port))?;
+
+    // Standard BiDi start-up: open a session, then subscribe to network events.
+    transport
+        .send(&session_new_command(1))
+        .context("sending session.new")?;
+    transport
+        .send(&subscribe_network_command(2))
+        .context("subscribing to network events")?;
+    // Wake periodically so the deadline is honoured even without traffic.
+    transport
+        .set_read_timeout(Some(std::time::Duration::from_millis(500)))
+        .ok();
+
+    let mut capture = BiDiCapture::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(args.duration);
+    eprintln!("capturing for {}s …", args.duration);
+    while std::time::Instant::now() < deadline {
+        match transport.recv() {
+            Ok(Some(message)) => capture.ingest(&message),
+            Ok(None) => {
+                eprintln!("the browser closed the BiDi connection");
+                break;
+            }
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                continue; // no message this interval; re-check the deadline
+            }
+            Err(e) => return Err(anyhow::anyhow!("BiDi receive failed: {e}")),
+        }
+    }
+
+    let exchanges = capture.into_exchanges();
+    let mut store =
+        Store::open(&args.db).with_context(|| format!("opening {}", args.db.display()))?;
+    let stored = store
+        .insert_exchanges(&exchanges)
+        .with_context(|| format!("storing captured exchanges in {}", args.db.display()))?;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&exchanges)?);
+    }
+    println!(
+        "captured {} exchange(s); stored {stored} in {}.",
+        exchanges.len(),
+        args.db.display()
+    );
+    Ok(())
+}
+
+/// Resolve a named browser profile to an isolated directory under `root` (F04).
+/// The name is reduced to a single path segment of `[A-Za-z0-9._-]` (every other
+/// character becomes `-`); an empty result or a bare `.`/`..` is rejected
+/// (`None`), so a profile name can never traverse out of the profiles root.
+fn named_profile_dir(root: &std::path::Path, name: &str) -> Option<PathBuf> {
+    let safe: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let trimmed = safe.trim_matches('-');
+    if trimmed.is_empty() || trimmed == "." || trimmed == ".." {
+        return None;
+    }
+    Some(root.join(trimmed))
 }
 
 fn launch_cmd(args: LaunchArgs) -> Result<()> {
@@ -585,16 +871,25 @@ fn launch_cmd(args: LaunchArgs) -> Result<()> {
         }
     }
     let cam = Camoufox::find(&args.install_root)?;
-    let profile = profile_for_os(args.preset, parse_os(&args.os)?);
+    let profile = profile_for_persona(args.preset, parse_os(&args.os)?, args.persona_seed);
+    // A named profile resolves to an isolated, persistent directory; otherwise
+    // the explicit --profile path is used (F04 named isolated profiles).
+    let profile_dir = match &args.profile_name {
+        Some(name) => named_profile_dir(&args.profiles_root, name).ok_or_else(|| {
+            anyhow::anyhow!("invalid --profile-name `{name}` (use letters, digits, . _ -)")
+        })?,
+        None => args.profile.clone(),
+    };
     let opts = LaunchOptions {
         url: args.url.clone(),
         headless: args.headless,
         dry_run: args.dry_run,
+        remote_debugging_port: args.remote_debugging_port,
     };
 
     if args.dry_run {
-        cam.prepare_profile(&args.profile, &profile)?;
-        let cmd = cam.build_command(&args.profile, &profile, &opts);
+        cam.prepare_profile(&profile_dir, &profile)?;
+        let cmd = cam.build_command(&profile_dir, &profile, &opts);
         println!("Would launch: {:?}", cmd.get_program());
         for a in cmd.get_args() {
             println!("  arg: {}", a.to_string_lossy());
@@ -602,7 +897,7 @@ fn launch_cmd(args: LaunchArgs) -> Result<()> {
         println!("  (+{} fingerprint env vars)", cmd.get_envs().count());
         println!(
             "  profile prefs written to {}",
-            args.profile.join("user.js").display()
+            profile_dir.join("user.js").display()
         );
         return Ok(());
     }
@@ -612,7 +907,7 @@ fn launch_cmd(args: LaunchArgs) -> Result<()> {
         engine::PINNED_VERSION,
         args.preset.label()
     );
-    if let Some(mut child) = cam.launch(&args.profile, &profile, &opts)? {
+    if let Some(mut child) = cam.launch(&profile_dir, &profile, &opts)? {
         println!("Browser started (pid {}). Close it to exit.", child.id());
         let status = child.wait().context("waiting for browser")?;
         println!("Browser exited: {status}");
@@ -620,8 +915,25 @@ fn launch_cmd(args: LaunchArgs) -> Result<()> {
     Ok(())
 }
 
+/// Record one durable audit entry (plan §F02), best-effort: an audit-write
+/// failure is reported but never masks or aborts the action being audited. The
+/// store is opened for just this write so callers that hold no store (a refused
+/// send) can still leave a trail.
+fn best_effort_audit(db: &std::path::Path, entry: &camio_store::NewAudit) {
+    let recorded = Store::open(db).and_then(|s| s.record_audit(entry));
+    if let Err(e) = recorded {
+        eprintln!("warning: could not write audit log to {}: {e}", db.display());
+    }
+}
+
+/// Compact detail string for a send audit entry: method + scope decision, never
+/// the body.
+fn send_audit_detail(method: &str, decision: ScopeDecision) -> String {
+    format!("{method} scope={}", decision.as_str())
+}
+
 fn send_cmd(args: SendArgs) -> Result<()> {
-    let profile = profile_for(args.preset);
+    let profile = profile_for_persona(args.preset, None, args.persona_seed);
     let scope = build_scope_full(
         &args.scope_include,
         &args.scope_exclude,
@@ -659,6 +971,14 @@ fn send_cmd(args: SendArgs) -> Result<()> {
 
     match policy.gate(ActionClass::Mutating, decision, args.confirm) {
         PolicyOutcome::Deny(reason) => {
+            // A refused send is a security-relevant event: record it before
+            // bailing so the audit trail shows what was attempted and blocked.
+            best_effort_audit(
+                &args.db,
+                &camio_store::NewAudit::new("cli", "ACTIVE", "send", "denied")
+                    .target(req.url.clone())
+                    .detail(send_audit_detail(&req.method, decision)),
+            );
             // Report the EFFECTIVE destination (after any --rewrite), which is
             // what was scope-decided and would be sent — not the typed URL.
             bail!(
@@ -693,21 +1013,122 @@ fn send_cmd(args: SendArgs) -> Result<()> {
             if let Some(note) = eng.parity_note() {
                 eprintln!("fingerprint note: {note}");
             }
-            let ex = eng.send(req, Source::Replay).context("sending request")?;
+            let mut ex = eng.send(req, Source::Replay).context("sending request")?;
 
             let mut store =
                 Store::open(&args.db).with_context(|| format!("opening {}", args.db.display()))?;
-            let id = store.insert(&ex).context("storing exchange")?;
+            let mut id = store.insert(&ex).context("storing exchange")?;
+
+            // Durable audit (plan §F02): the send was allowed and performed.
+            if let Err(e) = store.record_audit(
+                &camio_store::NewAudit::new("cli", "ACTIVE", "send", "allowed")
+                    .target(ex.request.url.clone())
+                    .detail(send_audit_detail(&ex.request.method, decision)),
+            ) {
+                eprintln!("warning: could not write audit log: {e}");
+            }
+
+            // Follow redirects (F09): each hop is re-decided against scope (so the
+            // SSRF guard and include rules still apply) before it is sent.
+            let mut hops = 0u32;
+            if args.follow_redirects {
+                while hops < args.max_redirects {
+                    let Some(resp) = ex.response.as_ref() else { break };
+                    if !(300..=399).contains(&resp.status) {
+                        break;
+                    }
+                    let Some(location) = resp.headers.get("Location") else { break };
+                    let status = resp.status;
+                    let Some(next_url) = resolve_url(&ex.request.url, location) else {
+                        eprintln!("redirect: could not resolve Location `{location}`; stopping");
+                        break;
+                    };
+                    let mut next = HttpRequest::get(&next_url);
+                    // 307/308 preserve the method and body; 301/302/303 go to GET
+                    // (the common browser/relayed behaviour).
+                    let keeps_body = status == 307 || status == 308;
+                    if keeps_body {
+                        next.method = ex.request.method.clone();
+                        next.body = ex.request.body.clone();
+                    }
+                    // Carry the request headers to the next hop, following the same
+                    // rules a browser/curl use:
+                    //  - drop `Host` (recomputed from the new URL);
+                    //  - drop `Authorization`/`Cookie` when the host changes, so
+                    //    credentials never leak to a different origin;
+                    //  - drop body/content headers when the method falls back to
+                    //    GET (there is no body on those hops).
+                    // Without this the preserved 307/308 body went out with no
+                    // Content-Type, and auth/session context was lost on same-host
+                    // hops.
+                    let cross_host = next.host() != ex.request.host();
+                    next.headers =
+                        forward_redirect_headers(&ex.request, cross_host, keeps_body);
+                    let hop_decision =
+                        scope.decide(&HttpExchange::new(next.clone(), Source::Replay));
+                    if !hop_decision.is_sendable() {
+                        eprintln!(
+                            "redirect: next hop {next_url} is {} — not followed",
+                            hop_decision.as_str()
+                        );
+                        break;
+                    }
+                    hops += 1;
+                    eprintln!("redirect {hops}: {status} → {next_url}");
+                    ex = eng.send(next, Source::Replay).context("sending redirect")?;
+                    id = store.insert(&ex).context("storing redirect exchange")?;
+                }
+            }
 
             if args.json {
                 println!("{}", serde_json::to_string_pretty(&ex)?);
             } else {
                 print_response(&ex);
+                if hops > 0 {
+                    println!("  followed {hops} redirect(s)");
+                }
                 println!("  stored as #{} in {}", id.0, args.db.display());
             }
             Ok(())
         }
     }
+}
+
+/// Resolve a redirect `Location` (absolute, scheme-relative, origin-relative, or
+/// path-relative) against the request URL it came from. Returns `None` if either
+/// cannot be parsed, so an unresolvable redirect simply stops the chain.
+fn resolve_url(base: &str, location: &str) -> Option<String> {
+    camio_core::resolve_redirect(base, location)
+}
+
+/// Build the header list for a redirect hop, following browser/curl rules:
+/// drop `Host` (it is recomputed from the new URL), drop `Authorization`/`Cookie`
+/// across a host change so credentials never leak to another origin, and drop the
+/// body/content headers when the hop falls back to GET (there is no body then).
+/// `keeps_body` is true only for 307/308, which preserve the method and body.
+fn forward_redirect_headers(
+    from: &HttpRequest,
+    cross_host: bool,
+    keeps_body: bool,
+) -> camio_core::HeaderList {
+    let mut out = camio_core::HeaderList::new();
+    for h in from.headers.iter() {
+        let name = h.name.as_str();
+        let is_cred = name.eq_ignore_ascii_case("authorization")
+            || name.eq_ignore_ascii_case("cookie");
+        let is_content = name.eq_ignore_ascii_case("content-type")
+            || name.eq_ignore_ascii_case("content-length")
+            || name.eq_ignore_ascii_case("content-encoding")
+            || name.eq_ignore_ascii_case("transfer-encoding");
+        if name.eq_ignore_ascii_case("host")
+            || (cross_host && is_cred)
+            || (!keeps_body && is_content)
+        {
+            continue;
+        }
+        out.push(h.name.clone(), h.value.clone());
+    }
+    out
 }
 
 fn print_response(ex: &HttpExchange) {
@@ -949,11 +1370,19 @@ fn convert_cmd(args: ConvertArgs) -> Result<()> {
     match std::str::from_utf8(&out) {
         Ok(s) => println!("{s}"),
         Err(_) => {
+            // A payload that transforms to hex but not to UTF-8 should not
+            // print as "hex: " with nothing after it.
             let hex = Transform::HexEncode
                 .apply(&out)
                 .ok()
                 .and_then(|b| String::from_utf8(b).ok())
-                .unwrap_or_default();
+                .unwrap_or_else(|| {
+                    eprintln!(
+                        "camio: could not hex-encode {} bytes of binary output",
+                        out.len()
+                    );
+                    String::new()
+                });
             println!("(binary, {} bytes) hex: {hex}", out.len());
         }
     }
@@ -978,6 +1407,34 @@ fn read_input_bytes(input: &Option<String>, file: &Option<PathBuf>) -> Result<Ve
 struct JwtArgs {
     /// The JWT, `header.payload.signature`.
     token: String,
+    /// Analyze for weaknesses: alg:none, a guessable HMAC secret, and claim
+    /// hygiene (missing/expired exp, future nbf) — inspired by jwt_tool.
+    #[arg(long)]
+    analyze: bool,
+    /// Wordlist file (one secret per line) for the HMAC crack. Without it, a
+    /// built-in list of common secrets is used. Implies --analyze.
+    #[arg(long)]
+    wordlist: Option<PathBuf>,
+}
+
+#[derive(Parser)]
+struct FaviconHashArgs {
+    /// Path to the favicon file (`.ico`/`.png`/…). Use `-` to read stdin.
+    file: PathBuf,
+}
+
+fn favicon_hash_cmd(args: FaviconHashArgs) -> Result<()> {
+    let bytes = if args.file.as_os_str() == "-" {
+        let mut buf = Vec::new();
+        std::io::stdin().read_to_end(&mut buf)?;
+        buf
+    } else {
+        std::fs::read(&args.file).with_context(|| format!("reading {}", args.file.display()))?
+    };
+    let hash = camio_convert::favicon_hash(&bytes);
+    println!("{hash}");
+    eprintln!("Pivot: shodan `http.favicon.hash:{hash}` · censys/fofa equivalents.");
+    Ok(())
 }
 
 fn jwt_cmd(args: JwtArgs) -> Result<()> {
@@ -985,9 +1442,271 @@ fn jwt_cmd(args: JwtArgs) -> Result<()> {
     println!("header : {}", parts.header_json);
     println!("payload: {}", parts.payload_json);
     println!("signature (b64url): {}", parts.signature_b64url);
-    println!("\nNote: the signature is NOT verified — treat all claims as untrusted input.");
+
+    if args.analyze || args.wordlist.is_some() {
+        let wordlist: Vec<String> = match &args.wordlist {
+            Some(p) => std::fs::read_to_string(p)
+                .with_context(|| format!("reading wordlist {}", p.display()))?
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect(),
+            None => Vec::new(),
+        };
+        let a = camio_convert::analyze_jwt(&args.token, &wordlist, None)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        println!("\nAnalysis (alg: {}):", a.alg);
+        if let Some(secret) = &a.cracked_secret {
+            println!("  !! HMAC secret cracked: `{secret}`");
+        }
+        if a.issues.is_empty() {
+            println!("  (no weaknesses found)");
+        }
+        for issue in &a.issues {
+            println!("  [{:?}] {} — {}", issue.severity, issue.title, issue.detail);
+        }
+    } else {
+        println!(
+            "\nNote: the signature is NOT verified — treat all claims as untrusted input. \
+             Pass --analyze to audit for weaknesses."
+        );
+    }
     Ok(())
 }
+
+// ===========================================================================
+// CAPTCHA (detect + solve)
+// ===========================================================================
+
+#[derive(Subcommand)]
+enum CaptchaCmd {
+    /// Detect CAPTCHA widgets (reCAPTCHA, hCaptcha, Turnstile, image CAPTCHAs)
+    /// in an HTML file or stdin.
+    Detect {
+        /// Path to an HTML file. If omitted or `-`, read from stdin.
+        #[arg(default_value = "-")]
+        html: PathBuf,
+    },
+    /// Solve a local image-CAPTCHA with the OCR backend.
+    Solve {
+        /// Path to the image file (PNG, or any format tesseract can read).
+        image: PathBuf,
+        /// `digits` restricts the alphabet to 0-9; `alphanum` adds letters.
+        #[arg(long, value_enum, default_value_t = OcrAlphabet::Digits)]
+        alphabet: OcrAlphabet,
+        /// Force a specific backend.
+        #[arg(long, value_enum, default_value_t = OcrBackendArg::Auto)]
+        backend: OcrBackendArg,
+    },
+}
+
+#[derive(Copy, Clone, ValueEnum)]
+enum OcrAlphabet {
+    Digits,
+    Alphanum,
+    Any,
+}
+
+#[derive(Copy, Clone, ValueEnum)]
+enum OcrBackendArg {
+    Auto,
+    Tesseract,
+    Builtin,
+}
+
+fn captcha_cmd(cmd: CaptchaCmd) -> Result<()> {
+    match cmd {
+        CaptchaCmd::Detect { html } => {
+            let body = if html.as_os_str() == "-" {
+                let mut buf = String::new();
+                std::io::stdin().read_to_string(&mut buf)?;
+                buf
+            } else {
+                std::fs::read_to_string(&html)
+                    .with_context(|| format!("reading {}", html.display()))?
+            };
+            let hits = camio_scan::detect_captcha_in_html(&body);
+            if hits.is_empty() {
+                println!("(no CAPTCHA widgets detected)");
+                return Ok(());
+            }
+            println!("Detected CAPTCHA widgets:");
+            for kind in hits {
+                println!("  - {}: {}", kind.as_str(), kind.solver_hint());
+            }
+            Ok(())
+        }
+        CaptchaCmd::Solve {
+            image,
+            alphabet,
+            backend,
+        } => {
+            let bytes = std::fs::read(&image)
+                .with_context(|| format!("reading {}", image.display()))?;
+            let mut cfg = match alphabet {
+                OcrAlphabet::Digits => camio_ai::OcrConfig::digits(),
+                OcrAlphabet::Alphanum => camio_ai::OcrConfig::alphanum(),
+                OcrAlphabet::Any => camio_ai::OcrConfig::default(),
+            };
+            cfg.backend = match backend {
+                OcrBackendArg::Auto => camio_ai::OcrBackend::Auto,
+                OcrBackendArg::Tesseract => camio_ai::OcrBackend::Tesseract,
+                OcrBackendArg::Builtin => camio_ai::OcrBackend::Builtin,
+            };
+            match camio_ai::solve_captcha(&bytes, &cfg) {
+                Ok(r) => {
+                    println!("text      : {}", r.text);
+                    println!("backend   : {:?}", r.backend);
+                    println!("confidence: {}%", r.confidence);
+                    Ok(())
+                }
+                Err(e) => bail!("OCR failed: {e}"),
+            }
+        }
+    }
+}
+
+// ===========================================================================
+// Proof-of-work (detect + solve)
+// ===========================================================================
+
+#[derive(Subcommand)]
+enum PowCmd {
+    /// Detect a proof-of-work anti-bot wall (Anubis/mCaptcha/hashcash) in an
+    /// HTML file or stdin.
+    Detect {
+        /// Path to an HTML file. If omitted or `-`, read from stdin.
+        #[arg(default_value = "-")]
+        html: PathBuf,
+    },
+    /// Solve a SHA-256 proof-of-work challenge locally.
+    Solve {
+        /// The challenge string the nonce is appended to.
+        challenge: String,
+        /// Difficulty: leading zero hex chars (hex mode) or bits (--bits).
+        #[arg(long, default_value_t = 4)]
+        difficulty: u32,
+        /// Interpret --difficulty as leading zero BITS (hashcash/mCaptcha)
+        /// instead of leading zero hex characters (Anubis).
+        #[arg(long)]
+        bits: bool,
+        /// Parse `challenge` as an Anubis challenge JSON blob instead of a raw
+        /// string (reads the challenge + difficulty from the JSON).
+        #[arg(long)]
+        anubis: bool,
+    },
+}
+
+fn pow_cmd(cmd: PowCmd) -> Result<()> {
+    use camio_automate::pow;
+    match cmd {
+        PowCmd::Detect { html } => {
+            let body = if html.as_os_str() == "-" {
+                let mut buf = String::new();
+                std::io::stdin().read_to_string(&mut buf)?;
+                buf
+            } else {
+                std::fs::read_to_string(&html)
+                    .with_context(|| format!("reading {}", html.display()))?
+            };
+            let hits = camio_scan::detect_pow_in_response(&body, None, None);
+            if hits.is_empty() {
+                println!("(no proof-of-work wall detected)");
+                return Ok(());
+            }
+            println!("Detected proof-of-work wall(s):");
+            for system in hits {
+                println!("  - {}: {}", system.as_str(), system.solver_hint());
+            }
+            Ok(())
+        }
+        PowCmd::Solve {
+            challenge,
+            difficulty,
+            bits,
+            anubis,
+        } => {
+            let ch = if anubis {
+                pow::parse_anubis(&challenge)
+                    .ok_or_else(|| anyhow!("could not parse an Anubis challenge from the input"))?
+            } else if bits {
+                pow::PowChallenge::hashcash(challenge, difficulty)
+            } else {
+                pow::PowChallenge::anubis(challenge, difficulty)
+            };
+            match pow::solve(&ch) {
+                Ok(sol) => {
+                    println!("nonce      : {}", sol.nonce);
+                    println!("nonce_str  : {}", sol.nonce_string);
+                    println!("hash       : {}", sol.hash_hex);
+                    println!("iterations : {}", sol.iterations);
+                    Ok(())
+                }
+                Err(e) => bail!("proof-of-work solve failed: {e}"),
+            }
+        }
+    }
+}
+
+// ===========================================================================
+// Random User-Agents
+// ===========================================================================
+
+#[derive(Parser)]
+struct UseragentArgs {
+    /// Seed for reproducibility. Omit for a one-off (time+pid) pick.
+    #[arg(long)]
+    seed: Option<u64>,
+    /// Restrict to one family: firefox|chrome|safari|edge.
+    #[arg(long)]
+    family: Option<String>,
+    /// Print N user-agents.
+    #[arg(long, default_value_t = 1)]
+    count: usize,
+    /// Print the family/OS/version alongside each UA string.
+    #[arg(long)]
+    verbose: bool,
+}
+
+fn useragent_cmd(args: UseragentArgs) -> Result<()> {
+    use camio_core::{BrowserFamily, SplitMix64};
+    if args.count == 0 {
+        bail!("--count must be at least 1");
+    }
+    let family = match args.family.as_deref() {
+        None => None,
+        Some(f) => Some(match f.to_ascii_lowercase().as_str() {
+            "firefox" => BrowserFamily::Firefox,
+            "chrome" => BrowserFamily::Chrome,
+            "safari" => BrowserFamily::Safari,
+            "edge" => BrowserFamily::Edge,
+            other => bail!("unknown --family `{other}` (use firefox|chrome|safari|edge)"),
+        }),
+    };
+    let base = args
+        .seed
+        .unwrap_or_else(|| SplitMix64::from_entropy().next_u64());
+    for i in 0..args.count as u64 {
+        let seed = base ^ i.wrapping_mul(0x9E37_79B9);
+        let ua = match family {
+            Some(f) => camio_core::random_user_agent_for(seed, f),
+            None => camio_core::random_user_agent(seed),
+        };
+        if args.verbose {
+            println!(
+                "[{} {} v{}] {}",
+                ua.family.as_str(),
+                ua.os.as_str(),
+                ua.major_version,
+                ua.string
+            );
+        } else {
+            println!("{}", ua.string);
+        }
+    }
+    Ok(())
+}
+
 
 #[derive(Parser)]
 struct CompareArgs {
@@ -1105,7 +1824,7 @@ fn findings_cmd(args: FindingsArgs) -> Result<()> {
             .map(|(f, s, n)| {
                 serde_json::json!({
                     "id": f.id.0, "title": f.title, "severity": f.severity.as_str(),
-                    "status": s.as_str(), "note": n,
+                    "rule": f.rule, "status": s.as_str(), "note": n,
                 })
             })
             .collect();
@@ -1117,14 +1836,316 @@ fn findings_cmd(args: FindingsArgs) -> Result<()> {
                 .map(|n| format!("  — {n}"))
                 .unwrap_or_default();
             println!(
-                "  #{:<4} {:<8} {:<14} {}{note}",
+                "  #{:<4} {:<8} {:<14} {:<20} {}{note}",
                 f.id.0,
                 f.severity.as_str(),
                 s.as_str(),
-                truncate(&f.title, 60)
+                truncate(f.rule.as_deref().unwrap_or("—"), 20),
+                truncate(&f.title, 50)
             );
         }
         eprintln!("{} finding(s).", rows.len());
+    }
+    Ok(())
+}
+
+#[derive(Parser)]
+struct ChainsArgs {
+    #[arg(long, default_value = "camio.db")]
+    db: PathBuf,
+    #[arg(long)]
+    json: bool,
+}
+
+/// Suggest composed attack chains from the stored findings (vector chaining).
+fn chains_cmd(args: ChainsArgs) -> Result<()> {
+    let store = Store::open(&args.db).with_context(|| format!("opening {}", args.db.display()))?;
+    let findings = store.list_findings()?;
+    let chains = camio_automate::suggest_attack_chains(&findings);
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&chains)?);
+        return Ok(());
+    }
+    if chains.is_empty() {
+        println!(
+            "no multi-step attack chains suggested from {} stored finding(s)",
+            findings.len()
+        );
+        return Ok(());
+    }
+    println!(
+        "{} attack chain(s) composed from {} finding(s):",
+        chains.len(),
+        findings.len()
+    );
+    for c in &chains {
+        println!("\n▶ {} [{}]", c.name, c.severity);
+        for (i, step) in c.steps.iter().enumerate() {
+            println!("  {}. {step}", i + 1);
+        }
+        println!("  rationale: {}", c.rationale);
+    }
+    Ok(())
+}
+
+#[derive(Parser)]
+struct RetestArgs {
+    /// The stored finding to retest.
+    finding_id: i64,
+    #[arg(long, value_enum, default_value_t = Preset::Balanced)]
+    preset: Preset,
+    #[arg(long = "scope-include")]
+    scope_include: Vec<String>,
+    #[arg(long = "scope-exclude")]
+    scope_exclude: Vec<String>,
+    #[arg(long)]
+    allow_private: bool,
+    #[arg(long)]
+    allow_metadata: bool,
+    /// Update the finding's status from the result: `confirmed` if it still
+    /// fires, `fixed` if it no longer does. Off by default (report only).
+    #[arg(long)]
+    mark: bool,
+    /// Actually re-send (traffic). Without it, prints the plan and exits 0.
+    #[arg(long)]
+    confirm: bool,
+    #[arg(long, default_value = "camio.db")]
+    db: PathBuf,
+}
+
+/// Retest a stored finding (F14): replay its evidence request and re-run the
+/// checks to see whether the issue is still present or appears fixed. Sending is
+/// fully gated — ACTIVE class, scope re-checked on the replay, `--confirm`
+/// required — and the attempt is recorded in the audit log (F02).
+fn retest_cmd(args: RetestArgs) -> Result<()> {
+    let store = Store::open(&args.db).with_context(|| format!("opening {}", args.db.display()))?;
+    let finding = store
+        .list_findings()?
+        .into_iter()
+        .find(|f| f.id.0 == args.finding_id)
+        .ok_or_else(|| anyhow::anyhow!("no finding #{} in {}", args.finding_id, args.db.display()))?;
+    let origin_id = *finding.evidence.first().ok_or_else(|| {
+        anyhow::anyhow!("finding #{} has no evidence exchange to replay", args.finding_id)
+    })?;
+    let origin = store
+        .get(origin_id)?
+        .ok_or_else(|| anyhow::anyhow!("evidence exchange #{} is no longer stored", origin_id.0))?;
+    let base = origin.request.clone();
+
+    let profile = profile_for_persona(args.preset, None, None);
+    let scope = build_scope_full(
+        &args.scope_include,
+        &args.scope_exclude,
+        args.allow_private,
+        args.allow_metadata,
+    )?;
+    let decision = scope.decide(&HttpExchange::new(base.clone(), Source::Scanner));
+    let policy = Policy {
+        allow_active: true,
+        allow_destructive: false,
+        require_confirmation: true,
+    };
+    match policy.gate_action_with(ActionClass::Active, &scope, decision, args.confirm) {
+        PolicyOutcome::Deny(reason) => {
+            best_effort_audit(
+                &args.db,
+                &camio_store::NewAudit::new("cli", "ACTIVE", "retest", "denied")
+                    .target(base.url.clone())
+                    .detail(format!("finding #{}: {reason}", args.finding_id)),
+            );
+            bail!("refused: {reason}");
+        }
+        PolicyOutcome::NeedsConfirmation(reason) => {
+            eprintln!("{reason}.");
+            eprintln!(
+                "Retest would, in scope {}: re-send {} {} and re-run the checks that could \
+                 reproduce finding #{} ({}). Re-run with --confirm (authorized targets only).",
+                decision.as_str(),
+                base.method,
+                base.url,
+                args.finding_id,
+                finding.rule.as_deref().unwrap_or(&finding.title),
+            );
+            return Ok(());
+        }
+        PolicyOutcome::Allow => {}
+    }
+
+    let eng = matched_engine(&profile).context("building matched request engine")?;
+    let store = RefCell::new(store);
+    let send = |req: HttpRequest| -> Option<HttpExchange> {
+        if !scope
+            .decide(&HttpExchange::new(req.clone(), Source::Scanner))
+            .is_sendable()
+        {
+            return None;
+        }
+        match eng.send(req, Source::Scanner) {
+            Ok(mut ex) => match store.borrow_mut().insert(&ex) {
+                Ok(id) => {
+                    ex.id = id;
+                    Some(ex)
+                }
+                Err(e) => {
+                    camio_core::note_failure("storing a retest exchange", e);
+                    Some(ex)
+                }
+            },
+            Err(e) => {
+                eprintln!("retest send failed: {e}");
+                None
+            }
+        }
+    };
+
+    // Re-run both the active checks (which send their own probes) and the passive
+    // checks over a fresh fetch — the producing check is among them regardless of
+    // the finding's class.
+    let mut reproduced = camio_active::run_active(&base, &send);
+    if let Some(ex) = send(base.clone()) {
+        reproduced.extend(camio_scan::scan_exchange(&ex));
+    }
+
+    // Does the same issue reappear? Prefer the stable rule id; fall back to the
+    // title for older findings that predate rule provenance.
+    let still_present = reproduced.iter().any(|f| match (&finding.rule, &f.rule) {
+        (Some(orig), Some(now)) => orig == now,
+        _ => f.title == finding.title,
+    });
+
+    let label = finding.rule.as_deref().unwrap_or(&finding.title);
+    if still_present {
+        println!("finding #{} ({label}) is STILL PRESENT on retest.", args.finding_id);
+    } else {
+        println!(
+            "finding #{} ({label}) was NOT reproduced — it appears fixed (verify manually).",
+            args.finding_id
+        );
+    }
+
+    if args.mark {
+        let status = if still_present {
+            camio_store::FindingStatus::Confirmed
+        } else {
+            camio_store::FindingStatus::Fixed
+        };
+        store
+            .borrow_mut()
+            .set_finding_status(FindingId(args.finding_id), status, Some("set by retest"))?;
+        println!("  status → {}", status.as_str());
+    }
+
+    if let Err(e) = store.borrow().record_audit(
+        &camio_store::NewAudit::new("cli", "ACTIVE", "retest", "allowed")
+            .target(base.url.clone())
+            .detail(format!(
+                "finding #{} {}",
+                args.finding_id,
+                if still_present { "still-present" } else { "not-reproduced" }
+            )),
+    ) {
+        eprintln!("warning: could not write audit log: {e}");
+    }
+    Ok(())
+}
+
+#[derive(Copy, Clone, ValueEnum)]
+enum ReportFmt {
+    Markdown,
+    Json,
+    Html,
+    Sarif,
+}
+
+impl ReportFmt {
+    fn to_store(self) -> camio_store::ReportFormat {
+        match self {
+            ReportFmt::Markdown => camio_store::ReportFormat::Markdown,
+            ReportFmt::Json => camio_store::ReportFormat::Json,
+            ReportFmt::Html => camio_store::ReportFormat::Html,
+            ReportFmt::Sarif => camio_store::ReportFormat::Sarif,
+        }
+    }
+}
+
+#[derive(Copy, Clone, ValueEnum)]
+enum ReportStatus {
+    All,
+    Open,
+    Confirmed,
+    Resolved,
+    Dismissed,
+}
+
+impl ReportStatus {
+    fn to_state(self) -> Option<camio_store::ReviewState> {
+        match self {
+            ReportStatus::All => None,
+            ReportStatus::Open => Some(camio_store::ReviewState::Open),
+            ReportStatus::Confirmed => Some(camio_store::ReviewState::Confirmed),
+            ReportStatus::Resolved => Some(camio_store::ReviewState::Resolved),
+            ReportStatus::Dismissed => Some(camio_store::ReviewState::Dismissed),
+        }
+    }
+}
+
+#[derive(Parser)]
+struct ReportArgs {
+    #[arg(long, default_value = "camio.db")]
+    db: PathBuf,
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = ReportFmt::Markdown)]
+    format: ReportFmt,
+    /// Only include findings in this review state (default: all).
+    #[arg(long, value_enum, default_value_t = ReportStatus::All)]
+    status: ReportStatus,
+    /// Write the report to this file instead of stdout.
+    #[arg(long)]
+    out: Option<PathBuf>,
+    /// CI gate: exit non-zero if any reported finding is at least this severity
+    /// (info|low|medium|high|critical). The report is still written first.
+    #[arg(long)]
+    fail_on: Option<String>,
+}
+
+fn report_cmd(args: ReportArgs) -> Result<()> {
+    let store = open_store(&args.db)?;
+    let report = store
+        .finding_report(args.status.to_state())
+        .context("building findings report")?;
+    let rendered = report
+        .render(args.format.to_store())
+        .context("rendering report")?;
+    match &args.out {
+        Some(path) => {
+            std::fs::write(path, &rendered)
+                .with_context(|| format!("writing report to {}", path.display()))?;
+            eprintln!(
+                "wrote {} report ({} finding(s)) to {}",
+                args.format.to_store().label(),
+                report.findings.len(),
+                path.display()
+            );
+        }
+        None => print!("{rendered}"),
+    }
+
+    // CI gate (plan §F25 headless/CI): the report is emitted first, then the
+    // process fails if anything meets the threshold, so a pipeline can both keep
+    // the artifact and block the merge.
+    if let Some(sev) = &args.fail_on {
+        let threshold = parse_severity(sev)?;
+        let over: usize = report
+            .findings
+            .iter()
+            .filter(|e| e.severity >= threshold)
+            .count();
+        if over > 0 {
+            bail!(
+                "report gate: {over} finding(s) at or above {} severity",
+                threshold.as_str()
+            );
+        }
     }
     Ok(())
 }
@@ -1241,6 +2262,88 @@ fn parse_severity(s: &str) -> Result<camio_core::Severity> {
     camio_core::Severity::parse(s).ok_or_else(|| {
         anyhow::anyhow!("unknown severity `{s}` (use info|low|medium|high|critical)")
     })
+}
+
+#[derive(Parser)]
+struct AttackSurfaceArgs {
+    /// CamioQL filter; the most recent matching exchange is analyzed. Omit to
+    /// analyze the most recent exchange in history.
+    query: Option<String>,
+    #[arg(long, default_value = "camio.db")]
+    db: PathBuf,
+    /// Print the full attack surface as JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+fn attack_surface_cmd(args: AttackSurfaceArgs) -> Result<()> {
+    let store = open_store(&args.db)?;
+    let q =
+        Query::compile(args.query.as_deref().unwrap_or("")).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let exchanges = store.query_with_bodies(&q, 1)?;
+    let ex = exchanges
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow!("no stored exchange matched (capture traffic first, or widen the query)"))?;
+    let s = camio_scan::analyze_attack_surface(&ex);
+    if args.json {
+        // Render via a plain serializable view (AttackSurface isn't Serialize;
+        // build the JSON explicitly).
+        let techs: Vec<_> = s
+            .technologies
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "name": t.name, "version": t.version, "categories": t.categories,
+                    "confidence": t.confidence, "implied": t.implied,
+                })
+            })
+            .collect();
+        let v = serde_json::json!({
+            "host": s.host,
+            "technologies": techs,
+            "wafs": s.wafs,
+            "takeover_candidate": s.takeover,
+            "suggested_payload_categories": s.suggested_payload_categories,
+            "suggested_evasion_encodings": s.suggested_encodings.iter().map(|e| format!("{e:?}")).collect::<Vec<_>>(),
+            "suggested_scope_rule": s.suggested_scope_rule,
+            "notes": s.notes,
+        });
+        println!("{}", serde_json::to_string_pretty(&v)?);
+        return Ok(());
+    }
+    println!("host: {}", s.host.as_deref().unwrap_or("-"));
+    print!("technologies:");
+    if s.technologies.is_empty() {
+        println!(" (none detected)");
+    } else {
+        println!();
+        for t in &s.technologies {
+            let ver = t.version.as_deref().map(|v| format!(" {v}")).unwrap_or_default();
+            let cat = t.categories.first().cloned().unwrap_or_default();
+            let imp = if t.implied { " [implied]" } else { "" };
+            println!("  - {}{ver} ({cat}){imp}", t.name);
+        }
+    }
+    if !s.wafs.is_empty() {
+        println!("waf/cdn: {}", s.wafs.join(", "));
+    }
+    if let Some(service) = &s.takeover {
+        println!("takeover candidate: {service}");
+    }
+    println!("payload categories: {}", s.suggested_payload_categories.join(", "));
+    if !s.suggested_encodings.is_empty() {
+        let encs: Vec<String> = s.suggested_encodings.iter().map(|e| format!("{e:?}")).collect();
+        println!("evasion encodings: {}", encs.join(", "));
+    }
+    if let Some(rule) = &s.suggested_scope_rule {
+        println!("scope rule: {rule}");
+    }
+    println!();
+    for note in &s.notes {
+        println!("note: {note}");
+    }
+    Ok(())
 }
 
 fn scan_cmd(args: ScanArgs) -> Result<()> {
@@ -1370,6 +2473,9 @@ struct FuzzArgs {
     /// never un-blocks 169.254.169.254 or fe80::/10.
     #[arg(long)]
     allow_metadata: bool,
+    /// Throttle to at most this many requests/second (F11). Unlimited when unset.
+    #[arg(long)]
+    rate: Option<f64>,
     /// Actually run the campaign (an ACTIVE test). Without this, only the plan is shown.
     #[arg(long)]
     confirm: bool,
@@ -1525,6 +2631,7 @@ fn fuzz_cmd(args: FuzzArgs) -> Result<()> {
 
     let mut store =
         Store::open(&args.db).with_context(|| format!("opening {}", args.db.display()))?;
+    let limiter = camio_core::RateLimiter::new(None, args.rate.filter(|r| *r > 0.0));
     let mut results = Vec::new();
     let mut skipped = 0usize;
     for g in &generated {
@@ -1532,6 +2639,7 @@ fn fuzz_cmd(args: FuzzArgs) -> Result<()> {
         if !scope.decide(&pr).is_sendable() {
             continue; // never send out of scope (plan §16)
         }
+        limiter.acquire(&g.request.host().unwrap_or_default());
         match eng.send(g.request.clone(), Source::Automate) {
             Ok(ex) => {
                 store.insert(&ex).with_context(|| {
@@ -1592,6 +2700,8 @@ fn strip_to_clean(req: &HttpRequest) -> HttpRequest {
         headers.push(h.name.clone(), camio_automate::strip_markers(&h.value, m));
     }
     out.headers = headers;
+    // a non-UTF-8 body is skipped on purpose: it is not editable as text.
+    // audit-allow: B4
     if let Ok(t) = std::str::from_utf8(req.body.as_bytes()) {
         out.body = Body::from_text(camio_automate::strip_markers(t, m));
     }
@@ -1712,10 +2822,23 @@ fn sitemap_cmd(args: SitemapArgs) -> Result<()> {
 
 #[derive(Parser)]
 struct ImportArgs {
-    /// A Burp items XML export or a HAR archive.
+    /// A Burp items XML export, a HAR archive, or (with --openapi) an
+    /// OpenAPI 3.x / Swagger 2.0 JSON document.
     file: PathBuf,
     #[arg(long, default_value = "camio.db")]
     db: PathBuf,
+    /// Treat the file as an OpenAPI/Swagger spec: generate one request per
+    /// path+method operation (request-only; nothing is sent).
+    #[arg(long)]
+    openapi: bool,
+    /// Treat the file as a GraphQL introspection result: generate one POST per
+    /// root Query/Mutation field. Requires --base as the GraphQL endpoint.
+    #[arg(long)]
+    graphql: bool,
+    /// For --openapi: origin to build requests against (overrides the spec's
+    /// server/host). For --graphql: the GraphQL endpoint URL to POST to.
+    #[arg(long)]
+    base: Option<String>,
     /// Parse and report only; do not store.
     #[arg(long)]
     dry_run: bool,
@@ -1726,7 +2849,22 @@ struct ImportArgs {
 fn import_cmd(args: ImportArgs) -> Result<()> {
     let data =
         std::fs::read(&args.file).with_context(|| format!("reading {}", args.file.display()))?;
-    let result = camio_import::import_bytes(&data).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let result = if args.openapi {
+        let text = String::from_utf8(data)
+            .map_err(|_| anyhow::anyhow!("OpenAPI spec must be UTF-8 JSON"))?;
+        camio_import::import_openapi(&text, args.base.as_deref())
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+    } else if args.graphql {
+        let text = String::from_utf8(data)
+            .map_err(|_| anyhow::anyhow!("GraphQL introspection must be UTF-8 JSON"))?;
+        let endpoint = args
+            .base
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("--graphql requires --base <graphql endpoint URL>"))?;
+        camio_import::import_graphql(&text, endpoint).map_err(|e| anyhow::anyhow!("{e}"))?
+    } else {
+        camio_import::import_bytes(&data).map_err(|e| anyhow::anyhow!("{e}"))?
+    };
     println!("format   : {}", result.format);
     println!("exchanges: {}", result.exchanges.len());
     for w in &result.warnings {
@@ -1809,10 +2947,48 @@ fn sequencer_cmd(args: SequencerArgs) -> Result<()> {
 struct PayloadsArgs {
     /// A pack name to print its entries; omit to list all packs.
     name: Option<String>,
+    /// Emit JSON instead of plain text: the catalog (with per-pack counts) when
+    /// listing, or `{pack, count, payloads}` for a named pack.
+    #[arg(long)]
+    json: bool,
 }
 
 fn payloads_cmd(args: PayloadsArgs) -> Result<()> {
     let db = camio_automate::load_payload_db();
+    if args.json {
+        let value = match &args.name {
+            None => {
+                let builtin: Vec<_> = camio_automate::builtin_packs()
+                    .iter()
+                    .map(|name| {
+                        serde_json::json!({
+                            "pack": name,
+                            "count": camio_automate::builtin_pack(name).map(|s| s.len()).unwrap_or(0),
+                        })
+                    })
+                    .collect();
+                let database: Vec<_> = db
+                    .categories
+                    .iter()
+                    .map(|(name, set)| {
+                        serde_json::json!({ "pack": format!("db:{name}"), "count": set.len() })
+                    })
+                    .collect();
+                serde_json::json!({ "builtin": builtin, "database": database })
+            }
+            Some(name) => {
+                let set = resolve_pack(name, &db)
+                    .ok_or_else(|| anyhow::anyhow!("unknown pack `{name}` (see `camio payloads`)"))?;
+                serde_json::json!({
+                    "pack": name,
+                    "count": set.payloads.len(),
+                    "payloads": set.payloads,
+                })
+            }
+        };
+        println!("{}", serde_json::to_string_pretty(&value)?);
+        return Ok(());
+    }
     match &args.name {
         None => {
             println!("Built-in payload packs (small, hand-curated, for AUTHORIZED testing only):");
@@ -1978,6 +3154,11 @@ struct EncodeArgs {
     /// Run `camio encode --list-encodings` to see every name.
     #[arg(long = "encodings")]
     encodings: Option<String>,
+    /// Chain encodings *in sequence* for WAF evasion (e.g. `url>url` double-URL-
+    /// encodes, `html>url` HTML- then URL-encodes). One line per payload. Takes
+    /// precedence over --encodings/--context.
+    #[arg(long = "chain", conflicts_with_all = ["encodings", "context"])]
+    chain: Option<String>,
     /// List every encoding name and exit.
     #[arg(long = "list-encodings")]
     list_encodings: bool,
@@ -2059,6 +3240,30 @@ fn encode_cmd(args: EncodeArgs) -> Result<()> {
             );
         }
     };
+
+    // Sequential encoding chain (WAF evasion): compose encodings left-to-right.
+    if let Some(spec) = &args.chain {
+        let chain = camio_automate::parse_encoding_chain(spec).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let mut chained = camio_automate::chain_payload_set(&set, &chain);
+        if chained.len() > args.limit {
+            chained.truncate(args.limit);
+        }
+        let label = chain.iter().map(|e| e.name()).collect::<Vec<_>>().join(">");
+        match &args.out {
+            Some(path) => {
+                let body = chained.join("\n") + "\n";
+                std::fs::write(path, body).with_context(|| format!("writing {}", path.display()))?;
+                eprintln!("wrote {} chained payload(s) [{label}] to {}", chained.len(), path.display());
+            }
+            None => {
+                eprintln!("encode chain `{}`: {} payload(s), chain=[{label}]", set.name, chained.len());
+                for p in &chained {
+                    println!("{p}");
+                }
+            }
+        }
+        return Ok(());
+    }
 
     // Resolve the encoding list.
     let encs: Vec<camio_automate::Encoding> = match (&args.context, &args.encodings) {
@@ -2176,14 +3381,22 @@ pub(crate) fn build_ruleset(specs: &[String]) -> Result<RuleSet> {
     let mut set = RuleSet::new();
     for (i, spec) in specs.iter().enumerate() {
         let parts: Vec<&str> = spec.splitn(3, '|').collect();
-        if parts.len() != 3 {
+        // Destructured, so the three-way split is verified by the pattern rather
+        // than by a length check the reader has to trust.
+        let [part, find, replace] = parts.as_slice() else {
             bail!(
                 "--rewrite `{spec}` must be PART|FIND|REPLACE (PART = url|method|body|header=NAME)"
             );
-        }
-        let target = parse_rewrite_target(parts[0])?;
-        let rule = MatchReplaceRule::literal(format!("cli-{i}"), target, parts[1], parts[2], None)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        };
+        let target = parse_rewrite_target(part)?;
+        let rule = MatchReplaceRule::literal(
+            format!("cli-{i}"),
+            target,
+            find.to_string(),
+            replace.to_string(),
+            None,
+        )
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
         set.push(rule);
     }
     Ok(set)
@@ -2274,7 +3487,9 @@ fn oast_cmd(args: OastArgs) -> Result<()> {
 
     if let Some(n) = args.tokens {
         for _ in 0..n.max(1) {
-            let t = collector.new_token();
+            let t = collector
+                .new_token()
+                .map_err(|e| anyhow::anyhow!("minting a token: {e}"))?;
             println!(
                 "{}    (dns: {})",
                 collector.callback_url(&t),
@@ -2304,7 +3519,9 @@ fn oast_cmd(args: OastArgs) -> Result<()> {
     let listener = std::net::TcpListener::bind(&args.listen)
         .with_context(|| format!("binding {}", args.listen))?;
     let local = listener.local_addr().context("reading local address")?;
-    let sample = collector.new_token();
+    let sample = collector
+        .new_token()
+        .map_err(|e| anyhow::anyhow!("minting a sample token: {e}"))?;
 
     eprintln!("Camio OAST collector listening on {local}");
     eprintln!("  callback base   : http://{base}/");
@@ -2643,6 +3860,10 @@ struct CrawlArgs {
     cross_origin: bool,
     #[arg(long, value_enum, default_value_t = Preset::Balanced)]
     preset: Preset,
+    /// Crawl with a realistic blend-in random persona from this seed. See
+    /// `fingerprint random`.
+    #[arg(long)]
+    persona_seed: Option<u64>,
     #[arg(long = "scope-include")]
     scope_include: Vec<String>,
     #[arg(long = "scope-exclude")]
@@ -2663,7 +3884,7 @@ struct CrawlArgs {
 }
 
 fn crawl_cmd(args: CrawlArgs) -> Result<()> {
-    let profile = profile_for(args.preset);
+    let profile = profile_for_persona(args.preset, None, args.persona_seed);
     let scope = build_scope_full(
         &args.scope_include,
         &args.scope_exclude,
@@ -2718,10 +3939,18 @@ fn crawl_cmd(args: CrawlArgs) -> Result<()> {
         }
         match eng.send(req, Source::Crawler) {
             Ok(mut ex) => {
-                if let Ok(id) = store.borrow_mut().insert(&ex) {
-                    ex.id = id;
+                // A crawl result that is not stored never reaches history or
+                // any later query, so a failed insert is not a no-op.
+                match store.borrow_mut().insert(&ex) {
+                    Ok(id) => {
+                        ex.id = id;
+                        Some(ex)
+                    }
+                    Err(e) => {
+                        eprintln!("camio: crawled exchange not stored: {e}");
+                        None
+                    }
                 }
-                Some(ex)
             }
             Err(e) => {
                 eprintln!("fetch failed: {e}");
@@ -3065,6 +4294,405 @@ fn tasks_cmd(args: TasksArgs) -> Result<()> {
     Ok(())
 }
 
+#[derive(Parser)]
+struct AuditArgs {
+    #[arg(long, default_value = "camio.db")]
+    db: PathBuf,
+    /// Only show entries of this policy class (PASSIVE / ACTIVE / DESTRUCTIVE).
+    #[arg(long)]
+    class: Option<String>,
+    /// How many entries to show (newest first).
+    #[arg(long, default_value = "50")]
+    limit: i64,
+    /// Emit the entries as JSON instead of a table.
+    #[arg(long)]
+    json: bool,
+    /// Prune the log to at most this many newest entries (explicit retention;
+    /// never automatic). Prints how many were removed, then lists the rest.
+    #[arg(long)]
+    prune_to: Option<usize>,
+}
+
+/// Read (and optionally prune) the durable audit log (F02).
+fn audit_cmd(args: AuditArgs) -> Result<()> {
+    let store = Store::open(&args.db).with_context(|| format!("opening {}", args.db.display()))?;
+    if let Some(max) = args.prune_to {
+        let removed = store.prune_audit_log(max, i64::MAX)?;
+        println!("pruned {removed} audit entr{} (kept newest {max})", if removed == 1 { "y" } else { "ies" });
+    }
+    let rows = match &args.class {
+        Some(class) => store.audit_log_by_class(&class.to_uppercase(), args.limit)?,
+        None => store.audit_log(args.limit)?,
+    };
+    if args.json {
+        let items: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "id": r.id,
+                    "at_ms": r.at_ms,
+                    "actor": r.actor,
+                    "class": r.action_class,
+                    "action": r.action,
+                    "target": r.target,
+                    "decision": r.decision,
+                    "detail": r.detail,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&items)?);
+        return Ok(());
+    }
+    if rows.is_empty() {
+        println!("no audit entries in {}", args.db.display());
+        return Ok(());
+    }
+    println!("Audit log in {} ({} total):", args.db.display(), store.audit_log_count()?);
+    for r in &rows {
+        let target = r.target.as_deref().unwrap_or("-");
+        let detail = r.detail.as_deref().unwrap_or("");
+        println!(
+            "  #{:<5} {:<5} {:<11} {:<13} {:<12} {target}  {detail}",
+            r.id, r.actor, r.action_class, r.action, r.decision,
+        );
+    }
+    Ok(())
+}
+
+#[derive(clap::Subcommand)]
+enum CollectionCmd {
+    /// Create a collection (idempotent by name).
+    New {
+        name: String,
+        #[arg(long, default_value = "camio.db")]
+        db: PathBuf,
+    },
+    /// Add an item to a collection (kind: exchange | finding | task).
+    Add {
+        name: String,
+        kind: String,
+        id: i64,
+        #[arg(long, default_value = "camio.db")]
+        db: PathBuf,
+    },
+    /// Remove an item from a collection.
+    Rm {
+        name: String,
+        kind: String,
+        id: i64,
+        #[arg(long, default_value = "camio.db")]
+        db: PathBuf,
+    },
+    /// List collections with their member counts.
+    List {
+        #[arg(long, default_value = "camio.db")]
+        db: PathBuf,
+    },
+    /// Show a collection's members.
+    Show {
+        name: String,
+        #[arg(long, default_value = "camio.db")]
+        db: PathBuf,
+    },
+    /// Delete a collection (its referenced rows are left intact).
+    Delete {
+        name: String,
+        #[arg(long, default_value = "camio.db")]
+        db: PathBuf,
+    },
+}
+
+fn parse_item_kind(s: &str) -> Result<camio_store::ItemKind> {
+    camio_store::ItemKind::parse(s)
+        .ok_or_else(|| anyhow::anyhow!("unknown item kind `{s}` (expected exchange|finding|task)"))
+}
+
+fn resolve_collection(store: &Store, name: &str) -> Result<i64> {
+    store
+        .collection_id(name)?
+        .ok_or_else(|| anyhow::anyhow!("no collection named `{name}` (create it with `collection new`)"))
+}
+
+/// Manage collections (F18): named groups spanning exchanges/findings/tasks.
+fn collection_cmd(action: CollectionCmd) -> Result<()> {
+    match action {
+        CollectionCmd::New { name, db } => {
+            let store = Store::open(&db).with_context(|| format!("opening {}", db.display()))?;
+            let id = store.collection_create(&name)?;
+            println!("collection `{name}` (#{id})");
+        }
+        CollectionCmd::Add { name, kind, id, db } => {
+            let kind = parse_item_kind(&kind)?;
+            let store = Store::open(&db).with_context(|| format!("opening {}", db.display()))?;
+            let cid = store.collection_create(&name)?; // create-if-absent, then add
+            let added = store.collection_add(cid, kind, id)?;
+            println!(
+                "{} {} #{id} {} collection `{name}`",
+                if added { "added" } else { "already in" },
+                kind.as_str(),
+                if added { "to" } else { "—" },
+            );
+        }
+        CollectionCmd::Rm { name, kind, id, db } => {
+            let kind = parse_item_kind(&kind)?;
+            let store = Store::open(&db).with_context(|| format!("opening {}", db.display()))?;
+            let cid = resolve_collection(&store, &name)?;
+            let removed = store.collection_remove(cid, kind, id)?;
+            println!(
+                "{} {} #{id} {} `{name}`",
+                if removed { "removed" } else { "no such member" },
+                kind.as_str(),
+                if removed { "from" } else { "in" },
+            );
+        }
+        CollectionCmd::List { db } => {
+            let store = Store::open(&db).with_context(|| format!("opening {}", db.display()))?;
+            let cols = store.collections()?;
+            if cols.is_empty() {
+                println!("no collections in {}", db.display());
+                return Ok(());
+            }
+            for c in &cols {
+                let note = c.note.as_deref().map(|n| format!(" — {n}")).unwrap_or_default();
+                println!("  #{:<4} {:<24} {} item(s){note}", c.id, c.name, c.item_count);
+            }
+        }
+        CollectionCmd::Show { name, db } => {
+            let store = Store::open(&db).with_context(|| format!("opening {}", db.display()))?;
+            let cid = resolve_collection(&store, &name)?;
+            let items = store.collection_items(cid)?;
+            if items.is_empty() {
+                println!("collection `{name}` is empty");
+                return Ok(());
+            }
+            println!("collection `{name}` (#{cid}):");
+            for it in &items {
+                println!("  {:<9} #{}", it.kind.as_str(), it.ref_id);
+            }
+        }
+        CollectionCmd::Delete { name, db } => {
+            let store = Store::open(&db).with_context(|| format!("opening {}", db.display()))?;
+            let cid = resolve_collection(&store, &name)?;
+            store.collection_delete(cid)?;
+            println!("deleted collection `{name}` (referenced rows left intact)");
+        }
+    }
+    Ok(())
+}
+
+#[derive(Parser)]
+struct SbomArgs {
+    /// A Cargo.lock to describe instead of the one this binary was built from.
+    #[arg(long)]
+    lock: Option<PathBuf>,
+    /// Write the SBOM here instead of stdout.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+/// Emit a CycloneDX SBOM (F26). Defaults to the lockfile embedded at build time.
+fn sbom_cmd(args: SbomArgs) -> Result<()> {
+    let lock = match &args.lock {
+        Some(path) => {
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?
+        }
+        None => camio_core::sbom::EMBEDDED_LOCK.to_string(),
+    };
+    let doc = camio_core::sbom::generate(&lock, "camio-cli", env!("CARGO_PKG_VERSION"));
+    let json = serde_json::to_string_pretty(&doc)?;
+    let n = doc["components"].as_array().map(|a| a.len()).unwrap_or(0);
+    match &args.out {
+        Some(path) => {
+            std::fs::write(path, &json)
+                .with_context(|| format!("writing SBOM to {}", path.display()))?;
+            eprintln!("wrote CycloneDX SBOM ({n} components) to {}", path.display());
+        }
+        None => println!("{json}"),
+    }
+    Ok(())
+}
+
+#[derive(clap::Subcommand)]
+enum BaselineCmd {
+    /// Pin a stored exchange as the baseline under `name` (re-points if it
+    /// already exists).
+    Set {
+        name: String,
+        exchange_id: i64,
+        #[arg(long, default_value = "camio.db")]
+        db: PathBuf,
+    },
+    /// List named baselines and the exchange each points at.
+    List {
+        #[arg(long, default_value = "camio.db")]
+        db: PathBuf,
+    },
+    /// Diff a stored exchange against the named baseline's exchange.
+    Diff {
+        name: String,
+        exchange_id: i64,
+        /// Diff the requests instead of the responses.
+        #[arg(long)]
+        request: bool,
+        /// Context lines around each change.
+        #[arg(long, default_value = "3")]
+        context: usize,
+        #[arg(long, default_value = "camio.db")]
+        db: PathBuf,
+    },
+    /// Remove a named baseline (the referenced exchange is left intact).
+    Rm {
+        name: String,
+        #[arg(long, default_value = "camio.db")]
+        db: PathBuf,
+    },
+}
+
+/// Manage response baselines and diff against them (F09 compare-to-baseline).
+fn baseline_cmd(action: BaselineCmd) -> Result<()> {
+    match action {
+        BaselineCmd::Set { name, exchange_id, db } => {
+            let store = open_store(&db)?;
+            let eid = camio_core::ExchangeId(exchange_id);
+            if store.get(eid)?.is_none() {
+                bail!("no exchange #{exchange_id} in {}", db.display());
+            }
+            store.set_baseline(&name, eid)?;
+            println!("baseline `{name}` → exchange #{exchange_id}");
+        }
+        BaselineCmd::List { db } => {
+            let store = open_store(&db)?;
+            let rows = store.baselines()?;
+            if rows.is_empty() {
+                println!("no baselines in {}", db.display());
+                return Ok(());
+            }
+            for (name, id) in &rows {
+                println!("  {:<24} → exchange #{}", name, id.0);
+            }
+        }
+        BaselineCmd::Diff { name, exchange_id, request, context, db } => {
+            let store = open_store(&db)?;
+            let base_id = store
+                .baseline(&name)?
+                .ok_or_else(|| anyhow::anyhow!("no baseline named `{name}`"))?;
+            let load = |id: camio_core::ExchangeId| -> Result<HttpExchange> {
+                store
+                    .get(id)?
+                    .ok_or_else(|| anyhow::anyhow!("no exchange #{} in {}", id.0, db.display()))
+            };
+            let base = load(base_id)?;
+            let other = load(camio_core::ExchangeId(exchange_id))?;
+            let raw = |ex: &HttpExchange| {
+                if request {
+                    ex.request.raw()
+                } else {
+                    ex.response.as_ref().map(|r| r.raw()).unwrap_or_default()
+                }
+            };
+            let what = if request { "request" } else { "response" };
+            eprintln!(
+                "diff {what} of baseline `{name}` (#{}) ↔ #{exchange_id}",
+                base_id.0
+            );
+            let diff = camio_convert::unified_diff(&raw(&base), &raw(&other), context);
+            if diff.trim().is_empty() {
+                println!("(identical to baseline)");
+            } else {
+                print!("{diff}");
+            }
+        }
+        BaselineCmd::Rm { name, db } => {
+            let store = open_store(&db)?;
+            if store.delete_baseline(&name)? {
+                println!("removed baseline `{name}`");
+            } else {
+                println!("no baseline named `{name}`");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Env var carrying the backup passphrase. Read from the environment, never a CLI
+/// flag, so it stays out of the process list and shell history.
+const BACKUP_PASSPHRASE_ENV: &str = "CAMIO_BACKUP_PASSPHRASE";
+
+fn backup_passphrase() -> Result<String> {
+    match std::env::var(BACKUP_PASSPHRASE_ENV) {
+        Ok(p) if !p.is_empty() => Ok(p),
+        _ => bail!(
+            "set the passphrase in ${BACKUP_PASSPHRASE_ENV} \
+             (read from the environment so it stays out of argv and shell history)"
+        ),
+    }
+}
+
+/// Back up a workspace DB (F01), optionally sealing it with a passphrase, or
+/// decrypt a sealed backup (F04).
+fn backup_cmd(dest: PathBuf, db: PathBuf, encrypt: bool, decrypt: Option<PathBuf>) -> Result<()> {
+    // Decrypt path: no DB is read; the encrypted file is opened into `dest`.
+    if let Some(enc_path) = decrypt {
+        if dest.exists() {
+            bail!("{} already exists", dest.display());
+        }
+        let pass = backup_passphrase()?;
+        let data = std::fs::read(&enc_path)
+            .with_context(|| format!("reading {}", enc_path.display()))?;
+        let plain = camio_core::secretbox::open(&data, &pass).map_err(|e| anyhow::anyhow!("{e}"))?;
+        std::fs::write(&dest, &plain)
+            .with_context(|| format!("writing {}", dest.display()))?;
+        println!("decrypted {} → {}", enc_path.display(), dest.display());
+        return Ok(());
+    }
+
+    let store = open_store(&db)?;
+    if !encrypt {
+        store.backup_to(&dest)?;
+        println!("backed up {} → {}", db.display(), dest.display());
+        return Ok(());
+    }
+
+    // Encrypted export: make a consistent plaintext backup to a short-lived temp
+    // beside `dest`, seal it, and remove the temp — so the plaintext is never the
+    // delivered artifact.
+    if dest.exists() {
+        bail!("{} already exists", dest.display());
+    }
+    let pass = backup_passphrase()?;
+    let tmp = PathBuf::from(format!("{}.plain.tmp", dest.display()));
+    let _ = std::fs::remove_file(&tmp); // clear any stale temp first
+    store.backup_to(&tmp)?;
+    restrict_permissions(&tmp);
+    let plain = std::fs::read(&tmp);
+    let _ = std::fs::remove_file(&tmp); // remove the plaintext temp no matter what
+    let plain = plain.with_context(|| format!("reading temp backup {}", tmp.display()))?;
+    let sealed = camio_core::secretbox::seal(&plain, &pass, camio_core::DEFAULT_PBKDF2_ITERS)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    std::fs::write(&dest, &sealed).with_context(|| format!("writing {}", dest.display()))?;
+    restrict_permissions(&dest);
+    println!(
+        "backed up {} → {} (encrypted, {} bytes; decrypt with `camio backup --decrypt {} <out>`)",
+        db.display(),
+        dest.display(),
+        sealed.len(),
+        dest.display()
+    );
+    Ok(())
+}
+
+/// Best-effort tighten a file to owner-only (0600) on Unix. A failure is not
+/// fatal — the file is still written — but on a shared box it matters.
+fn restrict_permissions(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
 // ===========================================================================
 // Active scan (opt-in)
 // ===========================================================================
@@ -3081,6 +4709,10 @@ struct ActiveArgs {
     body: Option<String>,
     #[arg(long, value_enum, default_value_t = Preset::Balanced)]
     preset: Preset,
+    /// Run the active probes behind a realistic blend-in random persona from
+    /// this seed. See `fingerprint random`.
+    #[arg(long)]
+    persona_seed: Option<u64>,
     #[arg(long = "scope-include")]
     scope_include: Vec<String>,
     #[arg(long = "scope-exclude")]
@@ -3091,6 +4723,16 @@ struct ActiveArgs {
     /// never un-blocks 169.254.169.254 or fe80::/10.
     #[arg(long)]
     allow_metadata: bool,
+    /// Throttle to at most this many requests/second (F11). Unlimited when unset.
+    #[arg(long)]
+    rate: Option<f64>,
+    /// Run only these active checks by id (repeatable): reflected-xss,
+    /// error-based-sqli, open-redirect, http-method-audit. All when unset (F13).
+    #[arg(long = "only")]
+    only: Vec<String>,
+    /// Skip these active checks by id (repeatable) (F13).
+    #[arg(long = "exclude")]
+    exclude: Vec<String>,
     /// Actually run the active probes. Without this, prints what would run.
     #[arg(long)]
     confirm: bool,
@@ -3115,7 +4757,7 @@ struct ActiveArgs {
 }
 
 fn activescan_cmd(args: ActiveArgs) -> Result<()> {
-    let profile = profile_for(args.preset);
+    let profile = profile_for_persona(args.preset, None, args.persona_seed);
     let scope = build_scope_full(
         &args.scope_include,
         &args.scope_exclude,
@@ -3160,6 +4802,7 @@ fn activescan_cmd(args: ActiveArgs) -> Result<()> {
     let store = RefCell::new(
         Store::open(&args.db).with_context(|| format!("opening {}", args.db.display()))?,
     );
+    let limiter = camio_core::RateLimiter::new(None, args.rate.filter(|r| *r > 0.0));
 
     // The sender is the one place scope is re-enforced on every probe (plan §16).
     let send = |req: HttpRequest| -> Option<HttpExchange> {
@@ -3169,9 +4812,14 @@ fn activescan_cmd(args: ActiveArgs) -> Result<()> {
         {
             return None;
         }
+        limiter.acquire(&req.host().unwrap_or_default());
         match eng.send(req, Source::Scanner) {
-            Ok(ex) => {
-                let _ = store.borrow_mut().insert(&ex);
+            Ok(mut ex) => {
+                // Adopt the stored row id so findings link to real evidence.
+                match store.borrow_mut().insert(&ex) {
+                    Ok(id) => ex.id = id,
+                    Err(e) => camio_core::note_failure("storing a probe exchange", e),
+                }
                 Some(ex)
             }
             Err(e) => {
@@ -3180,7 +4828,7 @@ fn activescan_cmd(args: ActiveArgs) -> Result<()> {
             }
         }
     };
-    let mut findings = camio_active::run_active(&base, &send);
+    let mut findings = camio_active::run_active_filtered(&base, &send, &args.only, &args.exclude);
 
     // Optional OAST-driven blind-SSRF detection with a live collector.
     if let Some(oast_listen) = &args.oast_listen {
@@ -3230,6 +4878,937 @@ fn activescan_cmd(args: ActiveArgs) -> Result<()> {
 }
 
 // ===========================================================================
+// Autopilot — one-shot automated recon + active sweep
+// ===========================================================================
+
+#[derive(Parser)]
+struct AutopilotArgs {
+    /// Authorized target URL.
+    url: String,
+    #[arg(long, short = 'X', default_value = "GET")]
+    method: String,
+    #[arg(long = "header", short = 'H')]
+    headers: Vec<String>,
+    #[arg(long)]
+    body: Option<String>,
+    #[arg(long, value_enum, default_value_t = Preset::Balanced)]
+    preset: Preset,
+    /// Run behind a realistic blend-in random persona from this seed.
+    #[arg(long)]
+    persona_seed: Option<u64>,
+    #[arg(long = "scope-include")]
+    scope_include: Vec<String>,
+    #[arg(long = "scope-exclude")]
+    scope_exclude: Vec<String>,
+    #[arg(long)]
+    allow_private: bool,
+    /// Also permit link-local / cloud-metadata destinations.
+    #[arg(long)]
+    allow_metadata: bool,
+    /// Also probe write methods (PUT/DELETE/PATCH) for capability. These are
+    /// mutating sends (though aimed at a non-existent sub-path, never the real
+    /// resource), so this upgrades the action class to DESTRUCTIVE and requires
+    /// --confirm.
+    #[arg(long)]
+    aggressive: bool,
+    /// Crawl the target first (same-origin, scope-gated) and run the active
+    /// checks on every discovered page, not just the seed URL.
+    #[arg(long)]
+    crawl: bool,
+    /// Max pages to crawl / sweep when --crawl is set.
+    #[arg(long, default_value_t = 15)]
+    crawl_pages: usize,
+    /// After the active sweep, also fuzz the stack-suggested payload-DB
+    /// categories against discovered query/body inputs. Bounded by --fuzz-budget
+    /// and still scope- and policy-gated on every probe.
+    #[arg(long)]
+    fuzz: bool,
+    /// Max probe attempts for the --fuzz phase (split evenly across categories).
+    /// Capped at 2000.
+    #[arg(long, default_value_t = 300)]
+    fuzz_budget: usize,
+    /// Throttle the whole sweep to at most this many requests/second
+    /// (politeness / rate control, F11). Unlimited when unset.
+    #[arg(long)]
+    rate: Option<f64>,
+    /// Also run OAST-driven blind-SSRF detection: start a collector on this
+    /// address and inject correlated callback URLs into each input.
+    #[arg(long)]
+    oast_listen: Option<String>,
+    /// Authority (host:port) embedded in OAST callback URLs (defaults to
+    /// --oast-listen; set to an address the target can reach).
+    #[arg(long)]
+    oast_base: Option<String>,
+    /// Milliseconds to wait after each SSRF probe for the out-of-band callback.
+    #[arg(long, default_value_t = 1500)]
+    oast_settle_ms: u64,
+    /// Actually run the sweep. Without this, prints what would run.
+    #[arg(long)]
+    confirm: bool,
+    #[arg(long, default_value = "camio.db")]
+    db: PathBuf,
+    /// Persist findings to the findings store.
+    #[arg(long)]
+    save: bool,
+    #[arg(long)]
+    json: bool,
+}
+
+fn autopilot_cmd(args: AutopilotArgs) -> Result<()> {
+    let profile = profile_for_persona(args.preset, None, args.persona_seed);
+    let scope = build_scope_full(
+        &args.scope_include,
+        &args.scope_exclude,
+        args.allow_private,
+        args.allow_metadata,
+    )?;
+    let base = build_request(&args.url, &args.method, &args.headers, &args.body, &None)?;
+    let decision = scope.decide(&HttpExchange::new(base.clone(), Source::Scanner));
+
+    // Write-method probing is mutating, so it is gated as DESTRUCTIVE; the
+    // read-only sweep is ACTIVE. Either way: in scope, explicit target, confirmed.
+    let class = if args.aggressive {
+        ActionClass::Destructive
+    } else {
+        ActionClass::Active
+    };
+    let policy = Policy {
+        allow_active: true,
+        allow_destructive: args.aggressive,
+        require_confirmation: true,
+    };
+    match policy.gate_action_with(class, &scope, decision, args.confirm) {
+        PolicyOutcome::Deny(reason) => bail!("refused: {reason}"),
+        PolicyOutcome::NeedsConfirmation(reason) => {
+            println!("{reason}.");
+            println!(
+                "Autopilot would, in scope {}: send a baseline {} to {}, fingerprint the stack \
+                 (tech/WAF/takeover), run the active checks (reflected XSS, error-based SQLi, open \
+                 redirect, HTTP method audit{}){}, and bucket every response by status class.",
+                decision.as_str(),
+                args.method,
+                args.url,
+                if args.aggressive {
+                    " incl. PUT/DELETE/PATCH capability probes"
+                } else {
+                    ""
+                },
+                if args.fuzz {
+                    format!(
+                        ", then fuzz the stack-suggested payload-DB categories against discovered \
+                         inputs (≤{} probes)",
+                        args.fuzz_budget.min(2000)
+                    )
+                } else {
+                    String::new()
+                }
+            );
+            println!("Re-run with --confirm to execute (authorized targets only).");
+            return Ok(());
+        }
+        PolicyOutcome::Allow => {}
+    }
+    if args.aggressive {
+        eprintln!(
+            "aggressive: PUT/DELETE/PATCH capability probes enabled — they target a non-existent \
+             sub-path and never the real resource."
+        );
+    }
+
+    let eng = matched_engine(&profile).context("building matched request engine")?;
+    eprintln!(
+        "engine: {} (fingerprint-matched: {})",
+        eng.label(),
+        eng.is_fingerprint_matched()
+    );
+    let store = RefCell::new(
+        Store::open(&args.db).with_context(|| format!("opening {}", args.db.display()))?,
+    );
+    // Every probe's status, for the response summary (the 2xx/5xx view).
+    let statuses = RefCell::new(Vec::<Option<u16>>::new());
+    // Optional throttle across the whole sweep (F11 politeness/rate control).
+    let limiter = camio_core::RateLimiter::new(None, args.rate.filter(|r| *r > 0.0));
+    if limiter.is_limited() {
+        eprintln!("rate limit: ≤{} request(s)/second", args.rate.unwrap_or(0.0));
+    }
+
+    // The one place scope is re-enforced on every probe (plan §16).
+    let send = |req: HttpRequest| -> Option<HttpExchange> {
+        if !scope
+            .decide(&HttpExchange::new(req.clone(), Source::Scanner))
+            .is_sendable()
+        {
+            return None;
+        }
+        // Throttle before the send (blocks until a slot is free).
+        limiter.acquire(&req.host().unwrap_or_default());
+        match eng.send(req, Source::Scanner) {
+            Ok(mut ex) => {
+                statuses
+                    .borrow_mut()
+                    .push(ex.response.as_ref().map(|r| r.status));
+                // Adopt the stored row id so findings link to real evidence.
+                match store.borrow_mut().insert(&ex) {
+                    Ok(id) => ex.id = id,
+                    Err(e) => camio_core::note_failure("storing an autopilot exchange", e),
+                }
+                Some(ex)
+            }
+            Err(e) => {
+                eprintln!("probe send failed: {e}");
+                None
+            }
+        }
+    };
+
+    // 1. Baseline send → attack-surface synthesis (tech/WAF/takeover → payloads).
+    let baseline_ex = send(base.clone());
+    let surface = baseline_ex
+        .as_ref()
+        .map(camio_scan::analyze_attack_surface);
+
+    // 2. Active sweep: every default check (incl. the read-only method audit),
+    //    plus the opt-in write-method probes when --aggressive.
+    let mut findings = camio_active::run_active(&base, &send);
+    if args.aggressive {
+        findings.extend(camio_active::HttpMethodAudit::with_write_methods().run_write_probes(&base, &send));
+    }
+
+    // 2b. Optional crawl: discover more pages (same-origin, scope-gated) and run
+    //     the active checks on each, so the sweep covers the site, not one URL.
+    //     Discovered pages are also collected as fuzz targets below.
+    let mut crawl_targets: Vec<HttpRequest> = Vec::new();
+    if args.crawl {
+        let opts = camio_active::CrawlOptions {
+            max_pages: args.crawl_pages.max(1),
+            same_origin_only: true,
+        };
+        let result = camio_active::crawl(&base.url, &send, &opts);
+        for url in result
+            .discovered
+            .iter()
+            .filter(|u| u.as_str() != base.url)
+            .take(args.crawl_pages)
+        {
+            let page = HttpRequest::get(url);
+            if !scope
+                .decide(&HttpExchange::new(page.clone(), Source::Scanner))
+                .is_sendable()
+            {
+                continue;
+            }
+            // The seed already reports host-level method findings; keep only the
+            // resource-specific findings from each crawled page.
+            findings.extend(
+                camio_active::run_active(&page, &send)
+                    .into_iter()
+                    .filter(|f| !camio_active::is_host_level_finding(f)),
+            );
+            crawl_targets.push(page);
+        }
+        eprintln!("crawl: swept {} additional page(s)", crawl_targets.len());
+    }
+
+    // 3. Optional bounded payload-DB fuzz of the stack-suggested categories —
+    //    the hand-off from "recon recommends" to "act on it", still gated: every
+    //    probe flows through the same scope-checked `send` closure (plan §16).
+    let baseline = baseline_ex
+        .as_ref()
+        .and_then(|ex| ex.response.as_ref())
+        .map(|r| Baseline {
+            status: r.status,
+            body_len: r.body.len(),
+        });
+    let fuzz = if args.fuzz {
+        let budget = args.fuzz_budget.min(2000);
+        let db = camio_automate::load_payload_db();
+        let cats: Vec<camio_active::FuzzCategory> = surface
+            .as_ref()
+            .map(|s| {
+                s.suggested_payload_categories
+                    .iter()
+                    .filter_map(|c| {
+                        db.categories.get(c).map(|set| camio_active::FuzzCategory {
+                            name: c.clone(),
+                            set,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if cats.is_empty() {
+            eprintln!(
+                "--fuzz: none of the suggested categories matched the payload DB (see `camio payloads`); skipping fuzz."
+            );
+            None
+        } else {
+            // Fuzz the seed and every crawled page, sharing the budget across
+            // them so a site sweep fuzzes the discovered parameterized endpoints.
+            let targets: Vec<&HttpRequest> =
+                std::iter::once(&base).chain(crawl_targets.iter()).collect();
+            let per_target = (budget / targets.len().max(1)).max(1);
+            eprintln!(
+                "fuzzing {} payload categor{} across {} target(s) (≤{per_target} probes each)…",
+                cats.len(),
+                if cats.len() == 1 { "y" } else { "ies" },
+                targets.len()
+            );
+            let mut agg = camio_active::AutoFuzzSummary::default();
+            for target in targets {
+                let s = camio_active::run_auto_fuzz(
+                    target,
+                    &cats,
+                    per_target,
+                    baseline.as_ref(),
+                    None,
+                    &send,
+                );
+                agg.attempts += s.attempts;
+                agg.sent += s.sent;
+                agg.results.extend(s.results);
+            }
+            Some(agg)
+        }
+    } else {
+        None
+    };
+
+    // 3b. Optional OAST-driven blind-SSRF detection with a live collector.
+    if let Some(oast_listen) = &args.oast_listen {
+        let listener = std::net::TcpListener::bind(oast_listen)
+            .with_context(|| format!("binding OAST collector on {oast_listen}"))?;
+        let local = listener.local_addr().context("reading OAST address")?;
+        let base_auth = args.oast_base.clone().unwrap_or_else(|| local.to_string());
+        let collector = camio_oast::Collector::new(base_auth.clone());
+        let handle = camio_oast::OastServer::new(collector.clone())
+            .on_interaction(|i| {
+                eprintln!("  OAST callback: {} {} from {}", i.method, i.target, i.source);
+            })
+            .spawn(listener)
+            .context("starting OAST collector")?;
+        eprintln!(
+            "OAST collector on {local} (callback base http://{base_auth}/) — probing inputs for blind SSRF…"
+        );
+        findings.extend(camio_active::run_oast_ssrf(
+            &base,
+            &send,
+            &collector,
+            std::time::Duration::from_millis(args.oast_settle_ms),
+        ));
+        handle.stop_and_join();
+    }
+
+    // 4. Response status summary across every probe sent above (incl. fuzz).
+    let summary = camio_automate::StatusSummary::from_statuses(statuses.borrow().iter().copied());
+
+    if args.json {
+        let surface_json = surface.as_ref().map(|s| {
+            let techs: Vec<_> = s
+                .technologies
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "name": t.name, "version": t.version, "categories": t.categories,
+                        "confidence": t.confidence, "implied": t.implied,
+                    })
+                })
+                .collect();
+            serde_json::json!({
+                "host": s.host,
+                "technologies": techs,
+                "wafs": s.wafs,
+                "takeover_candidate": s.takeover,
+                "suggested_payload_categories": s.suggested_payload_categories,
+                "suggested_evasion_encodings": s.suggested_encodings.iter().map(|e| format!("{e:?}")).collect::<Vec<_>>(),
+                "suggested_scope_rule": s.suggested_scope_rule,
+                "notes": s.notes,
+            })
+        });
+        let out = serde_json::json!({
+            "target": args.url,
+            "scope_decision": decision.as_str(),
+            "attack_surface": surface_json,
+            "findings": findings,
+            "status_summary": summary,
+            "fuzz": fuzz,
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+    } else {
+        println!("== Autopilot: {} ({}) ==\n", args.url, decision.as_str());
+        if let Some(s) = &surface {
+            if s.technologies.is_empty() {
+                println!("stack: (none fingerprinted)");
+            } else {
+                let techs: Vec<String> = s
+                    .technologies
+                    .iter()
+                    .map(|t| match &t.version {
+                        Some(v) => format!("{} {v}", t.name),
+                        None => t.name.clone(),
+                    })
+                    .collect();
+                println!("stack: {}", techs.join(", "));
+            }
+            if !s.wafs.is_empty() {
+                println!("waf/cdn: {}", s.wafs.join(", "));
+            }
+            if let Some(service) = &s.takeover {
+                println!("takeover candidate: {service}");
+            }
+        } else {
+            println!("stack: (baseline request was refused — nothing to fingerprint)");
+        }
+
+        println!("\n-- active findings --");
+        print_findings(&findings);
+
+        println!("\n-- responses by status --");
+        println!("  {}", summary.oneline());
+        for (code, count) in &summary.by_code {
+            println!("    {code}: {count}");
+        }
+
+        if let Some(fz) = &fuzz {
+            println!(
+                "\n-- fuzz results ({} sent, {} flagged) --",
+                fz.sent,
+                fz.results.len()
+            );
+            if fz.results.is_empty() {
+                println!("  (no payload produced a flagged response)");
+            } else {
+                for r in &fz.results {
+                    let st = r
+                        .result
+                        .status
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "-".to_string());
+                    println!(
+                        "  [{}] {} = {:?}  -> {} [{}]",
+                        r.category,
+                        r.input_name,
+                        r.payload,
+                        st,
+                        r.result.flags.join(",")
+                    );
+                }
+            }
+        }
+
+        if let Some(s) = &surface {
+            println!("\n-- recommended next steps --");
+            if !s.suggested_payload_categories.is_empty() {
+                println!(
+                    "payload categories: {}",
+                    s.suggested_payload_categories.join(", ")
+                );
+                if let Some(cat) = s.suggested_payload_categories.first() {
+                    let rule = s
+                        .suggested_scope_rule
+                        .clone()
+                        .unwrap_or_else(|| "host:<target>".to_string());
+                    println!(
+                        "  e.g.  camio fuzz \"{}\" --payloads db:{cat} --scope-include {rule} --budget 200 --confirm",
+                        args.url
+                    );
+                }
+            }
+            if !s.suggested_encodings.is_empty() {
+                let encs: Vec<String> =
+                    s.suggested_encodings.iter().map(|e| format!("{e:?}")).collect();
+                println!("evasion encodings (WAF present): {}", encs.join(", "));
+            }
+        }
+
+        println!(
+            "\n{} finding(s); {} request(s) sent. Stored in {}.",
+            findings.len(),
+            summary.total,
+            args.db.display()
+        );
+    }
+
+    if args.save {
+        let mut n = 0;
+        for f in &findings {
+            if store.borrow_mut().insert_finding(f).is_ok() {
+                n += 1;
+            }
+        }
+        if !args.json {
+            println!("saved {n} finding(s) to {}", args.db.display());
+        }
+    }
+    Ok(())
+}
+
+// ===========================================================================
+// Headless DAST run with a machine-readable result contract (F25)
+// ===========================================================================
+
+/// Documented exit codes for `camio dast`, so a CI job can branch on the result
+/// without parsing stdout. A runtime error still surfaces as the process-wide
+/// exit 1 (an `Err` from the command); these are the *completed-run* outcomes.
+const DAST_EXIT_CLEAN: i32 = 0;
+const DAST_EXIT_FINDINGS: i32 = 3;
+
+/// Count findings at or above `threshold` (the CI gate).
+fn dast_gate_count(findings: &[Finding], threshold: Severity) -> usize {
+    findings.iter().filter(|f| f.severity >= threshold).count()
+}
+
+/// Severity breakdown of a finding set, most severe first, keeping only the
+/// non-empty buckets — the machine-readable contract's `severity_breakdown`.
+fn dast_severity_breakdown(findings: &[Finding]) -> Vec<SeverityCount> {
+    [
+        Severity::Critical,
+        Severity::High,
+        Severity::Medium,
+        Severity::Low,
+        Severity::Info,
+    ]
+    .into_iter()
+    .filter_map(|sev| {
+        let count = findings.iter().filter(|f| f.severity == sev).count();
+        (count > 0).then(|| SeverityCount {
+            severity: severity_label(sev).to_string(),
+            count,
+        })
+    })
+    .collect()
+}
+
+#[derive(serde::Serialize)]
+struct SeverityCount {
+    severity: String,
+    count: usize,
+}
+
+#[derive(serde::Serialize)]
+struct DastGate {
+    threshold: Option<String>,
+    over_threshold: usize,
+    passed: bool,
+}
+
+/// The machine-readable result contract emitted by `camio dast` (stable JSON for
+/// CI: a pipeline reads `gate.passed` / the exit code and keeps the document as a
+/// build artifact).
+#[derive(serde::Serialize)]
+struct DastRun {
+    tool: &'static str,
+    version: &'static str,
+    target: String,
+    scope_decision: String,
+    engine: String,
+    fingerprint_matched: bool,
+    checks_run: usize,
+    exchanges_sent: usize,
+    total_findings: usize,
+    severity_breakdown: Vec<SeverityCount>,
+    gate: DastGate,
+}
+
+#[derive(Parser)]
+struct DastArgs {
+    /// Authorized target URL.
+    url: String,
+    #[arg(long, short = 'X', default_value = "GET")]
+    method: String,
+    #[arg(long = "header", short = 'H')]
+    headers: Vec<String>,
+    #[arg(long)]
+    body: Option<String>,
+    #[arg(long, value_enum, default_value_t = Preset::Balanced)]
+    preset: Preset,
+    #[arg(long = "scope-include")]
+    scope_include: Vec<String>,
+    #[arg(long = "scope-exclude")]
+    scope_exclude: Vec<String>,
+    #[arg(long)]
+    allow_private: bool,
+    #[arg(long)]
+    allow_metadata: bool,
+    /// Severity gate: exit 3 if any finding is at or above this
+    /// (info|low|medium|high|critical). Omitted → the run never fails on findings.
+    #[arg(long)]
+    fail_on: Option<String>,
+    /// Persist findings to the store.
+    #[arg(long)]
+    save: bool,
+    /// Write the JSON result contract here instead of stdout.
+    #[arg(long)]
+    out: Option<PathBuf>,
+    /// Actually run (sends traffic). Without it, prints the plan and exits 0.
+    #[arg(long)]
+    confirm: bool,
+    #[arg(long, default_value = "camio.db")]
+    db: PathBuf,
+}
+
+/// Headless DAST for CI (F25): a bounded baseline + active + passive run over the
+/// matched engine that emits a machine-readable [`DastRun`] contract and a stable
+/// exit code. Non-interactive and still fully gated — scope is re-checked on every
+/// send, the action class is ACTIVE, and an explicit `--confirm` is required.
+fn dast_cmd(args: DastArgs) -> Result<()> {
+    let profile = profile_for_persona(args.preset, None, None);
+    let scope = build_scope_full(
+        &args.scope_include,
+        &args.scope_exclude,
+        args.allow_private,
+        args.allow_metadata,
+    )?;
+    let base = build_request(&args.url, &args.method, &args.headers, &args.body, &None)?;
+    let decision = scope.decide(&HttpExchange::new(base.clone(), Source::Scanner));
+    let threshold = args.fail_on.as_deref().map(parse_severity).transpose()?;
+
+    let policy = Policy {
+        allow_active: true,
+        allow_destructive: false,
+        require_confirmation: true,
+    };
+    match policy.gate_action_with(ActionClass::Active, &scope, decision, args.confirm) {
+        PolicyOutcome::Deny(reason) => {
+            best_effort_audit(
+                &args.db,
+                &camio_store::NewAudit::new("cli", "ACTIVE", "dast", "denied")
+                    .target(args.url.clone())
+                    .detail(reason.clone()),
+            );
+            bail!("refused: {reason}")
+        }
+        PolicyOutcome::NeedsConfirmation(reason) => {
+            eprintln!("{reason}.");
+            eprintln!(
+                "DAST would, in scope {}: send a baseline {} to {}, run the active checks and \
+                 every passive check over the response, then emit a JSON result contract{}. \
+                 Re-run with --confirm to execute (authorized targets only).",
+                decision.as_str(),
+                args.method,
+                args.url,
+                threshold
+                    .map(|t| format!(" and exit {DAST_EXIT_FINDINGS} if any finding is ≥ {}", t.as_str()))
+                    .unwrap_or_default()
+            );
+            return Ok(());
+        }
+        PolicyOutcome::Allow => {}
+    }
+
+    let eng = matched_engine(&profile).context("building matched request engine")?;
+    let store = RefCell::new(
+        Store::open(&args.db).with_context(|| format!("opening {}", args.db.display()))?,
+    );
+    let sent = RefCell::new(0usize);
+    // The one place scope is re-enforced on every probe (plan §16).
+    let send = |req: HttpRequest| -> Option<HttpExchange> {
+        if !scope
+            .decide(&HttpExchange::new(req.clone(), Source::Scanner))
+            .is_sendable()
+        {
+            return None;
+        }
+        match eng.send(req, Source::Scanner) {
+            Ok(mut ex) => {
+                *sent.borrow_mut() += 1;
+                match store.borrow_mut().insert(&ex) {
+                    Ok(id) => ex.id = id,
+                    Err(e) => camio_core::note_failure("storing a dast exchange", e),
+                }
+                Some(ex)
+            }
+            Err(e) => {
+                eprintln!("probe send failed: {e}");
+                None
+            }
+        }
+    };
+
+    // Baseline → active sweep → passive scan of the baseline response.
+    let baseline_ex = send(base.clone());
+    let mut findings = camio_active::run_active(&base, &send);
+    if let Some(ex) = &baseline_ex {
+        findings.extend(camio_scan::scan_exchange(ex));
+    }
+
+    if args.save {
+        let mut store = store.borrow_mut();
+        for f in &findings {
+            let _ = store.insert_finding(f);
+        }
+    }
+
+    let over = threshold.map(|t| dast_gate_count(&findings, t)).unwrap_or(0);
+    let run = DastRun {
+        tool: "camio",
+        version: env!("CARGO_PKG_VERSION"),
+        target: args.url.clone(),
+        scope_decision: decision.as_str().to_string(),
+        engine: eng.label().to_string(),
+        fingerprint_matched: eng.is_fingerprint_matched(),
+        checks_run: camio_active::default_active_checks().len() + camio_scan::default_checks().len(),
+        exchanges_sent: *sent.borrow(),
+        total_findings: findings.len(),
+        severity_breakdown: dast_severity_breakdown(&findings),
+        gate: DastGate {
+            threshold: threshold.map(|t| t.as_str().to_string()),
+            over_threshold: over,
+            passed: over == 0,
+        },
+    };
+    // Durable audit (plan §F02): the DAST sweep ran. One row summarizes it
+    // (exchanges sent, findings, gate), never any body.
+    if let Err(e) = store.borrow().record_audit(
+        &camio_store::NewAudit::new("cli", "ACTIVE", "dast", "allowed")
+            .target(args.url.clone())
+            .detail(format!(
+                "sent={} findings={} gate={}",
+                run.exchanges_sent,
+                run.total_findings,
+                if run.gate.passed { "passed" } else { "over" }
+            )),
+    ) {
+        eprintln!("warning: could not write audit log: {e}");
+    }
+
+    let json = serde_json::to_string_pretty(&run)?;
+    match &args.out {
+        Some(path) => {
+            std::fs::write(path, &json)
+                .with_context(|| format!("writing DAST contract to {}", path.display()))?;
+            eprintln!("wrote DAST result contract to {}", path.display());
+        }
+        None => println!("{json}"),
+    }
+
+    // Stable, documented exit code so CI can gate without parsing stdout.
+    use std::io::Write as _;
+    let _ = std::io::stdout().flush();
+    std::process::exit(if over > 0 {
+        DAST_EXIT_FINDINGS
+    } else {
+        DAST_EXIT_CLEAN
+    });
+}
+
+// ===========================================================================
+// Typed workflow execution (F12)
+// ===========================================================================
+
+/// A named step's output, carried forward so later steps can reference it.
+enum StepOutput {
+    Exchange(Box<HttpExchange>),
+    Text(String),
+}
+
+/// Resolve a transform `input`: a `$step_id.field` reference into an earlier
+/// step's output, or a literal string. Validation already proved any reference
+/// targets an earlier step, so a missing/!wrong-kind output here is a runtime
+/// error on the referenced value, not a dangling reference.
+fn resolve_workflow_input(
+    input: &str,
+    outputs: &std::collections::HashMap<String, StepOutput>,
+) -> Result<String> {
+    let Some((id, field)) = camio_automate::parse_reference(input) else {
+        return Ok(input.to_string()); // literal
+    };
+    match outputs.get(id) {
+        Some(StepOutput::Exchange(ex)) => match field {
+            "body" => Ok(ex
+                .response
+                .as_ref()
+                .map(|r| r.body.as_text().to_string())
+                .unwrap_or_default()),
+            "status" => Ok(ex
+                .response
+                .as_ref()
+                .map(|r| r.status.to_string())
+                .unwrap_or_default()),
+            "url" => Ok(ex.request.url.clone()),
+            other => bail!("`${id}.{other}`: a request step exposes only body/status/url"),
+        },
+        Some(StepOutput::Text(s)) => match field {
+            "value" => Ok(s.clone()),
+            other => bail!("`${id}.{other}`: a transform step exposes only `value`"),
+        },
+        None => bail!("`${id}` produced no output (did that step run?)"),
+    }
+}
+
+#[derive(Parser)]
+struct WorkflowCmdArgs {
+    /// Path to the workflow document (JSON).
+    file: PathBuf,
+    /// Validate the document and print the plan, but do not execute.
+    #[arg(long)]
+    check: bool,
+    #[arg(long, value_enum, default_value_t = Preset::Balanced)]
+    preset: Preset,
+    #[arg(long = "scope-include")]
+    scope_include: Vec<String>,
+    #[arg(long = "scope-exclude")]
+    scope_exclude: Vec<String>,
+    #[arg(long)]
+    allow_private: bool,
+    #[arg(long)]
+    allow_metadata: bool,
+    /// Persist findings produced by scan steps.
+    #[arg(long)]
+    save: bool,
+    /// Actually execute network steps (request/active_scan). Without it, a
+    /// workflow that sends traffic is validated and planned only.
+    #[arg(long)]
+    confirm: bool,
+    #[arg(long, default_value = "camio.db")]
+    db: PathBuf,
+}
+
+/// Execute a typed workflow document (F12). The document is validated first; a
+/// workflow that sends traffic requires `--confirm`, and every send is re-checked
+/// against scope (plan §16). Transform-only workflows need no network and run
+/// without confirmation.
+fn workflow_cmd(args: WorkflowCmdArgs) -> Result<()> {
+    use camio_automate::{WorkflowAction, WorkflowDoc};
+
+    let text = std::fs::read_to_string(&args.file)
+        .with_context(|| format!("reading workflow {}", args.file.display()))?;
+    let doc = WorkflowDoc::from_json(&text).context("parsing the workflow document")?;
+    if let Err(errs) = doc.validate() {
+        bail!(
+            "workflow `{}` is invalid:\n  - {}",
+            doc.name,
+            errs.join("\n  - ")
+        );
+    }
+
+    let has_network = doc.steps.iter().any(|s| {
+        matches!(
+            s.action,
+            WorkflowAction::Request { .. } | WorkflowAction::ActiveScan { .. }
+        )
+    });
+    if args.check || (has_network && !args.confirm) {
+        println!("workflow `{}` — {} step(s), valid.", doc.name, doc.steps.len());
+        for step in &doc.steps {
+            println!("  - {:<12} {}", step.action.kind(), step.id);
+        }
+        if has_network && !args.check {
+            println!(
+                "This workflow sends traffic (request/active_scan steps are scope-gated per send). \
+                 Re-run with --confirm to execute (authorized targets only)."
+            );
+        }
+        return Ok(());
+    }
+
+    let profile = profile_for_persona(args.preset, None, None);
+    let scope = build_scope_full(
+        &args.scope_include,
+        &args.scope_exclude,
+        args.allow_private,
+        args.allow_metadata,
+    )?;
+    let eng = matched_engine(&profile).context("building matched request engine")?;
+    let store = RefCell::new(
+        Store::open(&args.db).with_context(|| format!("opening {}", args.db.display()))?,
+    );
+    let send = |req: HttpRequest| -> Option<HttpExchange> {
+        if !scope
+            .decide(&HttpExchange::new(req.clone(), Source::Scanner))
+            .is_sendable()
+        {
+            return None;
+        }
+        match eng.send(req, Source::Scanner) {
+            Ok(mut ex) => {
+                match store.borrow_mut().insert(&ex) {
+                    Ok(id) => ex.id = id,
+                    Err(e) => camio_core::note_failure("storing a workflow exchange", e),
+                }
+                Some(ex)
+            }
+            Err(e) => {
+                eprintln!("workflow send failed: {e}");
+                None
+            }
+        }
+    };
+
+    let mut outputs: std::collections::HashMap<String, StepOutput> = std::collections::HashMap::new();
+    let mut findings: Vec<Finding> = Vec::new();
+    println!("running workflow `{}` ({} steps)…", doc.name, doc.steps.len());
+    for step in &doc.steps {
+        let line = match &step.action {
+            WorkflowAction::Request {
+                url,
+                method,
+                headers,
+                body,
+            } => {
+                let req = build_request(url, method, headers, body, &None)?;
+                match send(req) {
+                    Some(ex) => {
+                        let status = ex.response.as_ref().map(|r| r.status);
+                        outputs.insert(step.id.clone(), StepOutput::Exchange(Box::new(ex)));
+                        format!("request  `{}` → {}", step.id, status.map(|s| s.to_string()).unwrap_or_else(|| "no response".into()))
+                    }
+                    None => format!("request  `{}` → skipped (out of scope or send failed)", step.id),
+                }
+            }
+            WorkflowAction::PassiveScan { on } => match outputs.get(on) {
+                Some(StepOutput::Exchange(ex)) => {
+                    let found = camio_scan::scan_exchange(ex);
+                    let n = found.len();
+                    findings.extend(found);
+                    format!("scan     `{}` over `{on}` → {n} finding(s)", step.id)
+                }
+                _ => bail!(
+                    "step `{}`: passive_scan `on` = `{on}` did not produce a response to scan",
+                    step.id
+                ),
+            },
+            WorkflowAction::ActiveScan { url } => {
+                let base = build_request(url, "GET", &[], &None, &None)?;
+                let found = camio_active::run_active(&base, &send);
+                let n = found.len();
+                findings.extend(found);
+                format!("active   `{}` on {url} → {n} finding(s)", step.id)
+            }
+            WorkflowAction::Transform { input, op } => {
+                let resolved = resolve_workflow_input(input, &outputs)?;
+                let t = camio_convert::Transform::from_name(op)
+                    .ok_or_else(|| anyhow::anyhow!("unknown transform `{op}`"))?;
+                let out = t
+                    .apply(resolved.as_bytes())
+                    .map_err(|e| anyhow::anyhow!("transform `{op}` failed: {e}"))?;
+                let s = String::from_utf8_lossy(&out).into_owned();
+                let preview: String = s.chars().take(60).collect();
+                outputs.insert(step.id.clone(), StepOutput::Text(s));
+                format!("transform`{}` {op} → {preview}", step.id)
+            }
+        };
+        println!("  ✓ {line}");
+    }
+
+    if args.save && !findings.is_empty() {
+        let mut store = store.borrow_mut();
+        let mut n = 0;
+        for f in &findings {
+            if store.insert_finding(f).is_ok() {
+                n += 1;
+            }
+        }
+        println!("saved {n} finding(s) to {}", args.db.display());
+    }
+    println!(
+        "workflow complete: {} step(s), {} finding(s).",
+        doc.steps.len(),
+        findings.len()
+    );
+    Ok(())
+}
+
+// ===========================================================================
 // AI assistant (optional, BYO key)
 // ===========================================================================
 
@@ -3256,6 +5835,23 @@ struct AiArgs {
     /// Translate the prompt into a CamioQL query instead of a chat answer.
     #[arg(long)]
     camioql: bool,
+    /// Run a structured AI-assist task over the prompt instead of a free chat:
+    /// attack-plan (next-step vectors from a surface/findings summary),
+    /// payload-mutations (WAF-evasion variants of the prompt as a payload), or
+    /// triage (prioritize a findings summary). Authorized testing only.
+    #[arg(long, value_enum)]
+    task: Option<AiTaskArg>,
+    /// For --task payload-mutations: an optional context hint (e.g. "reflected in
+    /// an HTML attribute; WAF blocks <script>").
+    #[arg(long)]
+    context: Option<String>,
+}
+
+#[derive(Copy, Clone, ValueEnum)]
+enum AiTaskArg {
+    AttackPlan,
+    PayloadMutations,
+    Triage,
 }
 
 fn ai_cmd(args: AiArgs) -> Result<()> {
@@ -3295,6 +5891,32 @@ fn ai_cmd(args: AiArgs) -> Result<()> {
         );
     }
     let client = AiClient::new(cfg).map_err(|e| anyhow::anyhow!("{e}"))?;
+    // Structured AI-assist tasks (attack planning / payload mutation / triage)
+    // run over the prompt and return before the free-chat path.
+    if let Some(task) = args.task {
+        match task {
+            AiTaskArg::AttackPlan => {
+                let plan = camio_ai::run_attack_plan(&client, &prompt)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                println!("{plan}");
+            }
+            AiTaskArg::PayloadMutations => {
+                let variants =
+                    camio_ai::run_payload_mutations(&client, &prompt, args.context.as_deref())
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                for v in &variants {
+                    println!("{v}");
+                }
+                eprintln!("{} mutation(s)", variants.len());
+            }
+            AiTaskArg::Triage => {
+                let triage =
+                    camio_ai::run_triage(&client, &prompt).map_err(|e| anyhow::anyhow!("{e}"))?;
+                println!("{triage}");
+            }
+        }
+        return Ok(());
+    }
     let messages = if args.camioql {
         camio_ai::nl_to_camioql(&prompt)
     } else {
@@ -3320,6 +5942,10 @@ struct AppArgs {
     db: PathBuf,
     #[arg(long, value_enum, default_value_t = Preset::Balanced)]
     preset: Preset,
+    /// Start the app with a realistic blend-in random persona from this seed.
+    /// See `fingerprint random`.
+    #[arg(long)]
+    persona_seed: Option<u64>,
     #[arg(long = "scope-include")]
     scope_include: Vec<String>,
     #[arg(long = "scope-exclude")]
@@ -3336,7 +5962,7 @@ struct AppArgs {
 }
 
 fn app_cmd(args: AppArgs) -> Result<()> {
-    let profile = profile_for(args.preset);
+    let profile = profile_for_persona(args.preset, None, args.persona_seed);
     let scope = build_scope_full(
         &args.scope_include,
         &args.scope_exclude,
@@ -3369,6 +5995,10 @@ struct UiArgs {
     db: PathBuf,
     #[arg(long, value_enum, default_value_t = Preset::Balanced)]
     preset: Preset,
+    /// Start the web UI with a realistic blend-in random persona from this seed.
+    /// See `fingerprint random`.
+    #[arg(long)]
+    persona_seed: Option<u64>,
     #[arg(long = "scope-include")]
     scope_include: Vec<String>,
     #[arg(long = "scope-exclude")]
@@ -3385,7 +6015,7 @@ struct UiArgs {
 }
 
 fn ui_cmd(args: UiArgs) -> Result<()> {
-    let profile = profile_for(args.preset);
+    let profile = profile_for_persona(args.preset, None, args.persona_seed);
     let scope = build_scope_full(
         &args.scope_include,
         &args.scope_exclude,
@@ -3530,7 +6160,11 @@ fn save_key(dir: &std::path::Path, session_id: &str, key_bytes: &[u8; 32]) -> Re
     {
         use std::os::unix::fs::PermissionsExt;
         let perms = std::fs::Permissions::from_mode(0o600);
-        let _ = std::fs::set_permissions(&path, perms);
+        // A world-readable AI session key is the whole failure this file is
+        // supposed to prevent, so a failed chmod must fail the save rather than
+        // leaving the key on disk with whatever mode the filesystem gave it.
+        std::fs::set_permissions(&path, perms)
+            .with_context(|| format!("restricting {} to owner-only (0600)", path.display()))?;
     }
     Ok(path)
 }
@@ -3544,7 +6178,7 @@ fn load_key(dir: &std::path::Path, session_id: &str) -> Result<camio_core::Sessi
         )
     })?;
     let bytes = hex_decode(text.trim())
-        .map_err(|_| anyhow::anyhow!("invalid hex in {}", path.display()))?;
+        .map_err(|e| anyhow::anyhow!("invalid hex in {}: {e}", path.display()))?;
     if bytes.len() != 32 {
         bail!("key file {} is not 32 bytes", path.display());
     }
@@ -3561,9 +6195,11 @@ fn hex_encode(bytes: &[u8]) -> String {
     out
 }
 
-fn hex_decode(s: &str) -> std::result::Result<Vec<u8>, ()> {
+/// Decode hex, naming the first byte that is not a hex digit. A bare `()` made
+/// "wrong length" and "invalid character" the same answer.
+fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
     if !s.len().is_multiple_of(2) {
-        return Err(());
+        return Err(format!("{} is not an even number of hex digits", s.len()));
     }
     let mut out = Vec::with_capacity(s.len() / 2);
     let b = s.as_bytes();
@@ -3575,7 +6211,17 @@ fn hex_decode(s: &str) -> std::result::Result<Vec<u8>, ()> {
     };
     let mut i = 0;
     while i < b.len() {
-        out.push((from_hex(b[i])? << 4) | from_hex(b[i + 1])?);
+        // The source error is unit-typed and carries no information; the
+        // replacement names the offending byte, which is the useful part.
+        // audit-allow: B7
+        let h = from_hex(b[i])
+            .map_err(|_| format!("byte {i} (`{}`) is not a hex digit", b[i] as char))?;
+        // The source error is unit-typed and carries no information;
+        // the replacement names the offending byte or column.
+        // audit-allow: B7
+        let l = from_hex(b[i + 1])
+            .map_err(|_| format!("byte {} (`{}`) is not a hex digit", i + 1, b[i + 1] as char))?;
+        out.push((h << 4) | l);
         i += 2;
     }
     Ok(out)
@@ -3684,6 +6330,9 @@ fn ai_check_integrity(args: AiCheckIntegrityArgs) -> Result<()> {
     let binding: camio_core::SessionBinding =
         serde_json::from_str(&text).context("parsing binding JSON")?;
     let dir = default_key_dir(args.key_dir);
+    // The key is loaded to prove it can be decrypted with this session; its
+    // value is not used further.
+    // audit-allow: B14
     let _key = load_key(&dir, &binding.session_id)?;
     let mut paths = camio_core::default_integrity_paths();
     paths.extend(args.lock_paths);
@@ -3761,8 +6410,11 @@ fn ai_authorize_chain(args: AiAuthorizeChainArgs) -> Result<()> {
         if let Some(hs) = s.get("headers").and_then(|v| v.as_array()) {
             for h in hs {
                 if let Some(pair) = h.as_array() {
-                    if pair.len() == 2 {
-                        if let (Some(n), Some(v)) = (pair[0].as_str(), pair[1].as_str()) {
+                    // A pair that is not two strings is skipped: indexing a
+                    // JSON array by position is how a malformed spec becomes a
+                    // panic.
+                    if let [n_value, v_value] = pair.as_slice() {
+                        if let (Some(n), Some(v)) = (n_value.as_str(), v_value.as_str()) {
                             req.headers.push(n.to_string(), v.to_string());
                         }
                     }
@@ -3799,5 +6451,153 @@ fn ai_authorize_chain(args: AiAuthorizeChainArgs) -> Result<()> {
             Ok(())
         }
         Err(e) => bail!("refused: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        dast_gate_count, dast_severity_breakdown, forward_redirect_headers, named_profile_dir,
+        resolve_url,
+    };
+    use camio_core::{Confidence, Finding, FindingId, HttpRequest, Severity};
+    use std::path::Path;
+
+    fn finding_sev(sev: Severity) -> Finding {
+        Finding {
+            id: FindingId(0),
+            title: "t".into(),
+            severity: sev,
+            confidence: Confidence::Firm,
+            detail: String::new(),
+            evidence: vec![],
+            created_at_ms: 0,
+            rule: None,
+        }
+    }
+
+    #[test]
+    fn dast_gate_counts_findings_at_or_above_threshold() {
+        let fs = vec![
+            finding_sev(Severity::Info),
+            finding_sev(Severity::Low),
+            finding_sev(Severity::High),
+            finding_sev(Severity::Critical),
+        ];
+        // At/above Medium = High + Critical.
+        assert_eq!(dast_gate_count(&fs, Severity::Medium), 2);
+        // At/above Info = all of them.
+        assert_eq!(dast_gate_count(&fs, Severity::Info), 4);
+        // At/above Critical = just the one.
+        assert_eq!(dast_gate_count(&fs, Severity::Critical), 1);
+        assert_eq!(dast_gate_count(&[], Severity::Low), 0);
+    }
+
+    #[test]
+    fn dast_breakdown_is_most_severe_first_and_omits_empty_buckets() {
+        let fs = vec![
+            finding_sev(Severity::Low),
+            finding_sev(Severity::Low),
+            finding_sev(Severity::Critical),
+            finding_sev(Severity::Info),
+        ];
+        let b = dast_severity_breakdown(&fs);
+        // Critical first, then low, then info; no medium/high buckets.
+        let pairs: Vec<(&str, usize)> =
+            b.iter().map(|c| (c.severity.as_str(), c.count)).collect();
+        assert_eq!(
+            pairs,
+            vec![("critical", 1), ("low", 2), ("info", 1)],
+            "breakdown must be ranked and skip empty buckets"
+        );
+    }
+
+    #[test]
+    fn named_profile_dir_isolates_and_prevents_traversal() {
+        let root = Path::new("/profiles");
+        // A normal name becomes a single segment under the root.
+        assert_eq!(
+            named_profile_dir(root, "client-a").unwrap(),
+            Path::new("/profiles/client-a")
+        );
+        // Path separators and traversal are neutralised: the result is a direct
+        // child of the root (a single sanitised segment), never an escape.
+        let p = named_profile_dir(root, "../../etc/passwd").unwrap();
+        assert_eq!(p.parent(), Some(root), "must be a direct child of the root");
+        // Empty / dot-only names are rejected.
+        assert!(named_profile_dir(root, "").is_none());
+        assert!(named_profile_dir(root, "..").is_none());
+        assert!(named_profile_dir(root, "///").is_none());
+    }
+
+    #[test]
+    fn redirect_headers_preserve_content_type_for_307_body_same_host() {
+        // A POST with a body being redirected 307 to the same host: the body (and
+        // thus Content-Type) and the session context must survive the hop.
+        let mut req = HttpRequest::get("https://host.test/a");
+        req.headers.push("Content-Type", "application/json");
+        req.headers.push("Authorization", "Bearer secret");
+        req.headers.push("Cookie", "sid=abc");
+        req.headers.push("Host", "host.test");
+        let out = forward_redirect_headers(&req, /*cross_host=*/ false, /*keeps_body=*/ true);
+        assert_eq!(out.get("Content-Type"), Some("application/json"));
+        assert_eq!(out.get("Authorization"), Some("Bearer secret"));
+        assert_eq!(out.get("Cookie"), Some("sid=abc"));
+        // Host is always recomputed from the new URL, never carried.
+        assert_eq!(out.get("Host"), None);
+    }
+
+    #[test]
+    fn redirect_headers_drop_credentials_cross_host() {
+        let mut req = HttpRequest::get("https://host.test/a");
+        req.headers.push("Authorization", "Bearer secret");
+        req.headers.push("Cookie", "sid=abc");
+        req.headers.push("Accept", "text/html");
+        let out = forward_redirect_headers(&req, /*cross_host=*/ true, /*keeps_body=*/ true);
+        // No credential leak to another origin...
+        assert_eq!(out.get("Authorization"), None);
+        assert_eq!(out.get("Cookie"), None);
+        // ...but ordinary headers still travel.
+        assert_eq!(out.get("Accept"), Some("text/html"));
+    }
+
+    #[test]
+    fn redirect_headers_drop_content_headers_when_falling_back_to_get() {
+        // 301/302/303 → GET with no body: content headers must not linger.
+        let mut req = HttpRequest::get("https://host.test/a");
+        req.headers.push("Content-Type", "application/json");
+        req.headers.push("Content-Length", "42");
+        req.headers.push("Accept", "application/json");
+        let out = forward_redirect_headers(&req, /*cross_host=*/ false, /*keeps_body=*/ false);
+        assert_eq!(out.get("Content-Type"), None);
+        assert_eq!(out.get("Content-Length"), None);
+        assert_eq!(out.get("Accept"), Some("application/json"));
+    }
+
+    #[test]
+    fn resolve_url_handles_relative_and_absolute_locations() {
+        let base = "http://host.test/a/b?x=1";
+        // Origin-relative.
+        assert_eq!(
+            resolve_url(base, "/next").as_deref(),
+            Some("http://host.test/next")
+        );
+        // Path-relative (relative to the directory of the current path).
+        assert_eq!(
+            resolve_url(base, "c").as_deref(),
+            Some("http://host.test/a/c")
+        );
+        // Scheme-relative.
+        assert_eq!(
+            resolve_url(base, "//other.test/p").as_deref(),
+            Some("http://other.test/p")
+        );
+        // Absolute (possibly cross-origin — the caller re-gates scope).
+        assert_eq!(
+            resolve_url(base, "https://evil.test/x").as_deref(),
+            Some("https://evil.test/x")
+        );
+        // Unparseable base → None (chain stops).
+        assert_eq!(resolve_url("not a url", "/x"), None);
     }
 }

@@ -4,6 +4,72 @@ All notable changes to Camio are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project uses semantic
 versioning once it reaches 1.0.
 
+## [Unreleased]
+
+### Added
+
+- **Expanded active-check matrix (4 → 9).** New marker-confirmed active checks in
+  `camio-active`: server-side template injection (`ssti`), path traversal / local
+  file inclusion (`path-traversal`), CRLF injection / HTTP response splitting
+  (`crlf-injection`), CORS misconfiguration (`cors-misconfig`), and Host-header
+  injection (`host-header-injection`). Each confirms by a distinctive computed/
+  decoded marker so a merely reflected payload never produces a false positive.
+  All auto-register in `default_active_checks`, so they run through `activescan`,
+  `dast`, `autopilot`, and `retest` on both the CLI and the web workbench.
+- **Payload chaining.** `camio encode --chain "url>url"` composes encodings *in
+  sequence* (e.g. double-URL-encoding) for WAF evasion, distinct from the existing
+  alternative-encoding expansion.
+- **Attack-vector chaining.** `camio chains` composes the stored findings into
+  multi-step exploitation paths (e.g. SSTI → RCE, path traversal → secret
+  disclosure, reflected XSS + CORS → cross-origin exfiltration), each with ordered
+  steps, a rationale, and an escalated severity.
+- **AI-assist tasks** (`camio ai --task …`): `attack-plan` (next-step test vectors
+  from a surface/findings summary), `payload-mutations` (WAF-evasion variants of a
+  payload), and `triage` (impact prioritization) — each with an authorized-security
+  system prompt and an untrusted-input redactor applied before prompting.
+- **Durable, append-only audit log** of every gated action (`camio audit`;
+  actor/class/action/target/decision), recorded at the policy-decision point.
+- **Encrypted workspace export** (`camio backup --encrypt` / `--decrypt`):
+  XChaCha20-Poly1305 with a PBKDF2-HMAC-SHA256 key; passphrase read from
+  `$CAMIO_BACKUP_PASSPHRASE`, container and temp written `0600`.
+- **Compare-to-baseline** (`camio baseline set|list|diff|rm`): pin a stored
+  exchange and diff later ones against it.
+- **Finding retest** (`camio retest <id>`): replay a finding's evidence request,
+  re-run the checks, report still-present vs fixed, and optionally update status —
+  fully scope/confirm gated.
+- **Collections** (`camio collection`): named groups spanning exchanges, findings,
+  and tasks.
+- **XML input discovery and injection** for `application/xml`/`text/xml` bodies
+  (nested element text and attributes), wired into the fuzzing path.
+- **CycloneDX SBOM** (`camio sbom`) of the build's dependency graph, with package
+  URLs and SHA-256 hashes, parsed from the embedded `Cargo.lock`.
+- **Headless DAST** (`camio dast`): a non-interactive baseline + active + passive
+  sweep emitting a stable machine-readable result contract and documented exit
+  codes for CI gating.
+- **Typed, versioned workflow documents** (`camio workflow`): a validated,
+  forward-only request → scan → transform pipeline, plus a web "Workflow builder"
+  backed by the real engine validator.
+- **Browser-native capture over WebDriver BiDi** (`camio capture`) with a full
+  RFC 6455 WebSocket client and interception command set.
+- **Web workbench GUI parity.** Browser panels + endpoints for nearly every CLI
+  capability: audit log, collections, baselines, labels, exchange diff, combo,
+  encode, encode-chain, favicon hash, user-agent, CAPTCHA/PoW detection, SBOM,
+  retest, headless DAST, active scan, crawl, and attack chains.
+
+### Changed
+
+- Passive check set expanded (now 25), including a present-but-weak CSP check.
+- Store schema migrated through v12 (audit-log, collections, and baseline tables),
+  additive and backward-compatible.
+- Plugin host now enforces an environment-variable permission model (the child
+  runs with a scrubbed environment plus only manifest-declared names) and the
+  declared network/filesystem permissions are surfaced before a plugin is run.
+
+### Fixed
+
+- Plugin runner no longer deadlocks when a large input is piped to a streaming
+  plugin (stdin is fed on its own thread after the output drains start).
+
 ## [0.4.0] — 2026-11-27
 
 ### Added

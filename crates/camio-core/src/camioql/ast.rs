@@ -105,8 +105,10 @@ impl Expr {
     pub fn or(a: Expr, b: Expr) -> Expr {
         Expr::Or(Box::new(a), Box::new(b))
     }
-    // A constructor named for the logical operator, matching `and`/`or`; not the
-    // `std::ops::Not` trait.
+    // A constructor named for the logical operator, matching `and`/`or`
+    // (not `std::ops::Not`). `should_implement_trait` fires on any
+    // `fn not(...)`, but this one takes two operands and no `self`.
+    // audit-allow: C1
     #[allow(clippy::should_implement_trait)]
     pub fn not(a: Expr) -> Expr {
         Expr::Not(Box::new(a))

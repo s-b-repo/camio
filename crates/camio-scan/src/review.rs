@@ -282,7 +282,7 @@ mod tests {
         let saved = store.finding_reviews(None, 0, 20).unwrap();
         let listing = saved
             .iter()
-            .find(|finding| finding.rule.as_deref() == Some("directory-listing"))
+            .find(|finding| finding.finding.rule.as_deref() == Some("directory-listing"))
             .unwrap();
         assert_eq!(listing.finding.evidence, vec![evidence]);
         let finding = listing.finding.id;

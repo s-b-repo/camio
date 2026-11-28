@@ -6,7 +6,7 @@
 //! The runner disables Nuclei's update check and its public interactsh OOB
 //! server by default (Camio is local-first and ships its own OAST collector).
 
-use crate::{IntegrationError, MAX_OUTPUT_BYTES};
+use crate::{join_output, IntegrationError, MAX_OUTPUT_BYTES};
 use camio_core::{Confidence, Finding, FindingId, Severity};
 use serde::Deserialize;
 use std::io::{BufRead, BufReader, Write};
@@ -157,6 +157,8 @@ pub fn nuclei_to_findings(items: &[NucleiFinding]) -> Vec<Finding> {
                 detail,
                 evidence: Vec::new(),
                 created_at_ms: 0,
+                // The nuclei template id is this finding's natural rule id.
+                rule: Some(n.template_id.clone()),
             }
         })
         .collect()
@@ -241,7 +243,10 @@ pub fn run_nuclei_cancellable<C: Fn() -> bool>(
     // Feed targets on stdin, then close it so Nuclei starts.
     if let Some(mut stdin) = child.stdin.take() {
         for t in targets {
-            let _ = writeln!(stdin, "{t}");
+            // The child is already gone (or the pipe broke) mid-feed: the
+            // stdout records show which targets it actually accepted, and the
+            // drop of stdin closes the pipe so the wait below still ends.
+            camio_core::expected(writeln!(stdin, "{t}"));
         }
     }
 
@@ -274,7 +279,9 @@ pub fn run_nuclei_cancellable<C: Fn() -> bool>(
             Ok(Some(_)) => break,
             Ok(None) => {
                 if start.elapsed() > opts.timeout || should_cancel() {
-                    let _ = child.kill();
+                    // Overran its bound or was cancelled: kill it before the
+                    // reap below, which does the wait either way.
+                    camio_core::expected(child.kill());
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(100));
@@ -282,8 +289,10 @@ pub fn run_nuclei_cancellable<C: Fn() -> bool>(
             Err(e) => return Err(IntegrationError::Run(e.to_string())),
         }
     }
-    let _ = child.wait();
-    let output = reader.join().unwrap_or_default();
+    // Reap the finished run: kill is a no-op once exited, wait clears the
+    // zombie so a long-lived Camio process does not accumulate them.
+    camio_core::sync::reap(&mut child);
+    let output = join_output(reader, "nuclei");
     Ok(parse_nuclei_jsonl(&output))
 }
 

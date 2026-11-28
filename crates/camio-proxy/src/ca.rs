@@ -198,7 +198,7 @@ impl CertAuthority {
     pub fn server_config(&self, host: &str) -> Result<Arc<ServerConfig>, CaError> {
         let host = host.trim().to_ascii_lowercase();
         {
-            let mut cache = self.configs.lock().expect("CA config cache poisoned");
+            let mut cache = camio_core::sync::recovered_lock(&self.configs);
             if let Some(cfg) = cache.get(&host) {
                 // Refresh recency (move to the back of the eviction order).
                 let cfg = cfg.clone();
@@ -208,7 +208,7 @@ impl CertAuthority {
             }
         }
         let cfg = Arc::new(self.build_config(&host)?);
-        let mut cache = self.configs.lock().expect("CA config cache poisoned");
+        let mut cache = camio_core::sync::recovered_lock(&self.configs);
         cache.insert(host.clone(), cfg.clone());
         while cache.len() > MAX_CACHED_CONFIGS {
             // `HashMap` iteration order is arbitrary; dropping any oldest-ish

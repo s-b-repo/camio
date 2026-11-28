@@ -11,7 +11,7 @@
 use crate::params::{dedup_params, discovered_params, with_param};
 use crate::{finding, ActiveCheck, Sender};
 use camio_automate::{discover_inputs, DiscoveredInput, InputKind};
-use camio_core::{Confidence, Finding, HttpRequest, Severity};
+use camio_core::{Body, Confidence, Finding, HttpRequest, Severity};
 use regex::Regex;
 use std::sync::OnceLock;
 
@@ -289,6 +289,296 @@ impl ActiveCheck for OpenRedirect {
                 ));
             }
         }
+        out
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HTTP method audit
+// ---------------------------------------------------------------------------
+
+/// Distinctive sub-path for write-method capability probes. A PUT/DELETE/PATCH is
+/// sent to `{resource}/{segment}` — a path that does not exist — so the probe
+/// measures whether the *method itself* is accepted without ever touching the
+/// real resource (plan §16: active testing must stay bounded and must not be
+/// gratuitously destructive).
+const METHOD_PROBE_SEGMENT: &str = "camio-method-probe-7f3a9e2b";
+
+/// Marker carried in a TRACE probe header. A server that echoes the whole request
+/// back (Cross-Site Tracing) reflects it in the response body, which is how the
+/// check distinguishes a real echo from a generic 200.
+const TRACE_MARKER: &str = "camio-xst-7f3a9e2b";
+
+/// HTTP methods that an application server should not normally expose and that,
+/// once enabled, materially widen the attack surface (arbitrary write, delete,
+/// request reflection, or proxying).
+const DANGEROUS_METHODS: &[&str] = &["PUT", "DELETE", "PATCH", "TRACE", "CONNECT"];
+
+/// Audits which HTTP methods a resource accepts and reports the dangerous ones.
+///
+/// Four signals, each confirmed by a real (scope-gated) send and keyed off the
+/// response **status** (plan §10 "Results and filters"):
+///
+///  * **Dangerous methods advertised** — the `Allow`/`Access-Control-Allow-Methods`
+///    response to an `OPTIONS` lists PUT/DELETE/PATCH/TRACE/CONNECT (Low/Firm).
+///  * **Cross-Site Tracing** — a `TRACE` returns `2xx` and echoes the request
+///    (Low/Firm).
+///  * **Method-based access-control bypass** — the base method is blocked
+///    (`401`/`403`/`405`) but a different method returns the resource (`2xx`).
+///    The classic "403 on GET, 200 on HEAD" flaw (High/Tentative).
+///  * **Write method enabled** — a `PUT`/`DELETE`/`PATCH` to a non-existent
+///    sub-path is *accepted* (`2xx`), proving the verb is processed (High/Firm).
+///    Opt-in only: these are state-changing verbs, so they stay behind
+///    [`with_write_methods`](HttpMethodAudit::with_write_methods) **and** the
+///    caller's destructive policy gate, and they target a randomized path so no
+///    real resource is modified.
+///
+/// Unlike the injection checks this one audits the *resource*, not its
+/// parameters, so it probes even a request with no inputs (e.g. an `/admin` page
+/// that is `403` on GET but `200` on HEAD). Every probe still flows through the
+/// injected [`Sender`], so scope, confirmation and budget are enforced there.
+pub struct HttpMethodAudit {
+    /// When set, also probe the state-changing verbs PUT/DELETE/PATCH against a
+    /// randomized non-existent sub-path. Off by default: these verbs mutate, so
+    /// they require an explicit opt-in here *and* destructive authorization at
+    /// the [`Sender`]/policy layer.
+    pub probe_write_methods: bool,
+}
+
+impl HttpMethodAudit {
+    /// The safe default: read-only probes only (OPTIONS/TRACE/HEAD). This is the
+    /// variant registered in [`crate::default_active_checks`].
+    pub const fn safe() -> Self {
+        Self {
+            probe_write_methods: false,
+        }
+    }
+
+    /// Also probe the write verbs PUT/DELETE/PATCH. The probes target a
+    /// non-existent sub-path so no real resource is written or deleted, but they
+    /// are still mutating sends: only enable this with destructive authorization
+    /// at the policy layer.
+    pub const fn with_write_methods() -> Self {
+        Self {
+            probe_write_methods: true,
+        }
+    }
+
+    /// Run **only** the write-method capability probes (PUT/DELETE/PATCH against a
+    /// non-existent sub-path), independent of the `probe_write_methods` flag.
+    ///
+    /// This is the add-on an orchestrator uses when the read-only method audit has
+    /// already run via [`crate::default_active_checks`] and it wants the opt-in
+    /// write probes without repeating the OPTIONS/TRACE/HEAD findings. The probes
+    /// are mutating sends: only call this with destructive authorization at the
+    /// [`Sender`]/policy layer. No real resource is written or deleted — each verb
+    /// lands on `{resource}/{segment}`, a path that does not exist.
+    pub fn run_write_probes(&self, base: &HttpRequest, send: &Sender) -> Vec<Finding> {
+        let mut out: Vec<Finding> = Vec::new();
+        let probe_url = probe_path_url(&base.url);
+        for method in ["PUT", "DELETE", "PATCH"] {
+            let mut req = base.clone();
+            req.method = method.to_string();
+            req.url = probe_url.clone();
+            // A clearly-marked sentinel body for the verbs that carry one.
+            req.body = if method == "DELETE" {
+                Body::empty()
+            } else {
+                Body::from_text(format!(
+                    "camio method-audit capability probe ({METHOD_PROBE_SEGMENT}); inert, safe to delete\n"
+                ))
+            };
+            let Some(ex) = send(req) else {
+                continue;
+            };
+            let Some(resp) = &ex.response else {
+                continue;
+            };
+            if is_success(resp.status) {
+                out.push(finding(
+                    format!("HTTP {method} method enabled"),
+                    Severity::High,
+                    Confidence::Firm,
+                    format!(
+                        "A `{method}` request to `{probe_url}` (a non-existent sub-path) was \
+                         accepted (HTTP {}). The server processes `{method}`, which allows {}. If \
+                         this reflects the real configuration rather than a catch-all handler, it \
+                         is a serious exposure. Verify manually and, for PUT, remove any file the \
+                         probe may have created; then restrict the server to the methods the \
+                         application actually needs.",
+                        resp.status,
+                        match method {
+                            "PUT" => "writing arbitrary files (web-shell upload)",
+                            "DELETE" => "deleting arbitrary resources",
+                            _ => "modifying resources in place",
+                        }
+                    ),
+                    ex.id,
+                ));
+            }
+        }
+        // These probes run directly (outside `run_active`), so tag them here.
+        for f in &mut out {
+            f.rule = Some(self.id().to_string());
+        }
+        out
+    }
+}
+
+/// Split an `Allow`-style header value into its method tokens, trimmed and
+/// non-empty. `GET, POST, HEAD` → `["GET", "POST", "HEAD"]`.
+fn parse_allow(header: &str) -> Vec<String> {
+    header
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Build the sub-path URL a write-method capability probe targets: the request's
+/// path with query and fragment dropped, trailing slash removed, and the
+/// distinctive [`METHOD_PROBE_SEGMENT`] appended. The result is a path that does
+/// not exist, so a PUT/DELETE/PATCH there cannot overwrite or delete a real
+/// resource — it only reveals whether the verb is processed.
+fn probe_path_url(url: &str) -> String {
+    let no_fragment = url.split('#').next().unwrap_or(url);
+    let path_part = no_fragment.split('?').next().unwrap_or(no_fragment);
+    let trimmed = path_part.trim_end_matches('/');
+    format!("{trimmed}/{METHOD_PROBE_SEGMENT}")
+}
+
+/// Whether a status is a 2xx success (the resource/verb was accepted).
+fn is_success(status: u16) -> bool {
+    (200..=299).contains(&status)
+}
+
+impl ActiveCheck for HttpMethodAudit {
+    fn id(&self) -> &'static str {
+        "http-method-audit"
+    }
+
+    fn title(&self) -> &'static str {
+        "HTTP method audit"
+    }
+
+    fn severity(&self) -> Severity {
+        Severity::High
+    }
+
+    fn run(&self, base: &HttpRequest, send: &Sender) -> Vec<Finding> {
+        let mut out = Vec::new();
+
+        // Baseline: the resource's normal method. If it is refused (out of scope,
+        // over budget, blocked by the SSRF guard) the resource is unreachable and
+        // there is nothing to audit.
+        let Some(base_ex) = send(base.clone()) else {
+            return out;
+        };
+        let base_status = match &base_ex.response {
+            Some(r) => r.status,
+            None => return out,
+        };
+        let base_method = base.method.clone();
+
+        // 1. OPTIONS — the server's own statement of which methods it allows.
+        let mut options_req = base.clone();
+        options_req.method = "OPTIONS".into();
+        options_req.body = Body::empty();
+        if let Some(ex) = send(options_req) {
+            if let Some(resp) = &ex.response {
+                let allow = resp
+                    .headers
+                    .get("Allow")
+                    .or_else(|| resp.headers.get("Access-Control-Allow-Methods"));
+                if let Some(allow) = allow {
+                    let listed = parse_allow(allow);
+                    let dangerous: Vec<&str> = DANGEROUS_METHODS
+                        .iter()
+                        .copied()
+                        .filter(|m| listed.iter().any(|l| l.eq_ignore_ascii_case(m)))
+                        .collect();
+                    if !dangerous.is_empty() {
+                        out.push(finding(
+                            "Dangerous HTTP methods advertised",
+                            Severity::Low,
+                            Confidence::Firm,
+                            format!(
+                                "The response to an `OPTIONS` request advertises dangerous \
+                                 method(s) in its `Allow` header: **{}** (full header: `{allow}`). \
+                                 PUT/DELETE/PATCH permit writing or deleting resources, TRACE \
+                                 enables Cross-Site Tracing, and CONNECT can proxy arbitrary \
+                                 connections. Confirm which are actually honoured and disable the \
+                                 ones the application does not require.",
+                                dangerous.join(", ")
+                            ),
+                            ex.id,
+                        ));
+                    }
+                }
+            }
+        }
+
+        // 2. TRACE — a 2xx that echoes the request is Cross-Site Tracing (XST).
+        let mut trace_req = base.clone();
+        trace_req.method = "TRACE".into();
+        trace_req.body = Body::empty();
+        trace_req.headers.push("X-Camio-Trace", TRACE_MARKER);
+        if let Some(ex) = send(trace_req) {
+            if let Some(resp) = &ex.response {
+                if is_success(resp.status) && resp.body.as_text().contains(TRACE_MARKER) {
+                    out.push(finding(
+                        "Cross-Site Tracing (TRACE enabled)",
+                        Severity::Low,
+                        Confidence::Firm,
+                        format!(
+                            "A `TRACE` request returned HTTP {} and echoed the request back \
+                             (the `X-Camio-Trace` marker was reflected in the body). TRACE lets an \
+                             attacker read request headers — including ones added by intermediaries \
+                             (session cookies, auth tokens) — via Cross-Site Tracing. Disable TRACE \
+                             on the web server and any upstream proxy.",
+                            resp.status
+                        ),
+                        ex.id,
+                    ));
+                }
+            }
+        }
+
+        // 3. Access-control differential — the base method is blocked but a
+        //    different method returns the resource (method-based ACL bypass).
+        if matches!(base_status, 401 | 403 | 405) {
+            let mut head_req = base.clone();
+            head_req.method = "HEAD".into();
+            head_req.body = Body::empty();
+            if let Some(ex) = send(head_req) {
+                if let Some(resp) = &ex.response {
+                    if is_success(resp.status) {
+                        out.push(finding(
+                            "Access control bypass via HTTP method",
+                            Severity::High,
+                            Confidence::Tentative,
+                            format!(
+                                "A `{base_method}` request to this resource was blocked (HTTP \
+                                 {base_status}), but a `HEAD` request returned HTTP {}. The \
+                                 access-control decision is tied to the HTTP method rather than the \
+                                 resource, so changing the verb bypasses it — a method-based access \
+                                 control flaw. Confirm the response content, then enforce \
+                                 authorization independently of the request method.",
+                                resp.status
+                            ),
+                            ex.id,
+                        ));
+                    }
+                }
+            }
+        }
+
+        // 4. Write-method capability (opt-in; mutating verbs on a path that does
+        //    not exist, so a real resource is never written or deleted).
+        if self.probe_write_methods {
+            out.extend(self.run_write_probes(base, send));
+        }
+
         out
     }
 }
@@ -572,6 +862,200 @@ mod tests {
         let findings = OpenRedirect.run(&base, send);
         assert_eq!(findings.len(), 1);
         assert!(findings[0].title.contains("`goto`"));
+    }
+
+    // --- HttpMethodAudit --------------------------------------------------
+
+    /// Build a stored exchange with a chosen status, optional headers, and body.
+    fn resp_exchange(
+        req: HttpRequest,
+        id: i64,
+        status: u16,
+        headers: &[(&str, &str)],
+        body: &str,
+    ) -> HttpExchange {
+        let mut h = HeaderList::new();
+        for (k, v) in headers {
+            h.push(*k, *v);
+        }
+        let resp = HttpResponse {
+            status,
+            version: HttpVersion::Http11,
+            reason: None,
+            headers: h,
+            body: Body::from_text(body),
+        };
+        let mut ex = HttpExchange::new(req, Source::Scanner).with_response(resp);
+        ex.id = ExchangeId(id);
+        ex
+    }
+
+    #[test]
+    fn method_audit_flags_dangerous_options_allow() {
+        let base = HttpRequest::get("https://x.test/api/thing");
+        let sender = |req: HttpRequest| -> Option<HttpExchange> {
+            match req.method.as_str() {
+                "OPTIONS" => Some(resp_exchange(
+                    req,
+                    51,
+                    204,
+                    &[("Allow", "GET, POST, PUT, DELETE, OPTIONS")],
+                    "",
+                )),
+                // Base GET succeeds; TRACE blocked.
+                "GET" => Some(resp_exchange(req, 50, 200, &[], "ok")),
+                _ => Some(resp_exchange(req, 59, 405, &[], "")),
+            }
+        };
+        let send: &Sender = &sender;
+        let findings = HttpMethodAudit::safe().run(&base, send);
+        let f = findings
+            .iter()
+            .find(|f| f.title == "Dangerous HTTP methods advertised")
+            .expect("expected an advertised-methods finding");
+        assert_eq!(f.severity, Severity::Low);
+        assert_eq!(f.evidence, vec![ExchangeId(51)]);
+        assert!(f.detail.contains("PUT"));
+        assert!(f.detail.contains("DELETE"));
+    }
+
+    #[test]
+    fn method_audit_flags_trace_xst() {
+        let base = HttpRequest::get("https://x.test/");
+        let sender = |req: HttpRequest| -> Option<HttpExchange> {
+            match req.method.as_str() {
+                // Echo the request body/headers back, reflecting the marker.
+                "TRACE" => {
+                    let echoed = format!("TRACE / HTTP/1.1\nX-Camio-Trace: {TRACE_MARKER}\n");
+                    Some(resp_exchange(req, 61, 200, &[], &echoed))
+                }
+                "GET" => Some(resp_exchange(req, 60, 200, &[], "home")),
+                _ => Some(resp_exchange(req, 69, 405, &[], "")),
+            }
+        };
+        let send: &Sender = &sender;
+        let findings = HttpMethodAudit::safe().run(&base, send);
+        let f = findings
+            .iter()
+            .find(|f| f.title.contains("Cross-Site Tracing"))
+            .expect("expected an XST finding");
+        assert_eq!(f.severity, Severity::Low);
+        assert_eq!(f.evidence, vec![ExchangeId(61)]);
+    }
+
+    #[test]
+    fn method_audit_flags_method_based_acl_bypass() {
+        // GET is forbidden, but HEAD returns the resource: ACL keyed off method.
+        let base = HttpRequest::get("https://x.test/admin");
+        let sender = |req: HttpRequest| -> Option<HttpExchange> {
+            match req.method.as_str() {
+                "GET" => Some(resp_exchange(req, 70, 403, &[], "Forbidden")),
+                "HEAD" => Some(resp_exchange(req, 71, 200, &[], "")),
+                "OPTIONS" => Some(resp_exchange(req, 72, 204, &[("Allow", "GET, HEAD")], "")),
+                _ => Some(resp_exchange(req, 79, 405, &[], "")),
+            }
+        };
+        let send: &Sender = &sender;
+        let findings = HttpMethodAudit::safe().run(&base, send);
+        let f = findings
+            .iter()
+            .find(|f| f.title == "Access control bypass via HTTP method")
+            .expect("expected an ACL-bypass finding");
+        assert_eq!(f.severity, Severity::High);
+        assert_eq!(f.confidence, Confidence::Tentative);
+        assert_eq!(f.evidence, vec![ExchangeId(71)]);
+    }
+
+    #[test]
+    fn method_audit_clean_resource_has_no_findings() {
+        let base = HttpRequest::get("https://x.test/page");
+        let sender = |req: HttpRequest| -> Option<HttpExchange> {
+            match req.method.as_str() {
+                "GET" => Some(resp_exchange(req, 80, 200, &[], "page")),
+                "OPTIONS" => Some(resp_exchange(
+                    req,
+                    81,
+                    204,
+                    &[("Allow", "GET, HEAD, OPTIONS")],
+                    "",
+                )),
+                // TRACE disabled, everything else blocked.
+                _ => Some(resp_exchange(req, 89, 405, &[], "")),
+            }
+        };
+        let send: &Sender = &sender;
+        assert!(HttpMethodAudit::safe().run(&base, send).is_empty());
+    }
+
+    #[test]
+    fn method_audit_safe_variant_never_sends_write_methods() {
+        let base = HttpRequest::get("https://x.test/upload");
+        let saw_write = Cell::new(false);
+        let sender = |req: HttpRequest| -> Option<HttpExchange> {
+            if matches!(req.method.as_str(), "PUT" | "DELETE" | "PATCH") {
+                saw_write.set(true);
+            }
+            Some(resp_exchange(req, 1, 200, &[], "ok"))
+        };
+        let send: &Sender = &sender;
+        let _ = HttpMethodAudit::safe().run(&base, send);
+        assert!(!saw_write.get(), "safe() must not send PUT/DELETE/PATCH");
+    }
+
+    #[test]
+    fn method_audit_write_methods_detects_enabled_put() {
+        let base = HttpRequest::get("https://x.test/files/report.pdf");
+        let put_url = Cell::new(String::new());
+        let sender = |req: HttpRequest| -> Option<HttpExchange> {
+            match req.method.as_str() {
+                "GET" => Some(resp_exchange(req, 90, 200, &[], "pdf")),
+                "PUT" => {
+                    put_url.set(req.url.clone());
+                    Some(resp_exchange(req, 91, 201, &[], ""))
+                }
+                // DELETE/PATCH rejected.
+                _ => Some(resp_exchange(req, 99, 405, &[], "")),
+            }
+        };
+        let send: &Sender = &sender;
+        let findings = HttpMethodAudit::with_write_methods().run(&base, send);
+        let f = findings
+            .iter()
+            .find(|f| f.title == "HTTP PUT method enabled")
+            .expect("expected a PUT-enabled finding");
+        assert_eq!(f.severity, Severity::High);
+        assert_eq!(f.confidence, Confidence::Firm);
+        assert_eq!(f.evidence, vec![ExchangeId(91)]);
+        // The PUT landed on a non-existent sub-path, never the real resource.
+        assert_eq!(
+            put_url.take(),
+            format!("https://x.test/files/report.pdf/{METHOD_PROBE_SEGMENT}")
+        );
+    }
+
+    #[test]
+    fn method_audit_refused_baseline_yields_nothing() {
+        let base = HttpRequest::get("https://x.test/");
+        let calls = Cell::new(0usize);
+        let sender = |_req: HttpRequest| -> Option<HttpExchange> {
+            calls.set(calls.get() + 1);
+            None // out of scope / refused
+        };
+        let send: &Sender = &sender;
+        assert!(HttpMethodAudit::with_write_methods().run(&base, send).is_empty());
+        assert_eq!(calls.get(), 1, "stops after the baseline is refused");
+    }
+
+    #[test]
+    fn probe_path_url_appends_segment_and_drops_query() {
+        assert_eq!(
+            probe_path_url("https://x.test/a/b?x=1#frag"),
+            format!("https://x.test/a/b/{METHOD_PROBE_SEGMENT}")
+        );
+        assert_eq!(
+            probe_path_url("https://x.test/a/"),
+            format!("https://x.test/a/{METHOD_PROBE_SEGMENT}")
+        );
     }
 
     // --- regex / signature helpers ---------------------------------------
